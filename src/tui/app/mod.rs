@@ -302,6 +302,7 @@ pub enum InputAction {
     AddProject,
     ScanDirectory,
     RenameSession { session_id: SessionId },
+    MoveToSection { session_id: SessionId },
 }
 
 /// Action to perform when confirm modal is confirmed
@@ -431,7 +432,8 @@ impl AppUiState {
             | BindableAction::RenameSession
             | BindableAction::RestartSession
             | BindableAction::OpenInEditor
-            | BindableAction::OpenPullRequest => has_session,
+            | BindableAction::OpenPullRequest
+            | BindableAction::MoveToSection => has_session,
             // Removing a project is only meaningful from a project row (no session selected)
             BindableAction::RemoveProject => has_project && !has_session,
             // GenerateSummary only does something when the Info pane is active

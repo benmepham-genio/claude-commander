@@ -116,6 +116,12 @@ pub struct Config {
     /// Theme color overrides
     #[serde(default)]
     pub theme: ThemeOverrides,
+
+    /// Section definitions for grouping sessions in the TUI list.
+    /// First-match-wins in declared order; unmatched sessions fall into a
+    /// built-in "Other" catch-all.
+    #[serde(default)]
+    pub sections: Vec<crate::session::SectionConfig>,
 }
 
 impl Default for Config {
@@ -149,6 +155,7 @@ impl Default for Config {
             log_file: None,
             keybindings: KeyBindings::default(),
             theme: ThemeOverrides::default(),
+            sections: Vec::new(),
         }
     }
 }
@@ -368,6 +375,32 @@ fn parse_key_code(s: &str) -> KeyCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_sections_toml_deserialises() {
+        let toml_src = r#"
+[[sections]]
+name = "Needs Review"
+has_label = "ready-for-review"
+is_draft = false
+
+[[sections]]
+name = "Drafts"
+pr_state = "open"
+is_draft = true
+
+[[sections]]
+name = "Blocked"
+has_label = ["blocked", "waiting-on-author"]
+"#;
+        let config: Config = toml::from_str(toml_src).expect("toml parse");
+
+        assert_eq!(config.sections.len(), 3);
+        assert_eq!(config.sections[0].name, "Needs Review");
+        assert_eq!(config.sections[1].name, "Drafts");
+        assert_eq!(config.sections[1].is_draft, Some(true));
+        assert_eq!(config.sections[2].name, "Blocked");
+    }
 
     #[test]
     fn test_default_config() {

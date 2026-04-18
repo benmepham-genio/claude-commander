@@ -692,6 +692,7 @@ impl App {
                     SessionListItem::Worktree { id, .. } => {
                         project_names.insert(*id, current_project_name.clone());
                     }
+                    SessionListItem::SectionHeader { .. } => {}
                 }
             }
 
@@ -785,6 +786,44 @@ impl App {
                 on_confirm: ConfirmAction::DeleteSession { session_id },
             };
         }
+    }
+
+    /// Open the "Move to section" modal for the selected session.
+    /// Pre-fills with the current override (if any). Submitting an empty
+    /// value clears the override, restoring auto section rules.
+    pub(super) async fn handle_move_to_section(&mut self) {
+        if self.config.sections.is_empty() {
+            self.ui_state.status_message = Some((
+                "No [[sections]] configured".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        }
+        let Some(session_id) = self.ui_state.selected_session_id else {
+            return;
+        };
+        let current_override = {
+            let state = self.store.read().await;
+            match state.get_session(&session_id) {
+                Some(s) => s.section_override.clone().unwrap_or_default(),
+                None => return,
+            }
+        };
+        let names: Vec<String> = self
+            .config
+            .sections
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        self.ui_state.modal = Modal::Input {
+            title: "Move to Section".to_string(),
+            prompt: format!(
+                "Section name (empty = Auto). Configured: {}",
+                names.join(", ")
+            ),
+            value: current_override,
+            on_submit: InputAction::MoveToSection { session_id },
+        };
     }
 
     /// Handle rename session - show input modal pre-filled with current title.
@@ -914,6 +953,26 @@ impl App {
                     .mutate(move |state| {
                         if let Some(session) = state.get_session_mut(&session_id) {
                             session.title = new_title;
+                        }
+                    })
+                    .await;
+                self.refresh_list_items().await;
+            }
+            InputAction::MoveToSection { session_id } => {
+                let trimmed = value.trim().to_string();
+                let new_override = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                };
+                let sections = self.config.sections.clone();
+                let now = chrono::Utc::now();
+                let _ = self
+                    .store
+                    .mutate(move |state| {
+                        if let Some(session) = state.get_session_mut(&session_id) {
+                            session.section_override = new_override;
+                            crate::session::apply_assignment(session, &sections, now);
                         }
                     })
                     .await;

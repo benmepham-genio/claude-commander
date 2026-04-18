@@ -192,6 +192,22 @@ impl<'a> TreeList<'a> {
 
                     ListItem::new(line)
                 }
+                SessionListItem::SectionHeader { name, count } => {
+                    let line = Line::from(vec![
+                        Span::raw(" "),
+                        Span::styled(
+                            name.clone(),
+                            Style::default()
+                                .fg(self.theme.text_accent)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!(" ({})", count),
+                            Style::default().fg(self.theme.text_secondary),
+                        ),
+                    ]);
+                    ListItem::new(line)
+                }
             })
             .collect()
     }

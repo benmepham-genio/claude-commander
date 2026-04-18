@@ -280,6 +280,38 @@ mod tests {
     }
 
     #[test]
+    fn test_section_fields_roundtrip() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let project_id = project.id;
+        state.add_project(project);
+
+        let mut session = create_test_session(project_id);
+        session.section_override = Some("Needs Review".to_string());
+        session.current_section = Some("In Progress".to_string());
+        let stamp = session.entered_section_at;
+        let session_id = session.id;
+        state.add_session(session);
+
+        state.save_to(&state_path).unwrap();
+        let loaded = AppState::load_from(&state_path).unwrap();
+        let loaded_session = loaded.get_session(&session_id).unwrap();
+
+        assert_eq!(
+            loaded_session.section_override.as_deref(),
+            Some("Needs Review")
+        );
+        assert_eq!(
+            loaded_session.current_section.as_deref(),
+            Some("In Progress")
+        );
+        assert_eq!(loaded_session.entered_section_at, stamp);
+    }
+
+    #[test]
     fn test_save_load_roundtrip() {
         let temp_dir = TempDir::new().unwrap();
         let state_path = temp_dir.path().join("state.json");

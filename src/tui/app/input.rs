@@ -456,6 +456,9 @@ impl App {
             UserCommand::RenameSession => {
                 self.handle_rename_session().await;
             }
+            UserCommand::MoveToSection => {
+                self.handle_move_to_section().await;
+            }
             UserCommand::RestartSession => {
                 self.handle_restart_session();
             }

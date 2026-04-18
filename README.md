@@ -133,6 +133,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `o` | Open PR in browser (when the session has a PR) |
 | `S` | Scan directory for git repos and add them as projects |
 | `s` | Open shell in worktree |
+| palette only | Move session to section (manual override; see `[[sections]]` below) |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |
 | `Ctrl-u/d` or `PageUp/Down` | Page up/down in preview |
@@ -244,6 +245,28 @@ state_sync_interval_ms = 2000
 # navigate_up = ["k", "Up"]
 # quit = ["q", "Ctrl-c"]
 # toggle_pane = ["Tab"]
+
+# Session list sections — group sessions under configurable headers based on
+# GitHub PR state. First-match-wins in declared order; sessions that don't
+# match any predicate fall into a built-in "Other" catch-all at the bottom.
+# When [[sections]] is empty (default), the list keeps its project-grouped
+# view. When non-empty, the list is grouped by section across all projects.
+# Open the palette and run "Move session to section…" to pin a session to a
+# specific section (empty input clears the override, restoring auto rules).
+#
+# [[sections]]
+# name = "Needs Review"
+# has_label = "ready-for-review"   # string or array (any-of)
+# is_draft = false
+#
+# [[sections]]
+# name = "Drafts"
+# pr_state = "open"                # "open" | "closed" | "merged"
+# is_draft = true
+#
+# [[sections]]
+# name = "Merged"
+# pr_state = "merged"
 ```
 
 ### AI Summary

@@ -248,6 +248,18 @@ pub struct WorktreeSession {
     /// Whether the session has unread output (agent finished but user hasn't attached)
     #[serde(default)]
     pub unread: bool,
+    /// Manual section override. When set and matching a configured section,
+    /// the session is pinned there regardless of predicate rules.
+    #[serde(default)]
+    pub section_override: Option<String>,
+    /// Cached current section name (None = Other / catch-all). Updated by
+    /// `apply_assignment`; used to detect transitions for `entered_section_at`.
+    #[serde(default)]
+    pub current_section: Option<String>,
+    /// Timestamp the session entered its current section. Used for
+    /// oldest-in-section-first sort order.
+    #[serde(default = "chrono::Utc::now")]
+    pub entered_section_at: DateTime<Utc>,
 }
 
 impl WorktreeSession {
@@ -286,6 +298,9 @@ impl WorktreeSession {
             pr_draft: false,
             pr_labels: Vec::new(),
             unread: false,
+            section_override: None,
+            current_section: None,
+            entered_section_at: now,
         }
     }
 
@@ -324,6 +339,9 @@ impl WorktreeSession {
             pr_draft: false,
             pr_labels: Vec::new(),
             unread: false,
+            section_override: None,
+            current_section: None,
+            entered_section_at: now,
         }
     }
 
@@ -380,6 +398,9 @@ pub enum SessionListItem {
         agent_state: Option<AgentState>,
         unread: bool,
     },
+    /// A section header (used only when config.sections is non-empty).
+    /// Not selectable — navigation skips these rows.
+    SectionHeader { name: String, count: usize },
 }
 
 impl SessionListItem {
@@ -388,6 +409,7 @@ impl SessionListItem {
         match self {
             Self::Project { id, .. } => format!("project:{}", id),
             Self::Worktree { id, .. } => format!("worktree:{}", id),
+            Self::SectionHeader { name, .. } => format!("section:{}", name),
         }
     }
 
@@ -399,6 +421,11 @@ impl SessionListItem {
     /// Check if this is a worktree item
     pub fn is_worktree(&self) -> bool {
         matches!(self, Self::Worktree { .. })
+    }
+
+    /// Whether navigation/selection should land on this row.
+    pub fn is_selectable(&self) -> bool {
+        !matches!(self, Self::SectionHeader { .. })
     }
 }
 

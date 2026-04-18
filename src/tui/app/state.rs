@@ -55,6 +55,8 @@ impl App {
                 }
             }
             StateUpdate::PrStatusReady { results } => {
+                let sections = self.config.sections.clone();
+                let now = chrono::Utc::now();
                 let _ = self
                     .store
                     .mutate(move |state| {
@@ -70,6 +72,9 @@ impl App {
                                     .unwrap_or_default();
                                 session.pr_merged = pr_info.as_ref().is_some_and(|p| p.merged());
                             }
+                        }
+                        for session in state.sessions.values_mut() {
+                            crate::session::apply_assignment(session, &sections, now);
                         }
                     })
                     .await;
@@ -326,59 +331,21 @@ impl App {
     pub(super) async fn refresh_list_items(&mut self) {
         let state = self.store.read().await;
 
-        let mut items = Vec::new();
+        let items = if self.config.sections.is_empty() {
+            build_project_grouped_items(&state, &self.ui_state.agent_states)
+        } else {
+            build_section_grouped_items(&state, &self.config.sections, &self.ui_state.agent_states)
+        };
 
-        // Build hierarchical list with stable sort order
-        let mut projects: Vec<_> = state.projects.values().collect();
-        projects.sort_by(|a, b| a.name.cmp(&b.name));
-
-        for project in projects {
-            // Add project item
-            items.push(SessionListItem::Project {
-                id: project.id,
-                name: project.name.clone(),
-                repo_path: project.repo_path.clone(),
-                main_branch: project.main_branch.clone(),
-                worktree_count: project.worktrees.len(),
-            });
-
-            // Add worktree sessions sorted by creation time (newest first)
-            let mut sessions: Vec<_> = project
-                .worktrees
-                .iter()
-                .filter_map(|sid| state.sessions.get(sid))
-                .collect();
-            sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-
-            for session in sessions {
-                items.push(SessionListItem::Worktree {
-                    id: session.id,
-                    project_id: session.project_id,
-                    title: session.title.clone(),
-                    branch: session.branch.clone(),
-                    status: session.status,
-                    program: session.program.clone(),
-                    pr_number: session.pr_number,
-                    pr_url: session.pr_url.clone(),
-                    pr_merged: session.pr_merged,
-                    pr_state: session.pr_state,
-                    pr_draft: session.pr_draft,
-                    pr_labels: session.pr_labels.clone(),
-                    worktree_path: session.worktree_path.clone(),
-                    created_at: session.created_at,
-                    agent_state: self.ui_state.agent_states.get(&session.id).copied(),
-                    unread: session.unread,
-                });
-            }
-        }
-
+        let selectable: Vec<bool> = items.iter().map(|i| i.is_selectable()).collect();
         self.ui_state.list_items = items;
-        self.ui_state
-            .list_state
-            .set_item_count(self.ui_state.list_items.len());
-
-        // Clear status message after a bit
-        // (In a real app, you'd use a timer)
+        if self.config.sections.is_empty() {
+            self.ui_state
+                .list_state
+                .set_item_count(self.ui_state.list_items.len());
+        } else {
+            self.ui_state.list_state.set_selectable(selectable);
+        }
     }
 
     /// Save current selection to persisted state
@@ -426,6 +393,7 @@ impl App {
             SessionListItem::Project { id, .. } => {
                 last_session.is_none() && last_project.is_some_and(|p| p == *id)
             }
+            SessionListItem::SectionHeader { .. } => false,
         });
 
         if let Some(idx) = target_idx {
@@ -434,4 +402,91 @@ impl App {
             self.ui_state.list_state.select(Some(0));
         }
     }
+}
+
+fn worktree_item(
+    session: &crate::session::WorktreeSession,
+    agent_states: &HashMap<SessionId, AgentState>,
+    project_name_prefix: Option<&str>,
+) -> SessionListItem {
+    let title = match project_name_prefix {
+        Some(prefix) => format!("{}/{}", prefix, session.title),
+        None => session.title.clone(),
+    };
+    SessionListItem::Worktree {
+        id: session.id,
+        project_id: session.project_id,
+        title,
+        branch: session.branch.clone(),
+        status: session.status,
+        program: session.program.clone(),
+        pr_number: session.pr_number,
+        pr_url: session.pr_url.clone(),
+        pr_merged: session.pr_merged,
+        pr_state: session.pr_state,
+        pr_draft: session.pr_draft,
+        pr_labels: session.pr_labels.clone(),
+        worktree_path: session.worktree_path.clone(),
+        created_at: session.created_at,
+        agent_state: agent_states.get(&session.id).copied(),
+        unread: session.unread,
+    }
+}
+
+fn build_project_grouped_items(
+    state: &crate::config::AppState,
+    agent_states: &HashMap<SessionId, AgentState>,
+) -> Vec<SessionListItem> {
+    let mut items = Vec::new();
+    let mut projects: Vec<_> = state.projects.values().collect();
+    projects.sort_by(|a, b| a.name.cmp(&b.name));
+
+    for project in projects {
+        items.push(SessionListItem::Project {
+            id: project.id,
+            name: project.name.clone(),
+            repo_path: project.repo_path.clone(),
+            main_branch: project.main_branch.clone(),
+            worktree_count: project.worktrees.len(),
+        });
+
+        let mut sessions: Vec<_> = project
+            .worktrees
+            .iter()
+            .filter_map(|sid| state.sessions.get(sid))
+            .collect();
+        sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+        for session in sessions {
+            items.push(worktree_item(session, agent_states, None));
+        }
+    }
+    items
+}
+
+fn build_section_grouped_items(
+    state: &crate::config::AppState,
+    sections: &[crate::session::SectionConfig],
+    agent_states: &HashMap<SessionId, AgentState>,
+) -> Vec<SessionListItem> {
+    let sessions: Vec<crate::session::WorktreeSession> = state.sessions.values().cloned().collect();
+    let groups = crate::session::build_sections(&sessions, sections);
+
+    let mut items = Vec::new();
+    for group in groups {
+        items.push(SessionListItem::SectionHeader {
+            name: group.name.clone(),
+            count: group.sessions.len(),
+        });
+        for sid in group.sessions {
+            if let Some(session) = state.sessions.get(&sid) {
+                let project_name = state
+                    .projects
+                    .get(&session.project_id)
+                    .map(|p| p.name.as_str());
+                items.push(worktree_item(session, agent_states, project_name));
+            }
+        }
+    }
+    items
 }

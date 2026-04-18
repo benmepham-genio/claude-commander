@@ -183,6 +183,8 @@ pub enum UserCommand {
     GenerateSummary,
     /// Scan a directory for git repos and add them as projects
     ScanDirectory,
+    /// Open the "Move to section" modal for the selected session.
+    MoveToSection,
 }
 
 impl UserCommand {
@@ -244,6 +246,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::PageDown => Self::PageDown,
             BindableAction::GenerateSummary => Self::GenerateSummary,
             BindableAction::ScanDirectory => Self::ScanDirectory,
+            BindableAction::MoveToSection => Self::MoveToSection,
         }
     }
 }
