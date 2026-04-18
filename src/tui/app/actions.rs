@@ -651,6 +651,9 @@ impl App {
         let eff_mode = Self::effective_palette_mode(mode, query);
         let eff_query = Self::palette_filter_query(eff_mode, query);
         let mut out: Vec<QuickSwitchItem> = Vec::new();
+        if let PaletteMode::SectionPicker { session_id } = eff_mode {
+            return self.gather_section_picker_items(session_id, eff_query);
+        }
         if eff_mode == PaletteMode::Unified {
             for m in self.gather_quick_switch_matches(eff_query).await {
                 out.push(QuickSwitchItem::Session(m));
@@ -658,6 +661,36 @@ impl App {
         }
         for c in self.gather_command_entries(eff_query) {
             out.push(QuickSwitchItem::Command(c));
+        }
+        out
+    }
+
+    /// Build the section-picker rows for the move-to-section palette mode.
+    /// Always includes an "Auto" entry first to clear any existing override.
+    fn gather_section_picker_items(
+        &self,
+        session_id: SessionId,
+        filter_query: &str,
+    ) -> Vec<QuickSwitchItem> {
+        let q = filter_query.to_lowercase();
+        let mut out: Vec<QuickSwitchItem> = Vec::new();
+        let auto_label = "Auto (clear override)".to_string();
+        if q.is_empty() || auto_label.to_lowercase().contains(&q) {
+            out.push(QuickSwitchItem::SectionMove {
+                session_id,
+                target: None,
+                label: auto_label,
+            });
+        }
+        for section in &self.config.sections {
+            if !q.is_empty() && !section.name.to_lowercase().contains(&q) {
+                continue;
+            }
+            out.push(QuickSwitchItem::SectionMove {
+                session_id,
+                target: Some(section.name.clone()),
+                label: section.name.clone(),
+            });
         }
         out
     }
@@ -788,9 +821,9 @@ impl App {
         }
     }
 
-    /// Open the "Move to section" modal for the selected session.
-    /// Pre-fills with the current override (if any). Submitting an empty
-    /// value clears the override, restoring auto section rules.
+    /// Open the "Move to section" palette for the selected session.
+    /// The palette lists "Auto" plus one entry per configured `[[sections]]`;
+    /// selecting "Auto" clears any override.
     pub(super) async fn handle_move_to_section(&mut self) {
         if self.config.sections.is_empty() {
             self.ui_state.status_message = Some((
@@ -802,28 +835,36 @@ impl App {
         let Some(session_id) = self.ui_state.selected_session_id else {
             return;
         };
-        let current_override = {
-            let state = self.store.read().await;
-            match state.get_session(&session_id) {
-                Some(s) => s.section_override.clone().unwrap_or_default(),
-                None => return,
-            }
+        let mode = PaletteMode::SectionPicker { session_id };
+        let matches = self.gather_section_picker_items(session_id, "");
+        self.ui_state.modal = Modal::QuickSwitch {
+            mode,
+            query: String::new(),
+            matches,
+            selected_idx: 0,
+            scroll: 0,
         };
-        let names: Vec<String> = self
-            .config
-            .sections
-            .iter()
-            .map(|s| s.name.clone())
-            .collect();
-        self.ui_state.modal = Modal::Input {
-            title: "Move to Section".to_string(),
-            prompt: format!(
-                "Section name (empty = Auto). Configured: {}",
-                names.join(", ")
-            ),
-            value: current_override,
-            on_submit: InputAction::MoveToSection { session_id },
-        };
+    }
+
+    /// Apply a manual section move chosen in the picker palette.
+    /// `target = Some(name)` sets the override; `target = None` clears it.
+    pub(super) async fn apply_section_move(
+        &mut self,
+        session_id: SessionId,
+        target: Option<String>,
+    ) {
+        let sections = self.config.sections.clone();
+        let now = chrono::Utc::now();
+        let _ = self
+            .store
+            .mutate(move |state| {
+                if let Some(session) = state.get_session_mut(&session_id) {
+                    session.section_override = target;
+                    crate::session::apply_assignment(session, &sections, now);
+                }
+            })
+            .await;
+        self.refresh_list_items().await;
     }
 
     /// Handle rename session - show input modal pre-filled with current title.
@@ -953,26 +994,6 @@ impl App {
                     .mutate(move |state| {
                         if let Some(session) = state.get_session_mut(&session_id) {
                             session.title = new_title;
-                        }
-                    })
-                    .await;
-                self.refresh_list_items().await;
-            }
-            InputAction::MoveToSection { session_id } => {
-                let trimmed = value.trim().to_string();
-                let new_override = if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed)
-                };
-                let sections = self.config.sections.clone();
-                let now = chrono::Utc::now();
-                let _ = self
-                    .store
-                    .mutate(move |state| {
-                        if let Some(session) = state.get_session_mut(&session_id) {
-                            session.section_override = new_override;
-                            crate::session::apply_assignment(session, &sections, now);
                         }
                     })
                     .await;

@@ -245,6 +245,9 @@ pub struct WorktreeSession {
     /// Label names attached to the PR (used for review-needed colouring)
     #[serde(default)]
     pub pr_labels: Vec<String>,
+    /// GitHub `reviewDecision` for the PR (None when no PR or no decision data).
+    #[serde(default)]
+    pub review_decision: Option<crate::git::ReviewDecision>,
     /// Whether the session has unread output (agent finished but user hasn't attached)
     #[serde(default)]
     pub unread: bool,
@@ -297,6 +300,7 @@ impl WorktreeSession {
             pr_state: None,
             pr_draft: false,
             pr_labels: Vec::new(),
+            review_decision: None,
             unread: false,
             section_override: None,
             current_section: None,
@@ -338,6 +342,7 @@ impl WorktreeSession {
             pr_state: None,
             pr_draft: false,
             pr_labels: Vec::new(),
+            review_decision: None,
             unread: false,
             section_override: None,
             current_section: None,

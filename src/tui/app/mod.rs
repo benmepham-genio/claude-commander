@@ -187,14 +187,28 @@ pub struct QuickSwitchMatch {
 pub enum PaletteMode {
     Unified,
     CommandOnly,
+    /// Section picker for a specific session. The palette is populated with
+    /// one entry per configured `[[sections]]` plus an "Auto" entry; selecting
+    /// an entry sets (or clears) the session's `section_override`.
+    SectionPicker {
+        session_id: SessionId,
+    },
 }
 
-/// A row in the quick-switch palette — either an open session or a
-/// keybound command.
+/// A row in the quick-switch palette — either an open session, a
+/// keybound command, or a section-move target.
 #[derive(Debug, Clone)]
 pub enum QuickSwitchItem {
     Session(QuickSwitchMatch),
     Command(CommandEntry),
+    /// Selecting this row pins `session_id` to `target` (Some = section name,
+    /// None = "Auto" / clear override).
+    SectionMove {
+        session_id: SessionId,
+        target: Option<String>,
+        /// Pre-formatted display label.
+        label: String,
+    },
 }
 
 /// A command row in the quick-switch palette.
@@ -302,7 +316,6 @@ pub enum InputAction {
     AddProject,
     ScanDirectory,
     RenameSession { session_id: SessionId },
-    MoveToSection { session_id: SessionId },
 }
 
 /// Action to perform when confirm modal is confirmed
@@ -546,6 +559,7 @@ impl App {
         // One-time setup
         self.cleanup_stale_creating_sessions().await;
         self.sync_session_states().await;
+        self.reconcile_section_assignments().await;
 
         // Check gh availability and do initial PR check
         if self.config.pr_check_interval_secs > 0 {

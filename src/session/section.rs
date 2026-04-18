@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::git::PrState;
+use crate::git::{PrState, ReviewDecision};
 use crate::session::{SessionId, WorktreeSession};
 
 /// Declarative predicate matching a session to a section.
@@ -23,6 +23,29 @@ pub struct SectionConfig {
     pub has_label: Option<LabelPredicate>,
     #[serde(default)]
     pub has_pr: Option<bool>,
+    #[serde(default)]
+    pub review_decision: Option<DecisionPredicate>,
+}
+
+/// Review-decision predicate: accepts a single value (string in TOML) or a
+/// list (array of strings, any-of semantics).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DecisionPredicate {
+    One(ReviewDecision),
+    Any(Vec<ReviewDecision>),
+}
+
+impl DecisionPredicate {
+    fn matches(&self, decision: Option<ReviewDecision>) -> bool {
+        let Some(d) = decision else {
+            return false;
+        };
+        match self {
+            Self::One(needle) => *needle == d,
+            Self::Any(needles) => needles.contains(&d),
+        }
+    }
 }
 
 /// Label predicate: accepts either a single label (string in TOML) or a list
@@ -48,13 +71,15 @@ impl LabelPredicate {
 pub enum SectionAssignment {
     /// Matched a user-defined section by name.
     Matched(String),
-    /// Did not match any section; falls into the catch-all.
-    Other,
+    /// Did not match any section; falls into the implicit "In Progress"
+    /// catch-all (process position 0).
+    InProgress,
 }
 
 /// Compute the section a session belongs to given the configured sections.
 ///
-/// Returns [`SectionAssignment::Other`] when no section's predicate matches.
+/// Returns [`SectionAssignment::InProgress`] when no section's predicate
+/// matches.
 pub fn assign_section(session: &WorktreeSession, sections: &[SectionConfig]) -> SectionAssignment {
     if let Some(name) = &session.section_override
         && sections.iter().any(|s| &s.name == name)
@@ -66,13 +91,17 @@ pub fn assign_section(session: &WorktreeSession, sections: &[SectionConfig]) -> 
             return SectionAssignment::Matched(section.name.clone());
         }
     }
-    SectionAssignment::Other
+    SectionAssignment::InProgress
 }
+
+/// Reserved name of the implicit catch-all section, always at process
+/// position 0 (displayed first).
+pub const IN_PROGRESS: &str = "In Progress";
 
 /// Output group for one section in the rendered session list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedSection {
-    /// Section name (configured name, or the reserved literal `"Other"`).
+    /// Section name (configured name, or the reserved [`IN_PROGRESS`] literal).
     pub name: String,
     /// Session IDs in display order (oldest `entered_section_at` first).
     pub sessions: Vec<SessionId>,
@@ -80,25 +109,22 @@ pub struct RenderedSection {
 
 /// Build the grouped, sorted section list for rendering.
 ///
-/// Sessions are placed into the first matching section (or the built-in
-/// "Other" bucket if no predicate matches). Within each group they are
+/// "In Progress" (the implicit catch-all) is always returned first, followed
+/// by the user-configured sections in declared order. Sessions are placed by
+/// their cached `current_section` (the source of truth maintained by
+/// [`apply_assignment`]). A `current_section` referring to a section no
+/// longer in config falls back to "In Progress". Within each group they are
 /// sorted by `entered_section_at` ascending (oldest first).
 pub fn build_sections(
     sessions: &[WorktreeSession],
     sections: &[SectionConfig],
 ) -> Vec<RenderedSection> {
-    let other_idx = sections.len();
+    // Bucket 0 = In Progress; buckets 1..=N = user sections.
     let mut buckets: Vec<Vec<(SessionId, DateTime<Utc>)>> =
-        (0..=other_idx).map(|_| Vec::new()).collect();
+        (0..=sections.len()).map(|_| Vec::new()).collect();
 
     for session in sessions {
-        let idx = match assign_section(session, sections) {
-            SectionAssignment::Matched(name) => sections
-                .iter()
-                .position(|s| s.name == name)
-                .unwrap_or(other_idx),
-            SectionAssignment::Other => other_idx,
-        };
+        let idx = section_position(session.current_section.as_deref(), sections);
         buckets[idx].push((session.id, session.entered_section_at));
     }
 
@@ -107,10 +133,10 @@ pub fn build_sections(
         .enumerate()
         .map(|(i, mut bucket)| {
             bucket.sort_by_key(|(_, ts)| *ts);
-            let name = if i == other_idx {
-                "Other".to_string()
+            let name = if i == 0 {
+                IN_PROGRESS.to_string()
             } else {
-                sections[i].name.clone()
+                sections[i - 1].name.clone()
             };
             RenderedSection {
                 name,
@@ -120,18 +146,62 @@ pub fn build_sections(
         .collect()
 }
 
+/// Process-order position of a section name. 0 = In Progress (catch-all),
+/// 1.. = user sections in declared order. Unknown names → 0 (treated as
+/// In Progress, e.g. stale `current_section` referring to a deleted section).
+fn section_position(name: Option<&str>, sections: &[SectionConfig]) -> usize {
+    match name {
+        None => 0,
+        Some(n) => sections
+            .iter()
+            .position(|s| s.name == n)
+            .map(|i| i + 1)
+            .unwrap_or(0),
+    }
+}
+
 /// Recompute the session's section assignment and update
 /// `current_section` + `entered_section_at` iff the section changed.
+///
+/// `section_override` is a hard lock: when set to a configured section, the
+/// session is pinned there regardless of process order or predicates, and
+/// auto cannot advance it. Stale overrides (referring to a section no
+/// longer in config) are ignored.
+///
+/// Otherwise, auto moves are **forward-only** in process order: a session
+/// that would match a section at a lower process position than its current
+/// one stays put.
+///
 /// Returns `true` when a transition occurred.
 pub fn apply_assignment(
     session: &mut WorktreeSession,
     sections: &[SectionConfig],
     now: DateTime<Utc>,
 ) -> bool {
+    // Override path: bypass forward-only and predicates entirely.
+    if let Some(name) = &session.section_override
+        && sections.iter().any(|s| &s.name == name)
+    {
+        let target = Some(name.clone());
+        if session.current_section == target {
+            return false;
+        }
+        session.current_section = target;
+        session.entered_section_at = now;
+        return true;
+    }
+
     let new_name: Option<String> = match assign_section(session, sections) {
         SectionAssignment::Matched(name) => Some(name),
-        SectionAssignment::Other => None,
+        SectionAssignment::InProgress => None,
     };
+
+    let cur_pos = section_position(session.current_section.as_deref(), sections);
+    let new_pos = section_position(new_name.as_deref(), sections);
+    if new_pos < cur_pos {
+        return false;
+    }
+
     if session.current_section == new_name {
         return false;
     }
@@ -161,6 +231,11 @@ fn section_matches(session: &WorktreeSession, section: &SectionConfig) -> bool {
     {
         return false;
     }
+    if let Some(decision_pred) = &section.review_decision
+        && !decision_pred.matches(session.review_decision)
+    {
+        return false;
+    }
     true
 }
 
@@ -182,13 +257,67 @@ mod tests {
     }
 
     #[test]
+    fn review_decision_array_matches_any_of() {
+        let mut session = make_session();
+        session.review_decision = Some(ReviewDecision::ChangesRequested);
+
+        let sections = vec![SectionConfig {
+            name: "In Review".into(),
+            review_decision: Some(DecisionPredicate::Any(vec![
+                ReviewDecision::ChangesRequested,
+                ReviewDecision::ReviewRequired,
+            ])),
+            ..Default::default()
+        }];
+
+        assert_eq!(
+            assign_section(&session, &sections),
+            SectionAssignment::Matched("In Review".into())
+        );
+    }
+
+    #[test]
+    fn review_decision_predicate_falls_through_when_session_has_no_decision() {
+        let session = make_session(); // review_decision = None
+
+        let sections = vec![SectionConfig {
+            name: "Approved".into(),
+            review_decision: Some(DecisionPredicate::One(ReviewDecision::Approved)),
+            ..Default::default()
+        }];
+
+        assert_eq!(
+            assign_section(&session, &sections),
+            SectionAssignment::InProgress
+        );
+    }
+
+    #[test]
+    fn review_decision_approved_predicate_matches() {
+        let mut session = make_session();
+        session.pr_state = Some(PrState::Open);
+        session.review_decision = Some(ReviewDecision::Approved);
+
+        let sections = vec![SectionConfig {
+            name: "Ready to Merge".into(),
+            review_decision: Some(DecisionPredicate::One(ReviewDecision::Approved)),
+            ..Default::default()
+        }];
+
+        assert_eq!(
+            assign_section(&session, &sections),
+            SectionAssignment::Matched("Ready to Merge".into())
+        );
+    }
+
+    #[test]
     fn empty_sections_config_yields_other() {
         let session = make_session();
         let sections: Vec<SectionConfig> = vec![];
 
         let result = assign_section(&session, &sections);
 
-        assert_eq!(result, SectionAssignment::Other);
+        assert_eq!(result, SectionAssignment::InProgress);
     }
 
     #[test]
@@ -204,7 +333,7 @@ mod tests {
 
         assert_eq!(
             assign_section(&session, &sections),
-            SectionAssignment::Other
+            SectionAssignment::InProgress
         );
     }
 
@@ -241,7 +370,7 @@ mod tests {
 
         assert_eq!(
             assign_section(&session, &sections),
-            SectionAssignment::Other
+            SectionAssignment::InProgress
         );
     }
 
@@ -275,7 +404,7 @@ mod tests {
 
         assert_eq!(
             assign_section(&session, &sections),
-            SectionAssignment::Other
+            SectionAssignment::InProgress
         );
     }
 
@@ -297,6 +426,160 @@ mod tests {
             assign_section(&session, &sections),
             SectionAssignment::Matched("Blocked".into())
         );
+    }
+
+    #[test]
+    fn apply_assignment_rebases_session_with_stale_current_section() {
+        // current_section refers to a section that's no longer in config —
+        // it's treated as position 0 (In Progress), so any matching
+        // predicate is a valid forward move.
+        let sections = vec![SectionConfig {
+            name: "Open".into(),
+            pr_state: Some(PrState::Open),
+            ..Default::default()
+        }];
+        let mut session = make_session();
+        session.pr_state = Some(PrState::Open);
+        session.current_section = Some("Removed Section".into());
+
+        let now = session.entered_section_at + Duration::minutes(1);
+        let changed = apply_assignment(&mut session, &sections, now);
+
+        assert!(changed);
+        assert_eq!(session.current_section.as_deref(), Some("Open"));
+    }
+
+    #[test]
+    fn override_bypasses_forward_only_rule() {
+        // Process order: 0=In Progress, 1=Open, 2=Pinned
+        let sections = vec![
+            SectionConfig {
+                name: "Open".into(),
+                pr_state: Some(PrState::Open),
+                ..Default::default()
+            },
+            SectionConfig {
+                name: "Pinned".into(),
+                ..Default::default()
+            },
+        ];
+        let mut session = make_session();
+        session.pr_state = Some(PrState::Open);
+        session.current_section = Some("Pinned".into());
+        let original = session.entered_section_at;
+        let later = original + Duration::hours(1);
+
+        // User pins backward to "Open" (backward in process order).
+        session.section_override = Some("Open".into());
+        let changed = apply_assignment(&mut session, &sections, later);
+
+        assert!(changed);
+        assert_eq!(session.current_section.as_deref(), Some("Open"));
+        assert_eq!(session.entered_section_at, later);
+    }
+
+    #[test]
+    fn override_locks_section_against_auto_advancement() {
+        let sections = vec![
+            SectionConfig {
+                name: "Needs Review".into(),
+                has_label: Some(LabelPredicate::One("dev-review-required".into())),
+                ..Default::default()
+            },
+            SectionConfig {
+                name: "In Review".into(),
+                review_decision: Some(DecisionPredicate::One(ReviewDecision::ChangesRequested)),
+                ..Default::default()
+            },
+        ];
+        let mut session = make_session();
+        session.pr_state = Some(PrState::Open);
+        session.section_override = Some("Needs Review".into());
+        session.current_section = Some("Needs Review".into());
+        let original = session.entered_section_at;
+
+        // Reviewer requests changes — predicate would advance the session
+        // to "In Review", but the override locks it.
+        session.review_decision = Some(ReviewDecision::ChangesRequested);
+
+        let later = original + Duration::hours(1);
+        let changed = apply_assignment(&mut session, &sections, later);
+
+        assert!(!changed, "auto must not advance past an override");
+        assert_eq!(session.current_section.as_deref(), Some("Needs Review"));
+        assert_eq!(session.entered_section_at, original);
+    }
+
+    #[test]
+    fn apply_assignment_refuses_backward_auto_move() {
+        // Process order: 0=In Progress, 1=Needs Review, 2=In Review
+        let sections = vec![
+            SectionConfig {
+                name: "Needs Review".into(),
+                has_label: Some(LabelPredicate::One("dev-review-required".into())),
+                ..Default::default()
+            },
+            SectionConfig {
+                name: "In Review".into(),
+                review_decision: Some(DecisionPredicate::One(ReviewDecision::ChangesRequested)),
+                ..Default::default()
+            },
+        ];
+
+        // Session is currently in "Needs Review" (position 1).
+        let mut session = make_session();
+        session.pr_state = Some(PrState::Open);
+        session.pr_labels = vec!["dev-review-required".into()];
+        session.current_section = Some("Needs Review".into());
+        let original_stamp = session.entered_section_at;
+
+        // Reviewer removes the label without doing anything else.
+        // Predicate would now place the session in In Progress (position 0).
+        session.pr_labels.clear();
+
+        let later = original_stamp + Duration::hours(1);
+        let changed = apply_assignment(&mut session, &sections, later);
+
+        assert!(!changed, "auto move backward should be refused");
+        assert_eq!(
+            session.current_section.as_deref(),
+            Some("Needs Review"),
+            "session must stay where it was"
+        );
+        assert_eq!(session.entered_section_at, original_stamp);
+    }
+
+    #[test]
+    fn apply_assignment_allows_forward_auto_move() {
+        let sections = vec![
+            SectionConfig {
+                name: "Needs Review".into(),
+                has_label: Some(LabelPredicate::One("dev-review-required".into())),
+                ..Default::default()
+            },
+            SectionConfig {
+                name: "In Review".into(),
+                review_decision: Some(DecisionPredicate::One(ReviewDecision::ChangesRequested)),
+                ..Default::default()
+            },
+        ];
+
+        let mut session = make_session();
+        session.pr_state = Some(PrState::Open);
+        session.pr_labels = vec!["dev-review-required".into()];
+        session.current_section = Some("Needs Review".into());
+        let original_stamp = session.entered_section_at;
+
+        // Reviewer requests changes (label may or may not be present; here, removed).
+        session.pr_labels.clear();
+        session.review_decision = Some(ReviewDecision::ChangesRequested);
+
+        let later = original_stamp + Duration::hours(1);
+        let changed = apply_assignment(&mut session, &sections, later);
+
+        assert!(changed);
+        assert_eq!(session.current_section.as_deref(), Some("In Review"));
+        assert_eq!(session.entered_section_at, later);
     }
 
     #[test]
@@ -445,10 +728,12 @@ mod tests {
 
         let mut older = make_session();
         older.pr_state = Some(PrState::Open);
+        older.current_section = Some("Open".into());
         older.entered_section_at = earlier;
 
         let mut newer = make_session();
         newer.pr_state = Some(PrState::Open);
+        newer.current_section = Some("Open".into());
         newer.entered_section_at = later;
 
         // Intentionally reversed order in the input slice.
@@ -469,14 +754,14 @@ mod tests {
     }
 
     #[test]
-    fn empty_sections_config_collects_all_sessions_into_other() {
+    fn empty_sections_config_collects_all_sessions_into_in_progress() {
         let s1 = make_session();
         let s2 = make_session();
 
         let groups = build_sections(&[s1.clone(), s2.clone()], &[]);
 
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].name, "Other");
+        assert_eq!(groups[0].name, IN_PROGRESS);
         assert_eq!(groups[0].sessions.len(), 2);
     }
 
@@ -498,14 +783,40 @@ mod tests {
         let groups = build_sections(&[], &sections);
 
         assert_eq!(groups.len(), 3);
-        assert_eq!(groups[0].name, "Drafts");
+        assert_eq!(groups[0].name, IN_PROGRESS);
         assert!(groups[0].sessions.is_empty());
-        assert_eq!(groups[1].name, "Open");
+        assert_eq!(groups[1].name, "Drafts");
         assert!(groups[1].sessions.is_empty());
+        assert_eq!(groups[2].name, "Open");
+        assert!(groups[2].sessions.is_empty());
     }
 
     #[test]
-    fn other_section_is_last() {
+    fn build_sections_honours_current_section_over_live_predicate() {
+        // Session was forward-moved into "Needs Review", then the label was
+        // removed. apply_assignment refused the backward move so
+        // current_section is still "Needs Review". build_sections must place
+        // the session there too, not re-evaluate predicates.
+        let sections = vec![SectionConfig {
+            name: "Needs Review".into(),
+            has_label: Some(LabelPredicate::One("dev-review-required".into())),
+            ..Default::default()
+        }];
+        let mut session = make_session();
+        session.pr_state = Some(PrState::Open);
+        session.pr_labels.clear(); // label removed
+        session.current_section = Some("Needs Review".into());
+
+        let groups = build_sections(&[session.clone()], &sections);
+        let needs_review = groups
+            .iter()
+            .find(|g| g.name == "Needs Review")
+            .expect("Needs Review present");
+        assert_eq!(needs_review.sessions, vec![session.id]);
+    }
+
+    #[test]
+    fn in_progress_catchall_is_first() {
         let sections = vec![SectionConfig {
             name: "Open".into(),
             pr_state: Some(PrState::Open),
@@ -514,7 +825,7 @@ mod tests {
 
         let groups = build_sections(&[], &sections);
 
-        assert_eq!(groups.last().unwrap().name, "Other");
+        assert_eq!(groups.first().unwrap().name, "In Progress");
     }
 
     #[test]
@@ -547,13 +858,8 @@ mod tests {
     }
 
     #[test]
-    fn clearing_override_returns_session_to_auto_rules() {
-        let mut session = make_session();
-        session.pr_state = Some(PrState::Open);
-        session.section_override = Some("In progress".into());
-        session.current_section = Some("In progress".into());
-        let later = session.entered_section_at + Duration::hours(1);
-
+    fn clearing_override_does_not_pull_session_backward_in_process_order() {
+        // Process order: 0=In Progress, 1=Open, 2=Pinned
         let sections = vec![
             SectionConfig {
                 name: "Open".into(),
@@ -561,18 +867,26 @@ mod tests {
                 ..Default::default()
             },
             SectionConfig {
-                name: "In progress".into(),
+                name: "Pinned".into(),
                 ..Default::default()
             },
         ];
+        let mut session = make_session();
+        session.pr_state = Some(PrState::Open);
+        session.section_override = Some("Pinned".into());
+        session.current_section = Some("Pinned".into());
+        let original = session.entered_section_at;
+        let later = original + Duration::hours(1);
 
-        // Clear the override.
+        // Clear the override; predicate would put session at "Open" (pos 1),
+        // which is backward from "Pinned" (pos 2). Forward-only rule keeps
+        // it where it is.
         session.section_override = None;
         let changed = apply_assignment(&mut session, &sections, later);
 
-        assert!(changed);
-        assert_eq!(session.current_section.as_deref(), Some("Open"));
-        assert_eq!(session.entered_section_at, later);
+        assert!(!changed);
+        assert_eq!(session.current_section.as_deref(), Some("Pinned"));
+        assert_eq!(session.entered_section_at, original);
     }
 
     #[test]

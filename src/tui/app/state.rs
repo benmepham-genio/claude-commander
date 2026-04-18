@@ -71,6 +71,8 @@ impl App {
                                     .map(|p| p.labels.clone())
                                     .unwrap_or_default();
                                 session.pr_merged = pr_info.as_ref().is_some_and(|p| p.merged());
+                                session.review_decision =
+                                    pr_info.as_ref().and_then(|p| p.review_decision);
                             }
                         }
                         for session in state.sessions.values_mut() {
@@ -130,6 +132,7 @@ impl App {
                     format!("Created session {}", session_id),
                     Instant::now() + Duration::from_secs(3),
                 ));
+                self.reconcile_section_assignments().await;
                 self.refresh_list_items().await;
                 // Select the newly created session
                 if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
@@ -326,6 +329,33 @@ impl App {
                 debug!("Failed to sync worktrees for project {}: {}", project_id, e);
             }
         }
+    }
+
+    /// Run `apply_assignment` over every session against the current
+    /// `[[sections]]` config. Used at startup (reconcile state.json with
+    /// possibly-changed config) and after creating a new session.
+    pub(super) async fn reconcile_section_assignments(&mut self) {
+        let sections = self.config.sections.clone();
+        if sections.is_empty()
+            && self
+                .store
+                .read()
+                .await
+                .sessions
+                .values()
+                .all(|s| s.current_section.is_none())
+        {
+            return;
+        }
+        let now = chrono::Utc::now();
+        let _ = self
+            .store
+            .mutate(move |state| {
+                for session in state.sessions.values_mut() {
+                    crate::session::apply_assignment(session, &sections, now);
+                }
+            })
+            .await;
     }
 
     pub(super) async fn refresh_list_items(&mut self) {

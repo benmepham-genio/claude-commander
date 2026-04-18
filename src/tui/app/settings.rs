@@ -118,6 +118,16 @@ impl App {
                         field_key: "ai_summary_model".into(),
                         color_swatch: None,
                     },
+                    SettingsRow {
+                        label: "Sections".into(),
+                        value: if c.sections.is_empty() {
+                            "(none — see config.toml)".into()
+                        } else {
+                            format!("{} configured (edit config.toml)", c.sections.len())
+                        },
+                        field_key: "sections_readonly".into(),
+                        color_swatch: None,
+                    },
                 ]
             }
             SettingsTab::Keybindings => {

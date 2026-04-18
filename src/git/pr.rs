@@ -18,6 +18,9 @@ pub struct PrInfo {
     pub state: PrState,
     pub is_draft: bool,
     pub labels: Vec<String>,
+    /// GitHub-derived review decision; `None` when no decision has been
+    /// formed (e.g. no reviews requested) or the field is absent.
+    pub review_decision: Option<ReviewDecision>,
 }
 
 impl PrInfo {
@@ -47,6 +50,18 @@ pub enum PrState {
     Open,
     Closed,
     Merged,
+}
+
+/// GitHub `reviewDecision` field — derived state of the review process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewDecision {
+    /// Reviews requested, none decisive yet (includes comment-only reviews).
+    ReviewRequired,
+    /// At least one approving review and no outstanding changes-requested.
+    Approved,
+    /// At least one reviewer requested changes.
+    ChangesRequested,
 }
 
 impl std::fmt::Display for PrState {
@@ -118,7 +133,7 @@ pub async fn check_pr_for_branch(repo_path: &Path, branch: &str) -> Option<PrInf
             "--state",
             "all",
             "--json",
-            "number,url,state,isDraft,labels",
+            "number,url,state,isDraft,labels,reviewDecision",
             "--limit",
             "5",
         ])
@@ -178,6 +193,12 @@ fn parse_pr_entry(v: &serde_json::Value) -> Option<PrInfo> {
                 .collect()
         })
         .unwrap_or_default();
+    let review_decision = v["reviewDecision"].as_str().and_then(|s| match s {
+        "APPROVED" => Some(ReviewDecision::Approved),
+        "CHANGES_REQUESTED" => Some(ReviewDecision::ChangesRequested),
+        "REVIEW_REQUIRED" => Some(ReviewDecision::ReviewRequired),
+        _ => None,
+    });
 
     Some(PrInfo {
         number,
@@ -185,6 +206,7 @@ fn parse_pr_entry(v: &serde_json::Value) -> Option<PrInfo> {
         state,
         is_draft,
         labels,
+        review_decision,
     })
 }
 
@@ -352,6 +374,41 @@ mod tests {
     #[test]
     fn test_parse_pr_list_empty_array() {
         assert!(parse_pr_list_json("[]").is_none());
+    }
+
+    #[test]
+    fn test_parse_pr_list_review_decision_each_value() {
+        for (raw, expected) in [
+            ("APPROVED", Some(ReviewDecision::Approved)),
+            ("CHANGES_REQUESTED", Some(ReviewDecision::ChangesRequested)),
+            ("REVIEW_REQUIRED", Some(ReviewDecision::ReviewRequired)),
+        ] {
+            let json = format!(
+                r#"[{{
+                    "number": 1,
+                    "url": "https://x/1",
+                    "state": "OPEN",
+                    "isDraft": false,
+                    "labels": [],
+                    "reviewDecision": "{raw}"
+                }}]"#
+            );
+            let info = parse_pr_list_json(&json).expect("parses");
+            assert_eq!(info.review_decision, expected, "for raw={raw}");
+        }
+    }
+
+    #[test]
+    fn test_parse_pr_list_missing_review_decision_is_none() {
+        let json = r#"[{
+            "number": 1,
+            "url": "https://x/1",
+            "state": "OPEN",
+            "isDraft": false,
+            "labels": []
+        }]"#;
+        let info = parse_pr_list_json(json).expect("parses");
+        assert_eq!(info.review_decision, None);
     }
 
     #[test]

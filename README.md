@@ -247,22 +247,37 @@ state_sync_interval_ms = 2000
 # toggle_pane = ["Tab"]
 
 # Session list sections — group sessions under configurable headers based on
-# GitHub PR state. First-match-wins in declared order; sessions that don't
-# match any predicate fall into a built-in "Other" catch-all at the bottom.
+# GitHub PR state. The implicit "In Progress" section is always at the top
+# and acts as the catch-all (anything not matching a predicate lands here).
+# Subsequent sections are evaluated first-match-wins in declared order;
+# their config order also defines the *process order* sessions flow through.
+#
 # When [[sections]] is empty (default), the list keeps its project-grouped
 # view. When non-empty, the list is grouped by section across all projects.
-# Open the palette and run "Move session to section…" to pin a session to a
-# specific section (empty input clears the override, restoring auto rules).
 #
+# Auto-moves are forward-only: once a session has reached a later section,
+# predicate changes can only advance it further (e.g. a reviewer removing
+# the "dev-review-required" label cannot pull the session back to In Progress).
+# Open the palette and run "Move session to section…" to pin a session
+# anywhere (forward or backward); the override is sticky until cleared via
+# the "Auto" entry in the same picker.
+#
+# Predicate fields (AND across declared fields):
+#   pr_state         "open" | "closed" | "merged"
+#   is_draft         bool
+#   has_pr           bool
+#   has_label        string or [string, …]  (any-of)
+#   review_decision  "approved" | "changes_requested" | "review_required"
+#                    (string or array, any-of)
+#
+# Example:
 # [[sections]]
 # name = "Needs Review"
-# has_label = "ready-for-review"   # string or array (any-of)
-# is_draft = false
+# has_label = "dev-review-required"
 #
 # [[sections]]
-# name = "Drafts"
-# pr_state = "open"                # "open" | "closed" | "merged"
-# is_draft = true
+# name = "In Review"
+# review_decision = "changes_requested"
 #
 # [[sections]]
 # name = "Merged"

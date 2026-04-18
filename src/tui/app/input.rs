@@ -300,6 +300,12 @@ impl App {
                                     self.ui_state.modal = Modal::None;
                                     self.handle_command(entry.action.into()).await;
                                 }
+                                Some(QuickSwitchItem::SectionMove {
+                                    session_id, target, ..
+                                }) => {
+                                    self.ui_state.modal = Modal::None;
+                                    self.apply_section_move(session_id, target).await;
+                                }
                                 None => {}
                             }
                         }
