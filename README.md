@@ -263,7 +263,7 @@ state_sync_interval_ms = 2000
 # the "Auto" entry in the same picker.
 #
 # Predicate fields (AND across declared fields):
-#   pr_state         "open" | "closed" | "merged"
+#   pr_state         "open" | "closed" | "merged"  (string or array, any-of)
 #   is_draft         bool
 #   has_pr           bool
 #   has_label        string or [string, …]  (any-of)

@@ -16,7 +16,7 @@ use crate::session::{SessionId, WorktreeSession};
 pub struct SectionConfig {
     pub name: String,
     #[serde(default)]
-    pub pr_state: Option<PrState>,
+    pub pr_state: Option<StatePredicate>,
     #[serde(default)]
     pub is_draft: Option<bool>,
     #[serde(default)]
@@ -27,26 +27,28 @@ pub struct SectionConfig {
     pub review_decision: Option<DecisionPredicate>,
 }
 
-/// Review-decision predicate: accepts a single value (string in TOML) or a
-/// list (array of strings, any-of semantics).
+/// Accepts either a single value (scalar in TOML) or a list (array, any-of
+/// semantics). Used for predicate fields where the session's value is a
+/// single `Copy` enum, like `pr_state` and `review_decision`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
-pub enum DecisionPredicate {
-    One(ReviewDecision),
-    Any(Vec<ReviewDecision>),
+pub enum OneOrMany<T> {
+    One(T),
+    Any(Vec<T>),
 }
 
-impl DecisionPredicate {
-    fn matches(&self, decision: Option<ReviewDecision>) -> bool {
-        let Some(d) = decision else {
-            return false;
-        };
+impl<T: PartialEq + Copy> OneOrMany<T> {
+    fn matches(&self, value: Option<T>) -> bool {
+        let Some(v) = value else { return false };
         match self {
-            Self::One(needle) => *needle == d,
-            Self::Any(needles) => needles.contains(&d),
+            Self::One(needle) => *needle == v,
+            Self::Any(needles) => needles.contains(&v),
         }
     }
 }
+
+pub type StatePredicate = OneOrMany<PrState>;
+pub type DecisionPredicate = OneOrMany<ReviewDecision>;
 
 /// Label predicate: accepts either a single label (string in TOML) or a list
 /// (array of strings, any-of semantics).
@@ -219,8 +221,8 @@ pub fn apply_assignment(
 }
 
 fn section_matches(session: &WorktreeSession, section: &SectionConfig) -> bool {
-    if let Some(required) = section.pr_state
-        && session.pr_state != Some(required)
+    if let Some(state_pred) = &section.pr_state
+        && !state_pred.matches(session.pr_state)
     {
         return false;
     }
@@ -335,7 +337,7 @@ mod tests {
 
         let sections = vec![SectionConfig {
             name: "Merged".into(),
-            pr_state: Some(PrState::Merged),
+            pr_state: Some(StatePredicate::One(PrState::Merged)),
             ..Default::default()
         }];
 
@@ -371,7 +373,7 @@ mod tests {
 
         let sections = vec![SectionConfig {
             name: "Open drafts".into(),
-            pr_state: Some(PrState::Open),
+            pr_state: Some(StatePredicate::One(PrState::Open)),
             is_draft: Some(true),
             ..Default::default()
         }];
@@ -443,7 +445,7 @@ mod tests {
         // predicate is a valid forward move.
         let sections = vec![SectionConfig {
             name: "Open".into(),
-            pr_state: Some(PrState::Open),
+            pr_state: Some(StatePredicate::One(PrState::Open)),
             ..Default::default()
         }];
         let mut session = make_session();
@@ -498,7 +500,7 @@ mod tests {
         let sections = vec![
             SectionConfig {
                 name: "Open".into(),
-                pr_state: Some(PrState::Open),
+                pr_state: Some(StatePredicate::One(PrState::Open)),
                 ..Default::default()
             },
             SectionConfig {
@@ -595,7 +597,7 @@ mod tests {
         let sections = vec![
             SectionConfig {
                 name: "Open".into(),
-                pr_state: Some(PrState::Open),
+                pr_state: Some(StatePredicate::One(PrState::Open)),
                 ..Default::default()
             },
             SectionConfig {
@@ -769,7 +771,7 @@ mod tests {
             },
             SectionConfig {
                 name: "Open".into(),
-                pr_state: Some(PrState::Open),
+                pr_state: Some(StatePredicate::One(PrState::Open)),
                 ..Default::default()
             },
         ];
@@ -789,7 +791,7 @@ mod tests {
         let sections = vec![
             SectionConfig {
                 name: "Open".into(),
-                pr_state: Some(PrState::Open),
+                pr_state: Some(StatePredicate::One(PrState::Open)),
                 ..Default::default()
             },
             SectionConfig {
@@ -812,7 +814,7 @@ mod tests {
 
         let sections = vec![SectionConfig {
             name: "Open".into(),
-            pr_state: Some(PrState::Open),
+            pr_state: Some(StatePredicate::One(PrState::Open)),
             ..Default::default()
         }];
 
@@ -831,7 +833,7 @@ mod tests {
 
         let sections = vec![SectionConfig {
             name: "Open".into(),
-            pr_state: Some(PrState::Open),
+            pr_state: Some(StatePredicate::One(PrState::Open)),
             ..Default::default()
         }];
 
@@ -851,7 +853,7 @@ mod tests {
 
         let sections = vec![SectionConfig {
             name: "Open".into(),
-            pr_state: Some(PrState::Open),
+            pr_state: Some(StatePredicate::One(PrState::Open)),
             ..Default::default()
         }];
 
@@ -880,7 +882,7 @@ mod tests {
         let sessions = vec![newer.clone(), older.clone()];
         let sections = vec![SectionConfig {
             name: "Open".into(),
-            pr_state: Some(PrState::Open),
+            pr_state: Some(StatePredicate::One(PrState::Open)),
             ..Default::default()
         }];
 
@@ -915,7 +917,7 @@ mod tests {
             },
             SectionConfig {
                 name: "Open".into(),
-                pr_state: Some(PrState::Open),
+                pr_state: Some(StatePredicate::One(PrState::Open)),
                 ..Default::default()
             },
         ];
@@ -959,7 +961,7 @@ mod tests {
     fn in_progress_catchall_is_first() {
         let sections = vec![SectionConfig {
             name: "Open".into(),
-            pr_state: Some(PrState::Open),
+            pr_state: Some(StatePredicate::One(PrState::Open)),
             ..Default::default()
         }];
 
@@ -979,7 +981,7 @@ mod tests {
         let sections = vec![
             SectionConfig {
                 name: "Open".into(),
-                pr_state: Some(PrState::Open),
+                pr_state: Some(StatePredicate::One(PrState::Open)),
                 ..Default::default()
             },
             SectionConfig {
@@ -998,13 +1000,42 @@ mod tests {
     }
 
     #[test]
+    fn pr_state_array_matches_any_of() {
+        let mut merged_session = make_session();
+        merged_session.pr_state = Some(PrState::Merged);
+        let mut closed_session = make_session();
+        closed_session.pr_state = Some(PrState::Closed);
+        let mut open_session = make_session();
+        open_session.pr_state = Some(PrState::Open);
+
+        let sections = vec![SectionConfig {
+            name: "Done".into(),
+            pr_state: Some(StatePredicate::Any(vec![PrState::Merged, PrState::Closed])),
+            ..Default::default()
+        }];
+
+        assert_eq!(
+            assign_section(&merged_session, &sections),
+            SectionAssignment::Matched("Done".into())
+        );
+        assert_eq!(
+            assign_section(&closed_session, &sections),
+            SectionAssignment::Matched("Done".into())
+        );
+        assert_eq!(
+            assign_section(&open_session, &sections),
+            SectionAssignment::InProgress
+        );
+    }
+
+    #[test]
     fn pr_state_predicate_matches_open_session() {
         let mut session = make_session();
         session.pr_state = Some(PrState::Open);
 
         let sections = vec![SectionConfig {
             name: "Open PRs".into(),
-            pr_state: Some(PrState::Open),
+            pr_state: Some(StatePredicate::One(PrState::Open)),
             ..Default::default()
         }];
 
