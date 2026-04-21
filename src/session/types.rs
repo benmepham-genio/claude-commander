@@ -340,12 +340,22 @@ impl WorktreeSession {
         self.last_active_at = Utc::now();
     }
 
-    /// Check if this session matches a search query
+    /// Check if this session matches a search query (fuzzy subsequence).
     pub fn matches_query(&self, query: &str) -> bool {
-        let query = query.to_lowercase();
-        self.title.to_lowercase().contains(&query)
-            || self.branch.to_lowercase().contains(&query)
-            || self.program.to_lowercase().contains(&query)
+        self.fuzzy_score(query).is_some()
+    }
+
+    /// Best fuzzy score across title, branch, and program — or `None` if
+    /// no field matches. Used by the palette to rank results.
+    pub fn fuzzy_score(&self, query: &str) -> Option<i64> {
+        [
+            self.title.as_str(),
+            self.branch.as_str(),
+            self.program.as_str(),
+        ]
+        .iter()
+        .filter_map(|s| crate::fuzzy::fuzzy_score(s, query))
+        .max()
     }
 }
 
@@ -476,6 +486,39 @@ mod tests {
         assert!(session.matches_query("feature"));
         assert!(session.matches_query("claude"));
         assert!(!session.matches_query("unrelated"));
+    }
+
+    #[test]
+    fn test_session_matches_query_fuzzy_subsequence() {
+        // The palette matcher is subsequence-based — "andr2" should match
+        // "android-record-2" even though those chars aren't contiguous.
+        let session = WorktreeSession::new(
+            ProjectId::new(),
+            "android-record-2",
+            "android-record-2",
+            PathBuf::from("/tmp"),
+            "claude",
+        );
+        assert!(session.matches_query("andr2"));
+        assert!(session.matches_query("rec2"));
+        // Out-of-order chars must still fail.
+        assert!(!session.matches_query("2andr"));
+    }
+
+    #[test]
+    fn test_fuzzy_score_ranks_title_over_branch() {
+        // The title matches more tightly than the branch, so the best
+        // (max) score should come from the title.
+        let session = WorktreeSession::new(
+            ProjectId::new(),
+            "payments",
+            "wip-long-branch-name-payments-fix",
+            PathBuf::from("/tmp"),
+            "claude",
+        );
+        let title_only = crate::fuzzy::fuzzy_score("payments", "payments").unwrap();
+        let combined = session.fuzzy_score("payments").unwrap();
+        assert_eq!(combined, title_only);
     }
 
     #[test]

@@ -454,8 +454,7 @@ impl AppUiState {
         kb: &crate::config::KeyBindings,
         filter_query: &str,
     ) -> Vec<CommandEntry> {
-        let query_lower = filter_query.to_lowercase();
-        let mut out = Vec::new();
+        let mut scored: Vec<(i64, CommandEntry)> = Vec::new();
         for &action in BindableAction::ALL {
             if matches!(
                 action,
@@ -467,16 +466,23 @@ impl AppUiState {
                 continue;
             }
             let label = action.description();
-            if !query_lower.is_empty() && !label.to_lowercase().contains(&query_lower) {
+            let Some(score) = crate::fuzzy::fuzzy_score(label, filter_query) else {
                 continue;
-            }
-            out.push(CommandEntry {
-                action,
-                label,
-                keys: kb.keys_display(action),
-            });
+            };
+            scored.push((
+                score,
+                CommandEntry {
+                    action,
+                    label,
+                    keys: kb.keys_display(action),
+                },
+            ));
         }
-        out
+        if !filter_query.is_empty() {
+            // Stable sort by score desc preserves enum order among ties.
+            scored.sort_by(|a, b| b.0.cmp(&a.0));
+        }
+        scored.into_iter().map(|(_, e)| e).collect()
     }
 }
 

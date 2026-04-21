@@ -584,34 +584,43 @@ impl App {
         };
     }
 
-    /// Gather session matches for a query (empty query = all sessions)
+    /// Gather session matches for a query (empty query = all sessions).
+    ///
+    /// Non-empty queries are ranked by fuzzy score (best match first);
+    /// empty queries fall back to alphabetical title order.
     pub(super) async fn gather_quick_switch_matches(&self, query: &str) -> Vec<QuickSwitchMatch> {
         let state = self.store.read().await;
-        let mut matches = Vec::new();
+        let mut scored: Vec<(i64, QuickSwitchMatch)> = Vec::new();
 
         for session in state.sessions.values() {
             if session.status == SessionStatus::Creating {
                 continue;
             }
-            if !query.is_empty() && !session.matches_query(query) {
+            let Some(score) = session.fuzzy_score(query) else {
                 continue;
-            }
+            };
             let project_name = state
                 .get_project(&session.project_id)
                 .map(|p| p.name.clone())
                 .unwrap_or_default();
-            matches.push(QuickSwitchMatch {
-                session_id: session.id,
-                title: session.title.clone(),
-                branch: session.branch.clone(),
-                project_name,
-                status: session.status,
-            });
+            scored.push((
+                score,
+                QuickSwitchMatch {
+                    session_id: session.id,
+                    title: session.title.clone(),
+                    branch: session.branch.clone(),
+                    project_name,
+                    status: session.status,
+                },
+            ));
         }
 
-        // Sort by title for predictable ordering
-        matches.sort_by(|a, b| a.title.cmp(&b.title));
-        matches
+        if query.is_empty() {
+            scored.sort_by(|a, b| a.1.title.cmp(&b.1.title));
+        } else {
+            scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.title.cmp(&b.1.title)));
+        }
+        scored.into_iter().map(|(_, m)| m).collect()
     }
 
     /// Compute the *effective* palette mode — a leading `>` in a Unified
@@ -674,11 +683,10 @@ impl App {
 
         let eff_mode = Self::effective_palette_mode(mode, &query);
         let eff_query = Self::palette_filter_query(eff_mode, &query);
-        let eff_query_lower = eff_query.to_lowercase();
 
         // Build the session rows synchronously from list_items so the refilter
         // can run without awaiting the store lock on every keystroke.
-        let mut session_items: Vec<QuickSwitchItem> = Vec::new();
+        let mut scored_sessions: Vec<(i64, QuickSwitchMatch)> = Vec::new();
         if eff_mode == PaletteMode::Unified {
             // Build project name lookup from list items
             let mut project_names: std::collections::HashMap<SessionId, String> =
@@ -703,20 +711,38 @@ impl App {
                     status,
                     ..
                 } = item
-                    && (eff_query_lower.is_empty()
-                        || title.to_lowercase().contains(&eff_query_lower))
                 {
+                    // Score against title and branch; best field wins.
+                    let score = [title.as_str(), branch.as_str()]
+                        .iter()
+                        .filter_map(|s| crate::fuzzy::fuzzy_score(s, eff_query))
+                        .max();
+                    let Some(score) = score else { continue };
                     let project_name = project_names.get(id).cloned().unwrap_or_default();
-                    session_items.push(QuickSwitchItem::Session(QuickSwitchMatch {
-                        session_id: *id,
-                        title: title.clone(),
-                        branch: branch.clone(),
-                        project_name,
-                        status: *status,
-                    }));
+                    scored_sessions.push((
+                        score,
+                        QuickSwitchMatch {
+                            session_id: *id,
+                            title: title.clone(),
+                            branch: branch.clone(),
+                            project_name,
+                            status: *status,
+                        },
+                    ));
                 }
             }
+
+            if eff_query.is_empty() {
+                // Preserve tree order for empty queries.
+            } else {
+                scored_sessions
+                    .sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.title.cmp(&b.1.title)));
+            }
         }
+        let session_items: Vec<QuickSwitchItem> = scored_sessions
+            .into_iter()
+            .map(|(_, m)| QuickSwitchItem::Session(m))
+            .collect();
 
         let command_items: Vec<QuickSwitchItem> = self
             .gather_command_entries(eff_query)
