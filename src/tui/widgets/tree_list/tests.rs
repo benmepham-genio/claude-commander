@@ -11,6 +11,7 @@ fn make_project(name: &str, count: usize) -> SessionListItem {
         repo_path: PathBuf::from("/tmp/test"),
         main_branch: "main".to_string(),
         worktree_count: count,
+        nested: false,
     }
 }
 
@@ -154,6 +155,35 @@ fn test_tree_list_state_navigation() {
 
     // Previous
     state.previous();
+    assert_eq!(state.selected(), Some(2));
+}
+
+#[test]
+fn test_navigation_skips_unselectable_rows() {
+    let mut state = TreeListState::new();
+    // 5 rows; indices 0 and 3 are section headers (unselectable), rest are selectable.
+    state.set_selectable(vec![false, true, true, false, true]);
+
+    state.next();
+    assert_eq!(state.selected(), Some(1));
+
+    state.next();
+    assert_eq!(state.selected(), Some(2));
+
+    state.next();
+    // skips 3, lands on 4
+    assert_eq!(state.selected(), Some(4));
+
+    state.next();
+    // wraps; skips 0, lands on 1
+    assert_eq!(state.selected(), Some(1));
+
+    state.previous();
+    // wraps backwards skipping 0
+    assert_eq!(state.selected(), Some(4));
+
+    state.previous();
+    // skips 3
     assert_eq!(state.selected(), Some(2));
 }
 

@@ -31,6 +31,7 @@ fn make_project() -> SessionListItem {
         repo_path: std::path::PathBuf::from("/tmp/test"),
         main_branch: "main".to_string(),
         worktree_count: 0,
+        nested: false,
     }
 }
 

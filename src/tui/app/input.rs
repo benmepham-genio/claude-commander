@@ -299,6 +299,12 @@ impl App {
                                     self.ui_state.modal = Modal::None;
                                     self.handle_command(entry.action.into()).await;
                                 }
+                                Some(QuickSwitchItem::SectionMove {
+                                    session_id, target, ..
+                                }) => {
+                                    self.ui_state.modal = Modal::None;
+                                    self.apply_section_move(session_id, target).await;
+                                }
                                 None => {}
                             }
                         }
@@ -454,6 +460,9 @@ impl App {
             }
             UserCommand::RenameSession => {
                 self.handle_rename_session().await;
+            }
+            UserCommand::MoveToSection => {
+                self.handle_move_to_section().await;
             }
             UserCommand::RestartSession => {
                 self.handle_restart_session();

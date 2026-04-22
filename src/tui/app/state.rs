@@ -55,6 +55,8 @@ impl App {
                 }
             }
             StateUpdate::PrStatusReady { results } => {
+                let sections = self.config.sections.clone();
+                let now = chrono::Utc::now();
                 let _ = self
                     .store
                     .mutate(move |state| {
@@ -69,7 +71,16 @@ impl App {
                                     .map(|p| p.labels.clone())
                                     .unwrap_or_default();
                                 session.pr_merged = pr_info.as_ref().is_some_and(|p| p.merged());
+                                session.review_decision =
+                                    pr_info.as_ref().and_then(|p| p.review_decision);
+                                session.pr_reviewers = pr_info
+                                    .as_ref()
+                                    .map(|p| p.reviewers.clone())
+                                    .unwrap_or_default();
                             }
+                        }
+                        for session in state.sessions.values_mut() {
+                            crate::session::apply_assignment(session, &sections, now);
                         }
                     })
                     .await;
@@ -125,6 +136,7 @@ impl App {
                     format!("Created session {}", session_id),
                     Instant::now() + Duration::from_secs(3),
                 ));
+                self.reconcile_one_section_assignment(session_id).await;
                 self.refresh_list_items().await;
                 // Select the newly created session
                 if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
@@ -323,62 +335,63 @@ impl App {
         }
     }
 
+    /// Run `apply_assignment` over every session against the current
+    /// `[[sections]]` config. Used at startup to reconcile state.json with
+    /// possibly-changed config.
+    pub(super) async fn reconcile_section_assignments(&mut self) {
+        let sections = self.config.sections.clone();
+        let now = chrono::Utc::now();
+        let _ = self
+            .store
+            .mutate(move |state| {
+                if sections.is_empty()
+                    && state.sessions.values().all(|s| s.current_section.is_none())
+                {
+                    return;
+                }
+                for session in state.sessions.values_mut() {
+                    crate::session::apply_assignment(session, &sections, now);
+                }
+            })
+            .await;
+    }
+
+    /// Run `apply_assignment` for a single session — used after creating a
+    /// session, where the rest of the session set is already reconciled.
+    pub(super) async fn reconcile_one_section_assignment(&mut self, session_id: SessionId) {
+        if self.config.sections.is_empty() {
+            return;
+        }
+        let sections = self.config.sections.clone();
+        let now = chrono::Utc::now();
+        let _ = self
+            .store
+            .mutate(move |state| {
+                if let Some(session) = state.get_session_mut(&session_id) {
+                    crate::session::apply_assignment(session, &sections, now);
+                }
+            })
+            .await;
+    }
+
     pub(super) async fn refresh_list_items(&mut self) {
         let state = self.store.read().await;
 
-        let mut items = Vec::new();
+        let items = if self.config.sections.is_empty() {
+            build_project_grouped_items(&state, &self.ui_state.agent_states)
+        } else {
+            build_section_grouped_items(&state, &self.config.sections, &self.ui_state.agent_states)
+        };
 
-        // Build hierarchical list with stable sort order
-        let mut projects: Vec<_> = state.projects.values().collect();
-        projects.sort_by(|a, b| a.name.cmp(&b.name));
-
-        for project in projects {
-            // Add project item
-            items.push(SessionListItem::Project {
-                id: project.id,
-                name: project.name.clone(),
-                repo_path: project.repo_path.clone(),
-                main_branch: project.main_branch.clone(),
-                worktree_count: project.worktrees.len(),
-            });
-
-            // Add worktree sessions sorted by creation time (newest first)
-            let mut sessions: Vec<_> = project
-                .worktrees
-                .iter()
-                .filter_map(|sid| state.sessions.get(sid))
-                .collect();
-            sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
-
-            for session in sessions {
-                items.push(SessionListItem::Worktree {
-                    id: session.id,
-                    project_id: session.project_id,
-                    title: session.title.clone(),
-                    branch: session.branch.clone(),
-                    status: session.status,
-                    program: session.program.clone(),
-                    pr_number: session.pr_number,
-                    pr_url: session.pr_url.clone(),
-                    pr_merged: session.pr_merged,
-                    pr_state: session.pr_state,
-                    pr_draft: session.pr_draft,
-                    pr_labels: session.pr_labels.clone(),
-                    worktree_path: session.worktree_path.clone(),
-                    created_at: session.created_at,
-                    agent_state: self.ui_state.agent_states.get(&session.id).copied(),
-                    unread: session.unread,
-                });
-            }
-        }
-
+        let selectable: Vec<bool> = items.iter().map(|i| i.is_selectable()).collect();
         self.ui_state.list_items = items;
-        self.ui_state
-            .list_state
-            .set_item_count(self.ui_state.list_items.len());
-
-        // Clear status message after a bit
-        // (In a real app, you'd use a timer)
+        if self.config.sections.is_empty() {
+            self.ui_state
+                .list_state
+                .set_item_count(self.ui_state.list_items.len());
+        } else {
+            self.ui_state.list_state.set_selectable(selectable);
+        }
     }
 
     /// Save current selection to persisted state
@@ -426,6 +439,7 @@ impl App {
             SessionListItem::Project { id, .. } => {
                 last_session.is_none() && last_project.is_some_and(|p| p == *id)
             }
+            SessionListItem::SectionHeader { .. } | SessionListItem::Spacer => false,
         });
 
         if let Some(idx) = target_idx {
@@ -434,4 +448,128 @@ impl App {
             self.ui_state.list_state.select(Some(0));
         }
     }
+}
+
+fn worktree_item(
+    session: &crate::session::WorktreeSession,
+    agent_states: &HashMap<SessionId, AgentState>,
+    project_name_prefix: Option<&str>,
+) -> SessionListItem {
+    let title = match project_name_prefix {
+        Some(prefix) => format!("{}/{}", prefix, session.title),
+        None => session.title.clone(),
+    };
+    SessionListItem::Worktree {
+        id: session.id,
+        project_id: session.project_id,
+        title,
+        branch: session.branch.clone(),
+        status: session.status,
+        program: session.program.clone(),
+        pr_number: session.pr_number,
+        pr_url: session.pr_url.clone(),
+        pr_merged: session.pr_merged,
+        pr_state: session.pr_state,
+        pr_draft: session.pr_draft,
+        pr_labels: session.pr_labels.clone(),
+        worktree_path: session.worktree_path.clone(),
+        created_at: session.created_at,
+        agent_state: agent_states.get(&session.id).copied(),
+        unread: session.unread,
+    }
+}
+
+fn build_project_grouped_items(
+    state: &crate::config::AppState,
+    agent_states: &HashMap<SessionId, AgentState>,
+) -> Vec<SessionListItem> {
+    let mut items = Vec::new();
+    let mut projects: Vec<_> = state.projects.values().collect();
+    projects.sort_by(|a, b| a.name.cmp(&b.name));
+
+    for project in projects {
+        items.push(SessionListItem::Project {
+            id: project.id,
+            name: project.name.clone(),
+            repo_path: project.repo_path.clone(),
+            main_branch: project.main_branch.clone(),
+            worktree_count: project.worktrees.len(),
+            nested: false,
+        });
+
+        let mut sessions: Vec<_> = project
+            .worktrees
+            .iter()
+            .filter_map(|sid| state.sessions.get(sid))
+            .collect();
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
+
+        for session in sessions {
+            items.push(worktree_item(session, agent_states, None));
+        }
+    }
+    items
+}
+
+fn build_section_grouped_items(
+    state: &crate::config::AppState,
+    sections: &[crate::session::SectionConfig],
+    agent_states: &HashMap<SessionId, AgentState>,
+) -> Vec<SessionListItem> {
+    let sessions: Vec<crate::session::WorktreeSession> = state.sessions.values().cloned().collect();
+    let groups = crate::session::build_sections(&sessions, sections);
+
+    let mut projects: Vec<_> = state.projects.values().collect();
+    projects.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let mut items = Vec::new();
+    for (group_idx, group) in groups.iter().enumerate() {
+        if group_idx > 0 {
+            items.push(SessionListItem::Spacer);
+        }
+        items.push(SessionListItem::SectionHeader {
+            name: group.name.clone(),
+            count: group.sessions.len(),
+        });
+
+        let is_in_progress = group.name == crate::session::IN_PROGRESS;
+        // Preserve group sort order (oldest-first) while partitioning by project.
+        let mut by_project: std::collections::HashMap<crate::session::ProjectId, Vec<SessionId>> =
+            Default::default();
+        let mut project_order: Vec<crate::session::ProjectId> = Vec::new();
+        for sid in &group.sessions {
+            if let Some(session) = state.sessions.get(sid) {
+                by_project.entry(session.project_id).or_default().push(*sid);
+                if !project_order.contains(&session.project_id) {
+                    project_order.push(session.project_id);
+                }
+            }
+        }
+
+        for project in &projects {
+            let project_sessions = by_project.get(&project.id);
+            let count = project_sessions.map(|v| v.len()).unwrap_or(0);
+            // In Progress shows every project (even empty ones); other
+            // sections only show projects that have sessions in them.
+            if !is_in_progress && count == 0 {
+                continue;
+            }
+            items.push(SessionListItem::Project {
+                id: project.id,
+                name: project.name.clone(),
+                repo_path: project.repo_path.clone(),
+                main_branch: project.main_branch.clone(),
+                worktree_count: count,
+                nested: true,
+            });
+            if let Some(sids) = project_sessions {
+                for sid in sids {
+                    if let Some(session) = state.sessions.get(sid) {
+                        items.push(worktree_item(session, agent_states, None));
+                    }
+                }
+            }
+        }
+    }
+    items
 }

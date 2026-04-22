@@ -62,6 +62,7 @@ impl<'a> TreeList<'a> {
                     name,
                     main_branch,
                     worktree_count,
+                    nested,
                     ..
                 } => {
                     let (proj_color, sess_color) = self.theme.project_color(project_index);
@@ -74,8 +75,13 @@ impl<'a> TreeList<'a> {
                         String::new()
                     };
 
+                    // Project sub-headers nested under a section header are
+                    // indented one tree-level deeper so the hierarchy reads
+                    // SectionHeader > Project > Worktree.
+                    let pad = if *nested { "   " } else { " " };
+
                     let line = Line::from(vec![
-                        Span::raw(" "),
+                        Span::raw(pad),
                         Span::styled(
                             name.clone(),
                             Style::default().fg(proj_color).add_modifier(Modifier::BOLD),
@@ -89,6 +95,7 @@ impl<'a> TreeList<'a> {
 
                     ListItem::new(line)
                 }
+                SessionListItem::Spacer => ListItem::new(Line::from("")),
 
                 SessionListItem::Worktree {
                     title,
@@ -195,6 +202,22 @@ impl<'a> TreeList<'a> {
 
                     let line = Line::from(spans);
 
+                    ListItem::new(line)
+                }
+                SessionListItem::SectionHeader { name, count } => {
+                    let line = Line::from(vec![
+                        Span::raw(" "),
+                        Span::styled(
+                            name.clone(),
+                            Style::default()
+                                .fg(self.theme.text_accent)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!(" ({})", count),
+                            Style::default().fg(self.theme.text_secondary),
+                        ),
+                    ]);
                     ListItem::new(line)
                 }
             })

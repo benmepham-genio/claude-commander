@@ -161,6 +161,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `o` | Open PR in browser (when the session has a PR) |
 | `S` | Scan directory for git repos and add them as projects |
 | `s` | Open shell in worktree |
+| palette only | Move session to section (manual override; see [Session List Sections](#session-list-sections)) |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |
 | `Ctrl-u/d` or `PageUp/Down` | Page up/down in preview |
@@ -270,6 +271,87 @@ state_sync_interval_ms = 2000
 # quit = ["q", "Ctrl-c"]
 # toggle_pane = ["Tab"]
 ```
+
+### Session List Sections
+
+Group the session list under configurable headers based on GitHub PR state.
+
+By default `[[sections]]` is empty and the list keeps its project-grouped view. Once you declare one or more sections, the list switches to a section-grouped layout: section headers at the top level, each repo nested beneath as a sub-header, and sessions indented below their repo.
+
+An implicit **"In Progress"** section is always the first row and acts as the catch-all — any session whose PR state doesn't match a later section's predicate lands here. It also lists every repo that hasn't placed a session into a later section, so newly added projects remain visible.
+
+#### Example
+
+This mirrors a label-driven code review workflow: author adds `dev-review-required` when the PR is ready, a reviewer removes the label and picks it up, the PR gets approved and merged.
+
+```toml
+[[sections]]
+name = "Needs Review"
+has_label = "dev-review-required"
+
+[[sections]]
+name = "In Review"
+pr_state = "open"          # scope to open PRs — otherwise merged PRs
+has_reviewer = true        # with reviewers would also match here
+
+[[sections]]
+name = "Merged"
+pr_state = ["merged", "closed"]
+
+[[sections]]
+name = "Stale"             # no predicates → manual-only waypoint
+```
+
+Visually:
+
+```
+In Progress (12)
+   terraform [main] (3)
+      session-a
+      session-b
+      session-c
+   genio     [main] (0)
+
+Needs Review (1)
+   genio     [main] (1)
+      fix-dns-spam
+
+In Review (2)
+   terraform [main] (1)
+      new-metrics-port
+   genio     [main] (1)
+      claude/add-elasticsearch-readonly-creds
+
+Merged (3)
+   …
+
+Stale (0)
+```
+
+#### Predicate fields
+
+All fields are optional; a section matches when **every declared field** matches (AND). A section declared with no predicates is a **manual-only waypoint** — auto-matching never puts sessions there; you only move in via the palette.
+
+| Field | Type | Notes |
+|---|---|---|
+| `pr_state` | `"open"` \| `"closed"` \| `"merged"` — scalar or array (any-of) | |
+| `is_draft` | `bool` | |
+| `has_pr` | `bool` | |
+| `has_label` | string (literal) or array (any-of) | |
+| `review_decision` | `"approved"` \| `"changes_requested"` \| `"review_required"` — scalar or array (any-of) | Mirrors GitHub's `reviewDecision` field |
+| `has_reviewer` | `true` / `false`, a specific login, or an array of logins (any-of) | `true` excludes Copilot via case-insensitive `"copilot"` substring match; specific/array forms match literally |
+
+#### Process order and forward-only
+
+Config order is the pipeline. A session's section is re-evaluated on every PR refresh, but the scan **only considers sections at or after the session's current position** — auto never moves a session backwards. This keeps `"Needs Review"` sticky when a reviewer removes the label without leaving other signals; the session doesn't slide back to `"In Progress"`.
+
+#### Moving sessions manually
+
+Select a session, open the palette (`Space`, or `Shift+Space` for commands-only), run **Move session to section…**, then pick a target. An **Auto** entry clears an existing pin. The override is persisted to `state.json` and survives restarts; auto-moves are suppressed until the pin is released.
+
+#### Reordering, adding, or removing sections
+
+These are edit-`config.toml`-and-restart actions — there's no hot reload. The cached `current_section` on each session is reconciled against the new config on next startup; if the referenced section no longer exists, the session falls back to `"In Progress"` and continues forward-only from there.
 
 ### AI Summary
 

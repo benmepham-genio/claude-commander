@@ -245,9 +245,28 @@ pub struct WorktreeSession {
     /// Label names attached to the PR (used for review-needed colouring)
     #[serde(default)]
     pub pr_labels: Vec<String>,
+    /// GitHub `reviewDecision` for the PR (None when no PR or no decision data).
+    #[serde(default)]
+    pub review_decision: Option<crate::git::ReviewDecision>,
+    /// Reviewer logins on the PR — the union of requested reviewers and
+    /// submitted review authors. Empty when there's no PR or no reviewers.
+    #[serde(default)]
+    pub pr_reviewers: Vec<String>,
     /// Whether the session has unread output (agent finished but user hasn't attached)
     #[serde(default)]
     pub unread: bool,
+    /// Manual section override. When set and matching a configured section,
+    /// the session is pinned there regardless of predicate rules.
+    #[serde(default)]
+    pub section_override: Option<String>,
+    /// Cached current section name (None = Other / catch-all). Updated by
+    /// `apply_assignment`; used to detect transitions for `entered_section_at`.
+    #[serde(default)]
+    pub current_section: Option<String>,
+    /// Timestamp the session entered its current section. Used for
+    /// oldest-in-section-first sort order.
+    #[serde(default = "chrono::Utc::now")]
+    pub entered_section_at: DateTime<Utc>,
 }
 
 impl WorktreeSession {
@@ -285,7 +304,12 @@ impl WorktreeSession {
             pr_state: None,
             pr_draft: false,
             pr_labels: Vec::new(),
+            review_decision: None,
+            pr_reviewers: Vec::new(),
             unread: false,
+            section_override: None,
+            current_section: None,
+            entered_section_at: now,
         }
     }
 
@@ -323,7 +347,12 @@ impl WorktreeSession {
             pr_state: None,
             pr_draft: false,
             pr_labels: Vec::new(),
+            review_decision: None,
+            pr_reviewers: Vec::new(),
             unread: false,
+            section_override: None,
+            current_section: None,
+            entered_section_at: now,
         }
     }
 
@@ -370,6 +399,9 @@ pub enum SessionListItem {
         repo_path: PathBuf,
         main_branch: String,
         worktree_count: usize,
+        /// When `true`, render indented one level deeper — used for project
+        /// sub-headers nested under a section header.
+        nested: bool,
     },
     /// A worktree session (indented under project)
     Worktree {
@@ -390,6 +422,12 @@ pub enum SessionListItem {
         agent_state: Option<AgentState>,
         unread: bool,
     },
+    /// A section header (used only when config.sections is non-empty).
+    /// Not selectable — navigation skips these rows.
+    SectionHeader { name: String, count: usize },
+    /// A blank spacer row for visual separation between sections.
+    /// Not selectable.
+    Spacer,
 }
 
 impl SessionListItem {
@@ -398,6 +436,8 @@ impl SessionListItem {
         match self {
             Self::Project { id, .. } => format!("project:{}", id),
             Self::Worktree { id, .. } => format!("worktree:{}", id),
+            Self::SectionHeader { name, .. } => format!("section:{}", name),
+            Self::Spacer => "spacer".to_string(),
         }
     }
 
@@ -409,6 +449,11 @@ impl SessionListItem {
     /// Check if this is a worktree item
     pub fn is_worktree(&self) -> bool {
         matches!(self, Self::Worktree { .. })
+    }
+
+    /// Whether navigation/selection should land on this row.
+    pub fn is_selectable(&self) -> bool {
+        !matches!(self, Self::SectionHeader { .. } | Self::Spacer)
     }
 }
 
@@ -532,6 +577,7 @@ mod tests {
             repo_path: PathBuf::from("/tmp"),
             main_branch: "main".to_string(),
             worktree_count: 0,
+            nested: false,
         };
 
         let worktree_item = SessionListItem::Worktree {
@@ -702,6 +748,7 @@ mod tests {
             repo_path: PathBuf::from("/tmp"),
             main_branch: "main".to_string(),
             worktree_count: 0,
+            nested: false,
         };
         let worktree_item = SessionListItem::Worktree {
             id: SessionId::new(),

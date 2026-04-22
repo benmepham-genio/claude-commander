@@ -242,6 +242,7 @@ impl App {
                 let title = match effective_mode {
                     PaletteMode::Unified => " Quick Switch ",
                     PaletteMode::CommandOnly => " Commands ",
+                    PaletteMode::SectionPicker { .. } => " Move to Section ",
                 };
                 let block = Block::default()
                     .title(title)
@@ -364,6 +365,15 @@ impl App {
                             );
                             let line = Line::from(Span::styled(content, row_style));
                             frame.render_widget(Paragraph::new(line).style(row_style), line_area);
+                        }
+                        QuickSwitchItem::SectionMove { label, .. } => {
+                            let style = if is_selected {
+                                self.theme.selection()
+                            } else {
+                                Style::default()
+                            };
+                            let line = Line::from(Span::styled(format!(" ❯ {label}"), style));
+                            frame.render_widget(Paragraph::new(line).style(style), line_area);
                         }
                     }
                 }
