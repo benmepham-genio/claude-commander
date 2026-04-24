@@ -50,7 +50,7 @@ impl<'a> StatefulWidget for TreeList<'a> {
 impl<'a> TreeList<'a> {
     /// Convert items to list items
     pub(super) fn to_list_items(&self) -> Vec<ListItem<'a>> {
-        let show_program = self.has_mixed_programs();
+        let show_program = self.show_session_program && self.has_mixed_programs();
         let mut project_index: usize = 0;
         let mut worktree_number: usize = 0;
         let mut current_session_color = self.theme.project_color(0).1;
@@ -184,7 +184,7 @@ impl<'a> TreeList<'a> {
 
                         let is_merged = matches!(*pr_state, Some(PrState::Merged))
                             || (pr_state.is_none() && *pr_merged);
-                        if is_merged {
+                        if is_merged && self.show_pr_merged_label {
                             spans.push(Span::styled(
                                 " (merged)",
                                 Style::default().fg(self.theme.text_secondary),

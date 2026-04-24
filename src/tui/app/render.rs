@@ -68,7 +68,9 @@ impl App {
             .tick(self.ui_state.tick_count)
             .highlight_style(self.theme.selection().add_modifier(Modifier::BOLD))
             .review_labels(&self.config.pr_review_labels)
-            .invert_pr_label_color(self.config.invert_pr_label_color);
+            .invert_pr_label_color(self.config.invert_pr_label_color)
+            .show_session_program(self.config.show_session_program)
+            .show_pr_merged_label(self.config.show_pr_merged_label);
 
         frame.render_stateful_widget(
             tree_list,
