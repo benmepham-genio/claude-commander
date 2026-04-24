@@ -38,12 +38,26 @@ fn make_worktree(title: &str) -> SessionListItem {
 
 /// Render a TreeList to a buffer and return lines as strings
 fn render_tree(items: &[SessionListItem], width: u16, height: u16) -> Vec<String> {
+    render_tree_with(items, width, height, |t| t)
+}
+
+/// Like `render_tree`, but lets the caller configure the TreeList (e.g. to
+/// toggle `show_session_program` / `show_pr_merged_label`).
+fn render_tree_with<F>(
+    items: &[SessionListItem],
+    width: u16,
+    height: u16,
+    configure: F,
+) -> Vec<String>
+where
+    F: for<'a> FnOnce(TreeList<'a>) -> TreeList<'a>,
+{
     let theme = Theme::basic();
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|frame| {
-            let tree = TreeList::new(items, &theme);
+            let tree = configure(TreeList::new(items, &theme));
             frame.render_stateful_widget(tree, frame.area(), &mut ListState::default());
         })
         .unwrap();
@@ -55,6 +69,30 @@ fn render_tree(items: &[SessionListItem], width: u16, height: u16) -> Vec<String
                 .collect::<String>()
         })
         .collect()
+}
+
+fn make_worktree_with_program(title: &str, program: &str) -> SessionListItem {
+    let mut w = make_worktree(title);
+    if let SessionListItem::Worktree { program: p, .. } = &mut w {
+        *p = program.to_string();
+    }
+    w
+}
+
+fn make_merged_pr_worktree(title: &str) -> SessionListItem {
+    let mut w = make_worktree(title);
+    if let SessionListItem::Worktree {
+        pr_number,
+        pr_merged,
+        pr_state,
+        ..
+    } = &mut w
+    {
+        *pr_number = Some(42);
+        *pr_merged = true;
+        *pr_state = Some(PrState::Merged);
+    }
+    w
 }
 
 #[test]
@@ -558,4 +596,92 @@ fn test_glyph_creating_shows_spinner() {
         .unwrap();
     assert!(SPINNER_FRAMES.contains(&g.as_str()));
     assert_eq!(c, theme.status_creating);
+}
+
+// -- show_session_program toggle --
+
+#[test]
+fn test_program_suffix_shown_by_default_when_mixed() {
+    let items = vec![
+        make_project("proj", 2),
+        make_worktree_with_program("sess-a", "claude"),
+        make_worktree_with_program("sess-b", "codex"),
+    ];
+    let lines = render_tree(&items, 60, 4);
+    assert!(
+        lines[1].contains("(claude)"),
+        "expected program suffix: {:?}",
+        lines[1]
+    );
+    assert!(
+        lines[2].contains("(codex)"),
+        "expected program suffix: {:?}",
+        lines[2]
+    );
+}
+
+#[test]
+fn test_program_suffix_hidden_when_flag_disabled() {
+    let items = vec![
+        make_project("proj", 2),
+        make_worktree_with_program("sess-a", "claude"),
+        make_worktree_with_program("sess-b", "codex"),
+    ];
+    let lines = render_tree_with(&items, 60, 4, |t| t.show_session_program(false));
+    assert!(
+        !lines[1].contains("(claude)"),
+        "expected no program suffix: {:?}",
+        lines[1]
+    );
+    assert!(
+        !lines[2].contains("(codex)"),
+        "expected no program suffix: {:?}",
+        lines[2]
+    );
+}
+
+#[test]
+fn test_program_suffix_hidden_when_programs_uniform() {
+    // Uniform program: suffix hidden regardless of the flag.
+    let items = vec![
+        make_project("proj", 2),
+        make_worktree_with_program("sess-a", "claude"),
+        make_worktree_with_program("sess-b", "claude"),
+    ];
+    let lines = render_tree(&items, 60, 4);
+    assert!(
+        !lines[1].contains("(claude)"),
+        "uniform programs should not render suffix: {:?}",
+        lines[1]
+    );
+}
+
+// -- show_pr_merged_label toggle --
+
+#[test]
+fn test_merged_label_shown_by_default() {
+    let items = vec![make_project("proj", 1), make_merged_pr_worktree("sess")];
+    let lines = render_tree(&items, 80, 3);
+    assert!(
+        lines[1].contains("(merged)"),
+        "expected '(merged)' suffix: {:?}",
+        lines[1]
+    );
+}
+
+#[test]
+fn test_merged_label_hidden_when_flag_disabled() {
+    let items = vec![make_project("proj", 1), make_merged_pr_worktree("sess")];
+    let lines = render_tree_with(&items, 80, 3, |t| t.show_pr_merged_label(false));
+    assert!(
+        !lines[1].contains("(merged)"),
+        "expected no '(merged)' suffix: {:?}",
+        lines[1]
+    );
+    // Sanity: PR badge itself is still rendered.
+    assert!(
+        lines[1].contains("PR #42"),
+        "PR badge should still render: {:?}",
+        lines[1]
+    );
 }
