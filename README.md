@@ -124,8 +124,8 @@ When a session has a GitHub PR, a badge appears next to the session name. The ba
 
 | Color | Meaning |
 |-------|---------|
-| Green | Open |
-| Purple | Open and awaiting review |
+| Blue | Open |
+| Green | Open and awaiting review |
 | Grey | Draft |
 | Red | Closed |
 | Dark purple | Merged |

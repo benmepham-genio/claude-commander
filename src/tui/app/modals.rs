@@ -555,18 +555,37 @@ impl App {
         ]));
         lines.push(Line::from(vec![
             Span::raw("  "),
+            Span::styled("○", Style::default().fg(self.theme.status_stopped)),
+            Span::raw("  Stopped"),
+        ]));
+
+        // PR badges legend
+        lines.push(Line::from(""));
+        lines.push(Line::from("PR Badges:"));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("●", Style::default().fg(self.theme.pr_open)),
+            Span::raw("  Open"),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
             Span::styled("●", Style::default().fg(self.theme.status_pr)),
-            Span::raw("  PR open"),
+            Span::raw("  Open — awaiting review"),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("●", Style::default().fg(self.theme.pr_draft)),
+            Span::raw("  Draft"),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("●", Style::default().fg(self.theme.pr_closed)),
+            Span::raw("  Closed"),
         ]));
         lines.push(Line::from(vec![
             Span::raw("  "),
             Span::styled("●", Style::default().fg(self.theme.status_pr_merged)),
-            Span::raw("  PR merged"),
-        ]));
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled("○", Style::default().fg(self.theme.status_stopped)),
-            Span::raw("  Stopped"),
+            Span::raw("  Merged"),
         ]));
 
         lines.push(Line::from(""));

@@ -63,7 +63,7 @@ pub struct Theme {
     pub status_pr_merged: Color,
 
     // PR badge text colours (per state). `status_pr` is reused for the
-    // "open + awaiting review" colour (light purple).
+    // "open + awaiting review" colour.
     pub pr_open: Color,
     pub pr_draft: Color,
     pub pr_closed: Color,
@@ -139,19 +139,19 @@ impl Theme {
             status_creating: Color::Yellow,
             status_running: Color::Green,
             status_stopped: Color::DarkGray,
-            status_pr: Color::Magenta,
+            status_pr: Color::Green,
             status_pr_merged: Color::DarkGray,
 
-            pr_open: Color::Green,
+            pr_open: Color::Blue,
             pr_draft: Color::DarkGray,
             pr_closed: Color::Red,
 
             // Basic 16-colour palette: the non-"Light" ANSI colours are
             // already dark enough to read white bold text on top.
-            pr_pill_open_bg: Color::Green,
+            pr_pill_open_bg: Color::Blue,
             pr_pill_draft_bg: Color::DarkGray,
             pr_pill_closed_bg: Color::Red,
-            pr_pill_review_bg: Color::Magenta,
+            pr_pill_review_bg: Color::Green,
             pr_pill_merged_bg: Color::Magenta,
             pr_pill_text: Color::White,
 
@@ -201,18 +201,18 @@ impl Theme {
             status_creating: Color::Indexed(228), // Pastel yellow
             status_running: Color::Indexed(156),  // Pastel mint green
             status_stopped: Color::Indexed(248),
-            status_pr: Color::Indexed(141),       // Medium purple
+            status_pr: Color::Indexed(114),       // Pastel green
             status_pr_merged: Color::Indexed(97), // Dark purple
 
-            pr_open: Color::Indexed(114),   // Pastel green
+            pr_open: Color::Indexed(111),   // Pastel sky blue
             pr_draft: Color::Indexed(245),  // Mid-grey
             pr_closed: Color::Indexed(167), // Soft red
 
             // Darker variants readable with bold near-white text
-            pr_pill_open_bg: Color::Indexed(22),    // Dark green
+            pr_pill_open_bg: Color::Indexed(24),    // Dark blue
             pr_pill_draft_bg: Color::Indexed(240),  // Dark grey
             pr_pill_closed_bg: Color::Indexed(124), // Dark red
-            pr_pill_review_bg: Color::Indexed(97),  // Dark purple
+            pr_pill_review_bg: Color::Indexed(22),  // Dark green
             pr_pill_merged_bg: Color::Indexed(54),  // Very dark purple
             pr_pill_text: Color::Indexed(231),      // Near-white
 
@@ -262,18 +262,18 @@ impl Theme {
             status_creating: Color::Rgb(249, 240, 107), // Pastel yellow
             status_running: Color::Rgb(166, 227, 161),  // Pastel mint
             status_stopped: Color::Rgb(147, 153, 178),  // Muted lavender
-            status_pr: Color::Rgb(203, 166, 247),       // Pastel mauve
+            status_pr: Color::Rgb(126, 198, 153),       // Soft GitHub-ish green
             status_pr_merged: Color::Rgb(137, 100, 180), // Dark purple
 
-            pr_open: Color::Rgb(126, 198, 153), // Soft GitHub-ish green
+            pr_open: Color::Rgb(137, 180, 250),  // Pastel sky blue
             pr_draft: Color::Rgb(147, 153, 178), // Muted grey-lavender
             pr_closed: Color::Rgb(243, 139, 168), // Pastel rose / soft red
 
             // Darker variants for pill backgrounds, readable with bold near-white text
-            pr_pill_open_bg: Color::Rgb(46, 125, 80), // Dark green
+            pr_pill_open_bg: Color::Rgb(40, 80, 160), // Dark blue
             pr_pill_draft_bg: Color::Rgb(80, 86, 110), // Dark slate
             pr_pill_closed_bg: Color::Rgb(160, 60, 85), // Dark rose
-            pr_pill_review_bg: Color::Rgb(110, 75, 160), // Dark mauve
+            pr_pill_review_bg: Color::Rgb(46, 125, 80), // Dark green
             pr_pill_merged_bg: Color::Rgb(75, 55, 110), // Very dark purple
             pr_pill_text: Color::Rgb(245, 245, 250),  // Near-white
 
