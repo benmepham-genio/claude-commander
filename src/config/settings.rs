@@ -88,11 +88,6 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub show_session_program: bool,
 
-    /// Append ` (merged)` after the PR badge when a pull request is merged.
-    /// Default true.
-    #[serde(default = "default_true")]
-    pub show_pr_merged_label: bool,
-
     /// Dim the right pane (preview/diff/shell) when the session list is focused
     pub dim_unfocused_preview: bool,
 
@@ -154,7 +149,6 @@ impl Default for Config {
             agent_state_poll_interval_ms: 3000,
             invert_pr_label_color: false,
             show_session_program: true,
-            show_pr_merged_label: true,
             dim_unfocused_preview: true,
             dim_unfocused_opacity: 0.4,
             leader_key: " ".to_string(),
@@ -551,26 +545,22 @@ has_label = ["blocked", "waiting-on-author"]
         assert!(config.ai_summary_enabled);
         assert_eq!(config.ai_summary_model, "claude-haiku-4-5-20251001");
         assert!(config.show_session_program);
-        assert!(config.show_pr_merged_label);
     }
 
     #[test]
     fn test_session_list_flags_deserialise() {
-        // Both missing → defaults true.
+        // Missing → default true.
         let cfg: Config = toml::from_str("").unwrap();
         assert!(cfg.show_session_program);
-        assert!(cfg.show_pr_merged_label);
 
         // Explicit false survives round trip.
         let cfg: Config = toml::from_str(
             r#"
 show_session_program = false
-show_pr_merged_label = false
 "#,
         )
         .unwrap();
         assert!(!cfg.show_session_program);
-        assert!(!cfg.show_pr_merged_label);
     }
 
     #[test]

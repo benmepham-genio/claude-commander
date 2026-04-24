@@ -47,7 +47,7 @@ fn render_tree(items: &[SessionListItem], width: u16, height: u16) -> Vec<String
 }
 
 /// Like `render_tree`, but lets the caller configure the TreeList (e.g. to
-/// toggle `show_session_program` / `show_pr_merged_label`).
+/// toggle `show_session_program`).
 fn render_tree_with<F>(
     items: &[SessionListItem],
     width: u16,
@@ -80,22 +80,6 @@ fn make_worktree_with_program(title: &str, program: &str) -> SessionListItem {
     let mut w = make_worktree(title);
     if let SessionListItem::Worktree { program: p, .. } = &mut w {
         *p = program.to_string();
-    }
-    w
-}
-
-fn make_merged_pr_worktree(title: &str) -> SessionListItem {
-    let mut w = make_worktree(title);
-    if let SessionListItem::Worktree {
-        pr_number,
-        pr_merged,
-        pr_state,
-        ..
-    } = &mut w
-    {
-        *pr_number = Some(42);
-        *pr_merged = true;
-        *pr_state = Some(PrState::Merged);
     }
     w
 }
@@ -686,36 +670,6 @@ fn test_program_suffix_hidden_when_programs_uniform() {
     assert!(
         !lines[1].contains("(claude)"),
         "uniform programs should not render suffix: {:?}",
-        lines[1]
-    );
-}
-
-// -- show_pr_merged_label toggle --
-
-#[test]
-fn test_merged_label_shown_by_default() {
-    let items = vec![make_project("proj", 1), make_merged_pr_worktree("sess")];
-    let lines = render_tree(&items, 80, 3);
-    assert!(
-        lines[1].contains("(merged)"),
-        "expected '(merged)' suffix: {:?}",
-        lines[1]
-    );
-}
-
-#[test]
-fn test_merged_label_hidden_when_flag_disabled() {
-    let items = vec![make_project("proj", 1), make_merged_pr_worktree("sess")];
-    let lines = render_tree_with(&items, 80, 3, |t| t.show_pr_merged_label(false));
-    assert!(
-        !lines[1].contains("(merged)"),
-        "expected no '(merged)' suffix: {:?}",
-        lines[1]
-    );
-    // Sanity: PR badge itself is still rendered.
-    assert!(
-        lines[1].contains("PR #42"),
-        "PR badge should still render: {:?}",
         lines[1]
     );
 }

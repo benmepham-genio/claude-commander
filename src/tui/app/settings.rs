@@ -101,12 +101,6 @@ impl App {
                         color_swatch: None,
                     },
                     SettingsRow {
-                        label: "Show PR Merged Label".into(),
-                        value: c.show_pr_merged_label.to_string(),
-                        field_key: "show_pr_merged_label".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
                         label: "Number Debounce (ms)".into(),
                         value: c.session_number_debounce_ms.to_string(),
                         field_key: "session_number_debounce_ms".into(),
@@ -451,11 +445,6 @@ impl App {
                 "show_session_program" => {
                     if let Ok(b) = value.parse::<bool>() {
                         self.config.show_session_program = b;
-                    }
-                }
-                "show_pr_merged_label" => {
-                    if let Ok(b) = value.parse::<bool>() {
-                        self.config.show_pr_merged_label = b;
                     }
                 }
                 "session_number_debounce_ms" => {

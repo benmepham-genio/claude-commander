@@ -50,9 +50,6 @@ pub struct TreeList<'a> {
     /// When true (default), show the running program as a `(program)`
     /// suffix on session rows when sessions use more than one program.
     show_session_program: bool,
-    /// When true (default), append ` (merged)` after the PR badge for
-    /// merged PRs.
-    show_pr_merged_label: bool,
 }
 
 impl<'a> TreeList<'a> {
@@ -67,7 +64,6 @@ impl<'a> TreeList<'a> {
             review_labels: &[],
             invert_pr_label_color: false,
             show_session_program: true,
-            show_pr_merged_label: true,
         }
     }
 
@@ -75,12 +71,6 @@ impl<'a> TreeList<'a> {
     /// show it only if the list has more than one distinct program.
     pub fn show_session_program(mut self, b: bool) -> Self {
         self.show_session_program = b;
-        self
-    }
-
-    /// When true (default), append ` (merged)` after merged PR badges.
-    pub fn show_pr_merged_label(mut self, b: bool) -> Self {
-        self.show_pr_merged_label = b;
         self
     }
 
