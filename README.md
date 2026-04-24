@@ -149,8 +149,8 @@ When a session has a GitHub PR, a badge appears next to the session name. The ba
 
 | Color | Meaning |
 |-------|---------|
-| Green | Open |
-| Purple | Open and awaiting review |
+| Blue | Open |
+| Green | Open and awaiting review |
 | Grey | Draft |
 | Red | Closed |
 | Dark purple | Merged |
@@ -275,6 +275,14 @@ dim_unfocused_opacity = 0.4
 # style). Default false renders them as colored "pill" blocks that stand out
 # more in the session list.
 # invert_pr_label_color = false
+
+# Show the running program as a "(program)" suffix on session rows. Only
+# renders when sessions use more than one distinct program, so it's a no-op
+# for a single-program setup. Set to false to always hide it.
+# show_session_program = true
+
+# Append " (merged)" after the PR badge when a pull request is merged.
+# show_pr_merged_label = true
 
 # Debounce delay in ms when typing multi-digit session numbers
 # session_number_debounce_ms = 250
