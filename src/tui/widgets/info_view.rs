@@ -108,6 +108,9 @@ impl<'a> InfoView<'a> {
             SessionStatus::Creating => ("…", self.theme.status_creating),
             SessionStatus::Running => ("●", self.theme.status_running),
             SessionStatus::Stopped => ("○", self.theme.status_stopped),
+            SessionStatus::Merging => ("⟳", self.theme.status_creating),
+            SessionStatus::CascadePaused => ("⏸", self.theme.agent_waiting),
+            SessionStatus::Pushing => ("↑", self.theme.status_creating),
         };
         lines.push(Line::from(vec![
             Span::styled(" Status:  ", label),

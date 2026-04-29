@@ -105,7 +105,8 @@ fn setup_logging(debug: bool, to_file: bool) -> Result<()> {
 
 /// Execute async PTY-based attach to a tmux session
 async fn execute_attach(session_name: &str, editor_triggers: Vec<Vec<u8>>) {
-    match attach_to_session(session_name, editor_triggers).await {
+    // CLI `attach` resolves a Claude session by title/ID, never a shell.
+    match attach_to_session(session_name, editor_triggers, true).await {
         Ok(AttachResult::Detached | AttachResult::SwitchToShell | AttachResult::OpenEditor) => {
             info!("Detached from session");
         }
@@ -179,9 +180,12 @@ async fn main() -> Result<()> {
                 } else {
                     for session in sessions {
                         let status_icon = match session.status {
-                            claude_commander::SessionStatus::Creating => "⠋",
+                            claude_commander::SessionStatus::Creating
+                            | claude_commander::SessionStatus::Merging
+                            | claude_commander::SessionStatus::Pushing => "⠋",
                             claude_commander::SessionStatus::Running => "●",
                             claude_commander::SessionStatus::Stopped => "○",
+                            claude_commander::SessionStatus::CascadePaused => "⏸",
                         };
                         match claude_commander::session::display_branch(
                             &session.title,

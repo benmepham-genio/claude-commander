@@ -95,15 +95,15 @@ impl App {
                         color_swatch: None,
                     },
                     SettingsRow {
-                        label: "Session Numbers".into(),
-                        value: c.show_session_numbers.to_string(),
-                        field_key: "show_session_numbers".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
                         label: "Invert PR Label Color".into(),
                         value: c.invert_pr_label_color.to_string(),
                         field_key: "invert_pr_label_color".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "Show Session Program".into(),
+                        value: c.show_session_program.to_string(),
+                        field_key: "show_session_program".into(),
                         color_swatch: None,
                     },
                     SettingsRow {
@@ -122,6 +122,16 @@ impl App {
                         label: "AI Summary Model".into(),
                         value: c.ai_summary_model.clone(),
                         field_key: "ai_summary_model".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "Sections".into(),
+                        value: if c.sections.is_empty() {
+                            "(none — see config.toml)".into()
+                        } else {
+                            format!("{} configured (edit config.toml)", c.sections.len())
+                        },
+                        field_key: "sections_readonly".into(),
                         color_swatch: None,
                     },
                 ]
@@ -438,14 +448,14 @@ impl App {
                         self.config.dim_unfocused_opacity = v.clamp(0.0, 1.0);
                     }
                 }
-                "show_session_numbers" => {
-                    if let Ok(b) = value.parse::<bool>() {
-                        self.config.show_session_numbers = b;
-                    }
-                }
                 "invert_pr_label_color" => {
                     if let Ok(b) = value.parse::<bool>() {
                         self.config.invert_pr_label_color = b;
+                    }
+                }
+                "show_session_program" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.show_session_program = b;
                     }
                 }
                 "session_number_debounce_ms" => {

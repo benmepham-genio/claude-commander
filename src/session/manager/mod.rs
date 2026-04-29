@@ -23,6 +23,7 @@ pub struct ScanResult {
     pub skipped: usize,
 }
 
+mod cascade;
 mod content;
 mod lifecycle;
 mod multi_repo;
@@ -30,6 +31,8 @@ mod project_shell;
 mod projects;
 mod shell;
 mod worktree_sync;
+
+pub use cascade::{CascadeOutcome, PushStackOutcome};
 
 #[cfg(test)]
 mod tests;

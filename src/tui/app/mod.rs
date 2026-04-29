@@ -26,7 +26,9 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{
+        Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+    },
 };
 use tracing::{debug, info, warn};
 
@@ -40,12 +42,12 @@ use super::widgets::{
 use crate::config::{BindableAction, Config, ConfigStore, StateStore};
 use crate::error::{Result, TuiError};
 use crate::git::{
-    AiSummary, DiffInfo, EnrichedPrInfo, check_pr_for_branch, diff_hash, fetch_branch_summary,
-    fetch_enriched_pr, is_gh_available,
+    AiSummary, DiffInfo, EnrichedPrInfo, PrCheckResult, check_pr_for_branch, diff_hash,
+    fetch_branch_summary, fetch_enriched_pr, is_gh_available,
 };
 use crate::session::{
     AgentState, MultiRepoSessionId, ProjectId, SessionId, SessionListItem, SessionManager,
-    SessionStatus,
+    SessionStatus, WorktreeSession,
 };
 use crate::tmux::AgentStateDetector;
 
@@ -110,18 +112,26 @@ pub enum Modal {
         message: String,
         on_confirm: ConfirmAction,
     },
-    /// Path input modal with tab completion
+    /// Path input modal with a live-filtered subdirectory list.
+    ///
+    /// The list is populated on open and re-filtered on every keystroke.
+    /// Arrow keys move `completer.selected_idx`; `scroll` keeps the
+    /// highlighted row inside the visible window (same pattern as
+    /// `Modal::QuickSwitch`).
     PathInput {
         title: String,
         prompt: String,
         value: String,
         on_submit: InputAction,
         completer: PathCompleter,
+        /// First visible row of the completions list.
+        scroll: usize,
     },
     /// Loading spinner modal (non-interactive)
     Loading { title: String, message: String },
-    /// Help modal
-    Help,
+    /// Help modal. `scroll` is the first visible line of `build_help_lines`.
+    /// Clamped against the rendered content height in `render_help_modal`.
+    Help { scroll: u16 },
     /// Error modal
     Error { message: String },
     /// Settings modal
@@ -198,14 +208,28 @@ pub struct QuickSwitchMatch {
 pub enum PaletteMode {
     Unified,
     CommandOnly,
+    /// Section picker for a specific session. The palette is populated with
+    /// one entry per configured `[[sections]]` plus an "Auto" entry; selecting
+    /// an entry sets (or clears) the session's `section_override`.
+    SectionPicker {
+        session_id: SessionId,
+    },
 }
 
-/// A row in the quick-switch palette — either an open session or a
-/// keybound command.
+/// A row in the quick-switch palette — either an open session, a
+/// keybound command, or a section-move target.
 #[derive(Debug, Clone)]
 pub enum QuickSwitchItem {
     Session(QuickSwitchMatch),
     Command(CommandEntry),
+    /// Selecting this row pins `session_id` to `target` (Some = section name,
+    /// None = "Auto" / clear override).
+    SectionMove {
+        session_id: SessionId,
+        target: Option<String>,
+        /// Pre-formatted display label.
+        label: String,
+    },
 }
 
 /// A command row in the quick-switch palette.
@@ -309,10 +333,19 @@ pub enum SettingsEditing {
 /// Action to perform when input modal is submitted
 #[derive(Debug, Clone)]
 pub enum InputAction {
-    CreateSession { project_id: ProjectId },
+    CreateSession {
+        project_id: ProjectId,
+    },
+    CreateStackedSession {
+        project_id: ProjectId,
+        parent_session_id: SessionId,
+        parent_branch: String,
+    },
     AddProject,
     ScanDirectory,
-    RenameSession { session_id: SessionId },
+    RenameSession {
+        session_id: SessionId,
+    },
 }
 
 /// Action to perform when confirm modal is confirmed
@@ -387,6 +420,11 @@ pub struct AppUiState {
     pub throbber_state: throbber_widgets_tui::ThrobberState,
     /// Current agent states for Running Claude sessions (ephemeral, from background poller)
     pub agent_states: HashMap<SessionId, AgentState>,
+    /// Cached mirror of `AppState::cascade_paused_at.is_some()` — used by
+    /// `is_command_available` to gate the `CascadeResume` / `CascadeAbandon`
+    /// palette entries without an async read on every keystroke. Refreshed
+    /// alongside `list_items`.
+    pub cascade_paused: bool,
 }
 
 impl Default for AppUiState {
@@ -423,6 +461,7 @@ impl Default for AppUiState {
             tick_count: 0,
             throbber_state: throbber_widgets_tui::ThrobberState::default(),
             agent_states: HashMap::new(),
+            cascade_paused: false,
         }
     }
 }
@@ -446,7 +485,14 @@ impl AppUiState {
             | BindableAction::RenameSession
             | BindableAction::RestartSession
             | BindableAction::OpenInEditor
-            | BindableAction::OpenPullRequest => has_session,
+            | BindableAction::OpenPullRequest
+            | BindableAction::MoveToSection => has_session,
+            // Cascade merge is only meaningful from a session that's part of
+            // a stack. We accept any selected session here; the handler is
+            // cheap to no-op if the stack chain turns out to be length 1.
+            BindableAction::CascadeMergeMain | BindableAction::PushStack => has_session,
+            // Cascade resume / abandon are only meaningful when a cascade is paused.
+            BindableAction::CascadeResume | BindableAction::CascadeAbandon => self.cascade_paused,
             // Removing a project is only meaningful from a project row (no session selected)
             BindableAction::RemoveProject => has_project && !has_session,
             // GenerateSummary only does something when the Info pane is active
@@ -469,8 +515,7 @@ impl AppUiState {
         kb: &crate::config::KeyBindings,
         filter_query: &str,
     ) -> Vec<CommandEntry> {
-        let query_lower = filter_query.to_lowercase();
-        let mut out = Vec::new();
+        let mut scored: Vec<(i64, CommandEntry)> = Vec::new();
         for &action in BindableAction::ALL {
             if matches!(
                 action,
@@ -482,16 +527,23 @@ impl AppUiState {
                 continue;
             }
             let label = action.description();
-            if !query_lower.is_empty() && !label.to_lowercase().contains(&query_lower) {
+            let Some(score) = crate::fuzzy::fuzzy_score(label, filter_query) else {
                 continue;
-            }
-            out.push(CommandEntry {
-                action,
-                label,
-                keys: kb.keys_display(action),
-            });
+            };
+            scored.push((
+                score,
+                CommandEntry {
+                    action,
+                    label,
+                    keys: kb.keys_display(action),
+                },
+            ));
         }
-        out
+        if !filter_query.is_empty() {
+            // Stable sort by score desc preserves enum order among ties.
+            scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        }
+        scored.into_iter().map(|(_, e)| e).collect()
     }
 }
 
@@ -558,7 +610,9 @@ impl App {
 
         // One-time setup
         self.cleanup_stale_creating_sessions().await;
+        self.cleanup_stale_merging_sessions().await;
         self.sync_session_states().await;
+        self.reconcile_section_assignments().await;
 
         // Check gh availability and do initial PR check
         if self.config.pr_check_interval_secs > 0 {
@@ -691,9 +745,16 @@ impl App {
                                     crate::config::keybindings::editor_trigger_bytes(
                                         &self.config.keybindings,
                                     );
+                                // Shell sessions are named with a trailing
+                                // "-sh" (see resolve_shell_toggle_pair). Only
+                                // intercept Ctrl+Z for non-shell (Claude)
+                                // sessions, where SIGTSTP would freeze the
+                                // pane with no shell to recover from.
+                                let intercept_ctrl_z = !current_session.ends_with("-sh");
                                 match crate::tmux::attach_to_session(
                                     &current_session,
                                     editor_triggers,
+                                    intercept_ctrl_z,
                                 )
                                 .await
                                 {

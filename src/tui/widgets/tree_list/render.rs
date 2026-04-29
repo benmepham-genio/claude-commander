@@ -49,7 +49,7 @@ impl<'a> StatefulWidget for TreeList<'a> {
 impl<'a> TreeList<'a> {
     /// Convert items to list items
     pub(super) fn to_list_items(&self) -> Vec<ListItem<'a>> {
-        let show_program = self.has_mixed_programs();
+        let show_program = self.show_session_program && self.has_mixed_programs();
         let mut project_index: usize = 0;
         let mut worktree_number: usize = 0;
         let mut current_session_color = self.theme.project_color(0).1;
@@ -61,6 +61,7 @@ impl<'a> TreeList<'a> {
                     name,
                     main_branch,
                     worktree_count,
+                    nested,
                     ..
                 } => {
                     let (proj_color, sess_color) = self.theme.project_color(project_index);
@@ -73,8 +74,13 @@ impl<'a> TreeList<'a> {
                         String::new()
                     };
 
+                    // Project sub-headers nested under a section header are
+                    // indented one tree-level deeper so the hierarchy reads
+                    // SectionHeader > Project > Worktree.
+                    let pad = if *nested { "   " } else { " " };
+
                     let line = Line::from(vec![
-                        Span::raw(" "),
+                        Span::raw(pad),
                         Span::styled(
                             name.clone(),
                             Style::default().fg(proj_color).add_modifier(Modifier::BOLD),
@@ -88,6 +94,7 @@ impl<'a> TreeList<'a> {
 
                     ListItem::new(line)
                 }
+                SessionListItem::Spacer => ListItem::new(Line::from("")),
 
                 SessionListItem::Worktree {
                     title,
@@ -101,21 +108,24 @@ impl<'a> TreeList<'a> {
                     pr_labels,
                     agent_state,
                     unread,
+                    stacked_child,
                     ..
                 } => {
                     worktree_number += 1;
 
-                    let mut spans = vec![
-                        // Indentation or number prefix for worktrees
-                        if self.show_numbers {
-                            Span::styled(
-                                format!("{:>width$} ", worktree_number, width = NUMBER_WIDTH),
-                                Style::default().fg(self.theme.text_secondary),
-                            )
-                        } else {
-                            Span::raw(TREE_INDENT)
-                        },
-                    ];
+                    // Right-aligned session number prefix, with an extra
+                    // indent for stacked children so they sit one level deeper
+                    // than their stack base.
+                    let stack_prefix = if *stacked_child { STACK_INDENT } else { "" };
+                    let indent_span = Span::styled(
+                        format!(
+                            "{stack_prefix}{:>width$} ",
+                            worktree_number,
+                            width = NUMBER_WIDTH
+                        ),
+                        Style::default().fg(self.theme.text_secondary),
+                    );
+                    let mut spans = vec![indent_span];
 
                     // Single status glyph: spinner > waiting > unread > running > stopped
                     if let Some((glyph, color)) =
@@ -249,6 +259,22 @@ impl<'a> TreeList<'a> {
                     }
 
                     ListItem::new(Line::from(spans))
+                }
+                SessionListItem::SectionHeader { name, count } => {
+                    let line = Line::from(vec![
+                        Span::raw(" "),
+                        Span::styled(
+                            name.clone(),
+                            Style::default()
+                                .fg(self.theme.text_accent)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!(" ({})", count),
+                            Style::default().fg(self.theme.text_secondary),
+                        ),
+                    ]);
+                    ListItem::new(line)
                 }
             })
             .collect()

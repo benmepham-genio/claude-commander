@@ -2,22 +2,26 @@
 
 use super::*;
 
-/// Maximum number of rows rendered in the quick-switch palette at once.
+/// Which cascade entrypoint `run_cascade_action` should invoke.
+#[derive(Debug, Clone, Copy)]
+enum CascadeAction {
+    Start,
+    Resume,
+}
+
+/// Maximum number of rows rendered in a scrollable list modal at once.
 ///
 /// Shared between the render layer and the input handler so the scroll
-/// offset and the visible window agree.
-pub(super) const PALETTE_MAX_VISIBLE: usize = 10;
+/// offset and the visible window agree. Used by both the quick-switch
+/// palette and the path-input completions list.
+pub(super) const LIST_MAX_VISIBLE: usize = 10;
 
 /// Return the `scroll` offset that keeps `selected_idx` inside a visible
 /// window of `visible_rows` rows, starting from the caller's current
 /// scroll position. Handles all four cases (above window, below window,
 /// wrap-around onto either end, and no-op when already in view) in a single
 /// pure function so it can be unit-tested independently.
-pub(super) fn adjust_palette_scroll(
-    selected_idx: usize,
-    scroll: usize,
-    visible_rows: usize,
-) -> usize {
+pub(super) fn adjust_list_scroll(selected_idx: usize, scroll: usize, visible_rows: usize) -> usize {
     if visible_rows == 0 {
         return 0;
     }
@@ -31,6 +35,37 @@ pub(super) fn adjust_palette_scroll(
 }
 
 impl App {
+    /// Open `Modal::PathInput` at the current working directory with its
+    /// subdirectory list already populated.
+    ///
+    /// The initial value is `cwd/` (trailing slash appended) so
+    /// `list_matching_dirs` returns the children of cwd rather than its
+    /// siblings — which is what users almost always want for Add Project /
+    /// Scan Directory.
+    pub(super) fn open_path_input(
+        &mut self,
+        title: String,
+        prompt: String,
+        on_submit: InputAction,
+    ) {
+        let mut value = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        if !value.ends_with('/') {
+            value.push('/');
+        }
+        let mut completer = PathCompleter::new();
+        completer.refilter(&value);
+        self.ui_state.modal = Modal::PathInput {
+            title,
+            prompt,
+            value,
+            on_submit,
+            completer,
+            scroll: 0,
+        };
+    }
+
     /// Check if the selected session is in Creating state
     pub(super) fn selected_session_is_creating(&self) -> bool {
         self.ui_state.list_items.iter().any(|item| {
@@ -384,6 +419,235 @@ impl App {
         }
     }
 
+    /// Handle "new stacked session" — create a session on top of the stack the
+    /// selected session belongs to. Starting from the selected session, we
+    /// walk to the top of its stack (the leaf, if any), so pressing the
+    /// hotkey from any row in the stack always produces a sibling stacked on
+    /// the current topmost member. Selecting a standalone session starts a
+    /// new stack rooted there.
+    pub(super) async fn handle_new_stacked_session(&mut self) {
+        let Some(selected_session_id) = self.ui_state.selected_session_id else {
+            self.ui_state.status_message = Some((
+                "Select a session to stack on top of".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        };
+        let resolved = {
+            let state = self.store.read().await;
+            state
+                .get_session(&selected_session_id)
+                .and_then(|selected| {
+                    let project_id = selected.project_id;
+                    let project = state.get_project(&project_id)?;
+                    let project_sessions: Vec<&WorktreeSession> = project
+                        .worktrees
+                        .iter()
+                        .filter_map(|sid| state.sessions.get(sid))
+                        .collect();
+                    let top_id = crate::session::stack_top(selected_session_id, &project_sessions);
+                    let top = state.get_session(&top_id)?;
+                    Some((project_id, top.id, top.branch.clone(), top.title.clone()))
+                })
+        };
+        let Some((project_id, parent_session_id, parent_branch, parent_title)) = resolved else {
+            return;
+        };
+        self.ui_state.modal = Modal::Input {
+            title: format!("New Session Stacked on \"{}\"", parent_title),
+            prompt: "Enter session name:".to_string(),
+            value: String::new(),
+            on_submit: InputAction::CreateStackedSession {
+                project_id,
+                parent_session_id,
+                parent_branch,
+            },
+        };
+    }
+
+    /// Handle `Cascade merge main` — walk to the base of the selected
+    /// session's stack and merge main → base → each descendant. Pauses on
+    /// the first conflict; surface the outcome as a status-message toast.
+    pub(super) async fn handle_cascade_merge_main(&mut self) {
+        let Some(selected_session_id) = self.ui_state.selected_session_id else {
+            self.ui_state.status_message = Some((
+                "Select a session in a stack to cascade from".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        };
+        self.run_cascade_action(selected_session_id, CascadeAction::Start);
+    }
+
+    /// Handle `Cascade resume` — continue a previously paused cascade.
+    pub(super) async fn handle_cascade_resume(&mut self) {
+        let paused_at = {
+            let state = self.store.read().await;
+            state.cascade_paused_at
+        };
+        let Some(sid) = paused_at else {
+            self.ui_state.status_message = Some((
+                "No cascade in progress".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        };
+        self.run_cascade_action(sid, CascadeAction::Resume);
+    }
+
+    /// Handle `Push stack` — push every branch in the selected session's
+    /// stack to origin, in base→leaf order, on a background task.
+    pub(super) fn handle_push_stack(&mut self) {
+        let Some(session_id) = self.ui_state.selected_session_id else {
+            self.ui_state.status_message = Some((
+                "Select a session in a stack to push".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        };
+
+        // Close the modal (if dispatched from the palette) and drop a toast
+        // so the TUI renders immediately before the push spawns.
+        self.ui_state.modal = Modal::None;
+        self.ui_state.status_message = Some((
+            "Push stack starting…".to_string(),
+            Instant::now() + Duration::from_secs(30),
+        ));
+
+        let agent_states = self.ui_state.agent_states.clone();
+        let mgr = self.session_manager.clone();
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let result = mgr
+                .push_stack(&session_id, &agent_states)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::PushStackFinished {
+                    result,
+                }))
+                .await;
+        });
+    }
+
+    pub(super) async fn handle_push_stack_finished(
+        &mut self,
+        result: std::result::Result<crate::session::PushStackOutcome, String>,
+    ) {
+        self.refresh_list_items().await;
+        match result {
+            Ok(outcome) => {
+                let msg = if outcome.sessions_pushed == 0 {
+                    "Push stack complete (nothing to push)".to_string()
+                } else {
+                    format!(
+                        "Push stack complete: pushed {} branch(es)",
+                        outcome.sessions_pushed
+                    )
+                };
+                self.ui_state.status_message = Some((msg, Instant::now() + Duration::from_secs(5)));
+            }
+            Err(e) => {
+                self.ui_state.status_message = Some((
+                    format!("Push stack failed: {e}"),
+                    Instant::now() + Duration::from_secs(15),
+                ));
+            }
+        }
+    }
+
+    /// Handle `Cascade abandon` — clear the paused state without merging.
+    pub(super) async fn handle_cascade_abandon(&mut self) {
+        match self.session_manager.cascade_abandon().await {
+            Ok(()) => {
+                self.ui_state.status_message = Some((
+                    "Cascade pause cleared".to_string(),
+                    Instant::now() + Duration::from_secs(3),
+                ));
+                self.refresh_list_items().await;
+            }
+            Err(e) => {
+                self.ui_state.status_message = Some((
+                    format!("Cascade abandon failed: {e}"),
+                    Instant::now() + Duration::from_secs(5),
+                ));
+            }
+        }
+    }
+
+    fn run_cascade_action(&mut self, session_id: SessionId, action: CascadeAction) {
+        // Close any open modal (e.g. the palette that dispatched us) and
+        // drop a "running" toast immediately so the TUI redraws with neither
+        // blocked before the cascade starts. The cascade itself runs on a
+        // background task so git merges / fetches don't stall the event loop.
+        self.ui_state.modal = Modal::None;
+        let action_label = match action {
+            CascadeAction::Start => "Cascade merge starting…",
+            CascadeAction::Resume => "Resuming cascade merge…",
+        };
+        self.ui_state.status_message = Some((
+            action_label.to_string(),
+            Instant::now() + Duration::from_secs(30),
+        ));
+
+        let agent_states = self.ui_state.agent_states.clone();
+        let mgr = self.session_manager.clone();
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let result = match action {
+                CascadeAction::Start => mgr.cascade_merge_stack(&session_id, &agent_states).await,
+                CascadeAction::Resume => mgr.cascade_resume(&agent_states).await,
+            };
+            let result = result.map_err(|e| e.to_string());
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::CascadeFinished {
+                    result,
+                }))
+                .await;
+        });
+    }
+
+    pub(super) async fn handle_cascade_finished(
+        &mut self,
+        result: std::result::Result<crate::session::CascadeOutcome, String>,
+    ) {
+        self.refresh_list_items().await;
+        match result {
+            Ok(crate::session::CascadeOutcome::Complete { sessions_merged }) => {
+                let msg = if sessions_merged == 0 {
+                    "Cascade complete (nothing to merge)".to_string()
+                } else {
+                    format!("Cascade complete: merged {sessions_merged} session(s)")
+                };
+                self.ui_state.status_message = Some((msg, Instant::now() + Duration::from_secs(5)));
+            }
+            Ok(crate::session::CascadeOutcome::PausedOnConflict {
+                at,
+                sessions_merged,
+            }) => {
+                let title = {
+                    let state = self.store.read().await;
+                    state
+                        .get_session(&at)
+                        .map(|s| s.title.clone())
+                        .unwrap_or_else(|| at.to_string())
+                };
+                self.ui_state.status_message = Some((
+                    format!(
+                        "Cascade paused at '{title}' ({sessions_merged} merged). Resolve conflicts and run `Cascade resume`."
+                    ),
+                    Instant::now() + Duration::from_secs(15),
+                ));
+            }
+            Err(e) => {
+                self.ui_state.status_message = Some((
+                    format!("Cascade failed: {e}"),
+                    Instant::now() + Duration::from_secs(10),
+                ));
+            }
+        }
+    }
+
     /// Open the Checkout Branch modal.
     ///
     /// Loads the current list of branches synchronously via gix and kicks
@@ -582,34 +846,43 @@ impl App {
         };
     }
 
-    /// Gather session matches for a query (empty query = all sessions)
+    /// Gather session matches for a query (empty query = all sessions).
+    ///
+    /// Non-empty queries are ranked by fuzzy score (best match first);
+    /// empty queries fall back to alphabetical title order.
     pub(super) async fn gather_quick_switch_matches(&self, query: &str) -> Vec<QuickSwitchMatch> {
         let state = self.store.read().await;
-        let mut matches = Vec::new();
+        let mut scored: Vec<(i64, QuickSwitchMatch)> = Vec::new();
 
         for session in state.sessions.values() {
             if session.status == SessionStatus::Creating {
                 continue;
             }
-            if !query.is_empty() && !session.matches_query(query) {
+            let Some(score) = session.fuzzy_score(query) else {
                 continue;
-            }
+            };
             let project_name = state
                 .get_project(&session.project_id)
                 .map(|p| p.name.clone())
                 .unwrap_or_default();
-            matches.push(QuickSwitchMatch {
-                session_id: session.id,
-                title: session.title.clone(),
-                branch: session.branch.clone(),
-                project_name,
-                status: session.status,
-            });
+            scored.push((
+                score,
+                QuickSwitchMatch {
+                    session_id: session.id,
+                    title: session.title.clone(),
+                    branch: session.branch.clone(),
+                    project_name,
+                    status: session.status,
+                },
+            ));
         }
 
-        // Sort by title for predictable ordering
-        matches.sort_by(|a, b| a.title.cmp(&b.title));
-        matches
+        if query.is_empty() {
+            scored.sort_by(|a, b| a.1.title.cmp(&b.1.title));
+        } else {
+            scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.title.cmp(&b.1.title)));
+        }
+        scored.into_iter().map(|(_, m)| m).collect()
     }
 
     /// Compute the *effective* palette mode — a leading `>` in a Unified
@@ -649,6 +922,9 @@ impl App {
         let eff_mode = Self::effective_palette_mode(mode, query);
         let eff_query = Self::palette_filter_query(eff_mode, query);
         let mut out: Vec<QuickSwitchItem> = Vec::new();
+        if let PaletteMode::SectionPicker { session_id } = eff_mode {
+            return self.gather_section_picker_items(session_id, eff_query);
+        }
         if eff_mode == PaletteMode::Unified {
             for m in self.gather_quick_switch_matches(eff_query).await {
                 out.push(QuickSwitchItem::Session(m));
@@ -656,6 +932,36 @@ impl App {
         }
         for c in self.gather_command_entries(eff_query) {
             out.push(QuickSwitchItem::Command(c));
+        }
+        out
+    }
+
+    /// Build the section-picker rows for the move-to-section palette mode.
+    /// Always includes an "Auto" entry first to clear any existing override.
+    fn gather_section_picker_items(
+        &self,
+        session_id: SessionId,
+        filter_query: &str,
+    ) -> Vec<QuickSwitchItem> {
+        let q = filter_query.to_lowercase();
+        let mut out: Vec<QuickSwitchItem> = Vec::new();
+        let auto_label = "Auto (clear override)".to_string();
+        if q.is_empty() || auto_label.to_lowercase().contains(&q) {
+            out.push(QuickSwitchItem::SectionMove {
+                session_id,
+                target: None,
+                label: auto_label,
+            });
+        }
+        for section in &self.config.sections {
+            if !q.is_empty() && !section.name.to_lowercase().contains(&q) {
+                continue;
+            }
+            out.push(QuickSwitchItem::SectionMove {
+                session_id,
+                target: Some(section.name.clone()),
+                label: section.name.clone(),
+            });
         }
         out
     }
@@ -672,11 +978,10 @@ impl App {
 
         let eff_mode = Self::effective_palette_mode(mode, &query);
         let eff_query = Self::palette_filter_query(eff_mode, &query);
-        let eff_query_lower = eff_query.to_lowercase();
 
         // Build the session rows synchronously from list_items so the refilter
         // can run without awaiting the store lock on every keystroke.
-        let mut session_items: Vec<QuickSwitchItem> = Vec::new();
+        let mut scored_sessions: Vec<(i64, QuickSwitchMatch)> = Vec::new();
         if eff_mode == PaletteMode::Unified {
             // Build project name lookup from list items
             let mut project_names: std::collections::HashMap<SessionId, String> =
@@ -691,6 +996,7 @@ impl App {
                         project_names.insert(*id, current_project_name.clone());
                     }
                     SessionListItem::MultiRepo { .. } => {}
+                    SessionListItem::SectionHeader { .. } | SessionListItem::Spacer => {}
                 }
             }
 
@@ -702,20 +1008,38 @@ impl App {
                     status,
                     ..
                 } = item
-                    && (eff_query_lower.is_empty()
-                        || title.to_lowercase().contains(&eff_query_lower))
                 {
+                    // Score against title and branch; best field wins.
+                    let score = [title.as_str(), branch.as_str()]
+                        .iter()
+                        .filter_map(|s| crate::fuzzy::fuzzy_score(s, eff_query))
+                        .max();
+                    let Some(score) = score else { continue };
                     let project_name = project_names.get(id).cloned().unwrap_or_default();
-                    session_items.push(QuickSwitchItem::Session(QuickSwitchMatch {
-                        session_id: *id,
-                        title: title.clone(),
-                        branch: branch.clone(),
-                        project_name,
-                        status: *status,
-                    }));
+                    scored_sessions.push((
+                        score,
+                        QuickSwitchMatch {
+                            session_id: *id,
+                            title: title.clone(),
+                            branch: branch.clone(),
+                            project_name,
+                            status: *status,
+                        },
+                    ));
                 }
             }
+
+            if eff_query.is_empty() {
+                // Preserve tree order for empty queries.
+            } else {
+                scored_sessions
+                    .sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.title.cmp(&b.1.title)));
+            }
         }
+        let session_items: Vec<QuickSwitchItem> = scored_sessions
+            .into_iter()
+            .map(|(_, m)| QuickSwitchItem::Session(m))
+            .collect();
 
         let command_items: Vec<QuickSwitchItem> = self
             .gather_command_entries(eff_query)
@@ -739,7 +1063,7 @@ impl App {
             // Refilter collapses to a fresh window: reset to the top then
             // adjust so the (now-clamped) selection is still visible.
             *scroll = 0;
-            *scroll = adjust_palette_scroll(*selected_idx, *scroll, PALETTE_MAX_VISIBLE);
+            *scroll = adjust_list_scroll(*selected_idx, *scroll, LIST_MAX_VISIBLE);
         }
     }
 
@@ -792,6 +1116,52 @@ impl App {
         }
     }
 
+    /// Open the "Move to section" palette for the selected session.
+    /// The palette lists "Auto" plus one entry per configured `[[sections]]`;
+    /// selecting "Auto" clears any override.
+    pub(super) async fn handle_move_to_section(&mut self) {
+        if self.config.sections.is_empty() {
+            self.ui_state.status_message = Some((
+                "No [[sections]] configured".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        }
+        let Some(session_id) = self.ui_state.selected_session_id else {
+            return;
+        };
+        let mode = PaletteMode::SectionPicker { session_id };
+        let matches = self.gather_section_picker_items(session_id, "");
+        self.ui_state.modal = Modal::QuickSwitch {
+            mode,
+            query: String::new(),
+            matches,
+            selected_idx: 0,
+            scroll: 0,
+        };
+    }
+
+    /// Apply a manual section move chosen in the picker palette.
+    /// `target = Some(name)` sets the override; `target = None` clears it.
+    pub(super) async fn apply_section_move(
+        &mut self,
+        session_id: SessionId,
+        target: Option<String>,
+    ) {
+        let sections = self.config.sections.clone();
+        let now = chrono::Utc::now();
+        let _ = self
+            .store
+            .mutate(move |state| {
+                if let Some(session) = state.get_session_mut(&session_id) {
+                    session.section_override = target;
+                    crate::session::apply_assignment(session, &sections, now);
+                }
+            })
+            .await;
+        self.refresh_list_items().await;
+    }
+
     /// Handle rename session - show input modal pre-filled with current title.
     /// Only the displayed title is changed; the underlying worktree, branch,
     /// and tmux session keep their original names.
@@ -841,6 +1211,86 @@ impl App {
                         return;
                     }
                 };
+
+                // Refresh list and select the new placeholder
+                self.refresh_list_items().await;
+                if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
+                    matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
+                }) {
+                    self.ui_state.list_state.select(Some(idx));
+                }
+                self.update_selection();
+
+                // Spawn background task for heavy work
+                let session_manager = self.session_manager.clone();
+                let tx = self.event_loop.sender();
+                tokio::spawn(async move {
+                    match session_manager.finalize_session(&session_id).await {
+                        Ok(sid) => {
+                            let _ = tx
+                                .send(AppEvent::StateUpdate(StateUpdate::SessionCreated {
+                                    session_id: sid,
+                                }))
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = tx
+                                .send(AppEvent::StateUpdate(StateUpdate::SessionCreateFailed {
+                                    session_id,
+                                    message: format!("Failed to create session: {}", e),
+                                }))
+                                .await;
+                        }
+                    }
+                });
+            }
+            InputAction::CreateStackedSession {
+                project_id,
+                parent_session_id,
+                parent_branch: _parent_branch,
+            } => {
+                if value.trim().is_empty() {
+                    self.ui_state.status_message = Some((
+                        "Session name cannot be empty".to_string(),
+                        Instant::now() + Duration::from_secs(3),
+                    ));
+                    return;
+                }
+
+                // Insert placeholder session immediately (no blocking modal)
+                self.ui_state.modal = Modal::None;
+                let session_id = match self
+                    .session_manager
+                    .prepare_session(&project_id, value, None, None)
+                    .await
+                {
+                    Ok(id) => id,
+                    Err(e) => {
+                        self.ui_state.modal = Modal::Error {
+                            message: format!("Failed to create session: {}", e),
+                        };
+                        return;
+                    }
+                };
+
+                // Mark the new placeholder as stacked on the parent; finalize
+                // reads `stack_parent_session_id` to fork the worktree branch
+                // from the parent's branch and to inject the PR-base context
+                // into the Claude launch command.
+                if let Err(e) = self
+                    .store
+                    .mutate(move |state| {
+                        if let Some(s) = state.get_session_mut(&session_id) {
+                            s.stack_parent_session_id = Some(parent_session_id);
+                        }
+                    })
+                    .await
+                {
+                    self.ui_state.modal = Modal::Error {
+                        message: format!("Failed to save state: {}", e),
+                    };
+                    return;
+                }
 
                 // Refresh list and select the new placeholder
                 self.refresh_list_items().await;

@@ -1,11 +1,10 @@
 ---
 source: src/tui/render_tests.rs
-assertion_line: 925
 expression: terminal.backend()
 ---
 " my-project [main] (2)                                                "
-"   └── ● Existing session [feature-existing]                          "
-"   └── ⠋ New session [feature-new]                                    "
+"     1 ● Existing session [feature-existing]                          "
+"     2 ⠋ New session [feature-new]                                    "
 "                                                                      "
 "                                                                      "
 "                                                                      "

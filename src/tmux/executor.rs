@@ -141,8 +141,17 @@ impl TmuxExecutor {
     ) -> Result<()> {
         let working_dir_str = working_dir.to_str().unwrap_or(".");
 
+        // tmux unconditionally sets `TERM_PROGRAM=tmux` for processes inside a
+        // pane (and `-e` cannot override it), which causes Claude Code to
+        // report `terminal.type=tmux` in its OpenTelemetry metrics. Prefix the
+        // launched command with explicit env assignments so child processes
+        // (the shell, then `claude` itself) see Claude Commander instead.
+        let version = env!("CARGO_PKG_VERSION");
+        let wrapped_cmd = command
+            .map(|cmd| format!("TERM_PROGRAM=claude-commander TERM_PROGRAM_VERSION={version} {cmd}"));
+
         // Create session with remain-on-exit option so pane stays open if command exits
-        let args: Vec<&str> = if let Some(cmd) = command {
+        let args: Vec<&str> = if let Some(cmd) = wrapped_cmd.as_deref() {
             vec![
                 "new-session",
                 "-d",

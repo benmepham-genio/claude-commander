@@ -27,6 +27,7 @@ impl App {
                     self.ui_state.selected_session_id = None;
                     self.ui_state.selected_project_id = None;
                 }
+                SessionListItem::SectionHeader { .. } | SessionListItem::Spacer => {}
             }
         }
 

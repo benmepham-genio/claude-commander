@@ -105,4 +105,5 @@ The `cargo fmt` hook auto-fixes formatting. If `cargo clippy` fails, fix the war
 - Never skip GPG commit signing
 - Precommit hooks may autoformat files while failing the commit; these changes will need to be restaged and the commit reattempted.
 - Before committing, always ensure `cargo clippy` and `cargo build` pass with no warnings or errors. Fix any issues before creating the commit.
+- Cutting a release: `cargo release {patch,minor,major} --execute` (see README). Never bump `Cargo.toml` manually.
 

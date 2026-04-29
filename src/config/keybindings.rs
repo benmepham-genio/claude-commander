@@ -28,6 +28,11 @@ pub enum BindableAction {
     Select,
     SelectShell,
     NewSession,
+    NewStackedSession,
+    CascadeMergeMain,
+    CascadeResume,
+    CascadeAbandon,
+    PushStack,
     NewProject,
     CheckoutBranch,
     DeleteSession,
@@ -50,6 +55,7 @@ pub enum BindableAction {
     GenerateSummary,
     ScanDirectory,
     NewMultiRepoSession,
+    MoveToSection,
 }
 
 impl BindableAction {
@@ -60,6 +66,11 @@ impl BindableAction {
         Self::Select,
         Self::SelectShell,
         Self::NewSession,
+        Self::NewStackedSession,
+        Self::CascadeMergeMain,
+        Self::CascadeResume,
+        Self::CascadeAbandon,
+        Self::PushStack,
         Self::NewProject,
         Self::CheckoutBranch,
         Self::DeleteSession,
@@ -70,6 +81,7 @@ impl BindableAction {
         Self::OpenPullRequest,
         Self::ScanDirectory,
         Self::NewMultiRepoSession,
+        Self::MoveToSection,
         Self::TogglePane,
         Self::TogglePaneReverse,
         Self::ShrinkLeftPane,
@@ -92,6 +104,11 @@ impl BindableAction {
             Self::Select => "select",
             Self::SelectShell => "select_shell",
             Self::NewSession => "new_session",
+            Self::NewStackedSession => "new_stacked_session",
+            Self::CascadeMergeMain => "cascade_merge_main",
+            Self::CascadeResume => "cascade_resume",
+            Self::CascadeAbandon => "cascade_abandon",
+            Self::PushStack => "push_stack",
             Self::NewProject => "new_project",
             Self::CheckoutBranch => "checkout_branch",
             Self::DeleteSession => "delete_session",
@@ -114,6 +131,7 @@ impl BindableAction {
             Self::GenerateSummary => "generate_summary",
             Self::ScanDirectory => "scan_directory",
             Self::NewMultiRepoSession => "new_multi_repo_session",
+            Self::MoveToSection => "move_to_section",
         }
     }
 
@@ -125,6 +143,11 @@ impl BindableAction {
             Self::Select => "Attach to selected session",
             Self::SelectShell => "Open shell in worktree",
             Self::NewSession => "New worktree session",
+            Self::NewStackedSession => "New stacked session on selected branch",
+            Self::CascadeMergeMain => "Cascade merge main through stack",
+            Self::CascadeResume => "Resume paused cascade merge",
+            Self::CascadeAbandon => "Abandon paused cascade merge",
+            Self::PushStack => "Push stack to remote (base → leaf)",
             Self::NewProject => "New project (add git repo)",
             Self::CheckoutBranch => "Checkout existing branch",
             Self::DeleteSession => "Delete/kill session",
@@ -147,6 +170,7 @@ impl BindableAction {
             Self::GenerateSummary => "Generate AI summary",
             Self::ScanDirectory => "Scan directory for repos",
             Self::NewMultiRepoSession => "New multi-repo session",
+            Self::MoveToSection => "Move session to section…",
         }
     }
 
@@ -156,6 +180,11 @@ impl BindableAction {
             Self::NavigateUp | Self::NavigateDown | Self::Select => "Navigation",
             Self::SelectShell
             | Self::NewSession
+            | Self::NewStackedSession
+            | Self::CascadeMergeMain
+            | Self::CascadeResume
+            | Self::CascadeAbandon
+            | Self::PushStack
             | Self::NewProject
             | Self::CheckoutBranch
             | Self::DeleteSession
@@ -165,7 +194,8 @@ impl BindableAction {
             | Self::OpenInEditor
             | Self::OpenPullRequest
             | Self::ScanDirectory
-            | Self::NewMultiRepoSession => "Session Management",
+            | Self::NewMultiRepoSession
+            | Self::MoveToSection => "Session Management",
             Self::TogglePane
             | Self::TogglePaneReverse
             | Self::ShrinkLeftPane
@@ -187,6 +217,11 @@ impl FromStr for BindableAction {
             "select" => Ok(Self::Select),
             "select_shell" => Ok(Self::SelectShell),
             "new_session" => Ok(Self::NewSession),
+            "new_stacked_session" => Ok(Self::NewStackedSession),
+            "cascade_merge_main" => Ok(Self::CascadeMergeMain),
+            "cascade_resume" => Ok(Self::CascadeResume),
+            "cascade_abandon" => Ok(Self::CascadeAbandon),
+            "push_stack" => Ok(Self::PushStack),
             "new_project" => Ok(Self::NewProject),
             "checkout_branch" => Ok(Self::CheckoutBranch),
             "delete_session" => Ok(Self::DeleteSession),
@@ -209,6 +244,7 @@ impl FromStr for BindableAction {
             "generate_summary" => Ok(Self::GenerateSummary),
             "scan_directory" => Ok(Self::ScanDirectory),
             "new_multi_repo_session" => Ok(Self::NewMultiRepoSession),
+            "move_to_section" => Ok(Self::MoveToSection),
             _ => Err(format!("unknown action: {s}")),
         }
     }
@@ -487,6 +523,10 @@ impl Default for KeyBindings {
         bindings.insert(
             BindableAction::NewSession,
             vec![kb(KeyCode::Char('n'), none)],
+        );
+        bindings.insert(
+            BindableAction::NewStackedSession,
+            vec![kb(KeyCode::Char('t'), none)],
         );
         bindings.insert(
             BindableAction::NewProject,
@@ -840,6 +880,38 @@ mod tests {
     }
 
     // -- KeyBindings defaults --
+
+    #[test]
+    fn test_default_new_stacked_session_bound_to_t() {
+        let kb = KeyBindings::default();
+        let key = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&key), Some(BindableAction::NewStackedSession));
+    }
+
+    #[test]
+    fn test_cascade_actions_round_trip_through_from_str() {
+        // Palette-only actions must still survive TOML round-tripping so a
+        // user who binds them in config doesn't hit "unknown action".
+        for action in [
+            BindableAction::CascadeMergeMain,
+            BindableAction::CascadeResume,
+            BindableAction::CascadeAbandon,
+            BindableAction::PushStack,
+        ] {
+            let name = action.config_name();
+            assert_eq!(BindableAction::from_str(name).unwrap(), action);
+        }
+    }
+
+    #[test]
+    fn test_cascade_actions_default_to_unbound() {
+        // They're palette-only; no default hotkey should resolve to them.
+        let kb = KeyBindings::default();
+        assert!(kb.keys_for(BindableAction::CascadeMergeMain).is_empty());
+        assert!(kb.keys_for(BindableAction::CascadeResume).is_empty());
+        assert!(kb.keys_for(BindableAction::CascadeAbandon).is_empty());
+        assert!(kb.keys_for(BindableAction::PushStack).is_empty());
+    }
 
     #[test]
     fn test_defaults_match_current_bindings() {
