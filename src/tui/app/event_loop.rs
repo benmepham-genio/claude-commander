@@ -98,9 +98,8 @@ impl App {
                 }
 
                 // Resolve pending digit jump if debounce window expired
-                if self.config.show_session_numbers
-                    && let Some(crate::tui::digit_accumulator::DigitResult::Jump(n)) =
-                        self.digit_accumulator.tick()
+                if let Some(crate::tui::digit_accumulator::DigitResult::Jump(n)) =
+                    self.digit_accumulator.tick()
                 {
                     self.jump_to_session_number(n);
                 }

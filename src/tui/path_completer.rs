@@ -1,21 +1,30 @@
-//! Tab-completion for filesystem paths in the Add Project modal.
+//! Live-filtered directory completer backing the `Modal::PathInput` list.
+//!
+//! Behaviour is modelled on fish-style live completion rather than
+//! shell-style Tab cycling:
+//!
+//! - The input handler calls [`PathCompleter::refilter`] on every keystroke
+//!   so the visible list tracks what the user has typed.
+//! - Arrow keys move the highlighted row via [`PathCompleter::move_selection_up`]
+//!   / [`move_selection_down`].
+//! - [`PathCompleter::complete`] (Tab) only extends the input to the longest
+//!   common prefix — cycling through matches is now the arrow keys' job.
+//! - Tilde (`~`) is expanded for disk reads and collapsed back on return.
 
 use std::path::{Path, PathBuf};
 
-/// Shell-style tab completion for directory paths.
+/// Live-filtered directory completer backing the `Modal::PathInput` list.
 ///
-/// Provides:
-/// - Tilde (`~`) expansion to the user's home directory
-/// - Completion to the longest common prefix on first Tab
-/// - Cycling through individual matches on subsequent Tabs
-/// - Staleness detection: completions are recomputed when input changes
+/// Invariant: `selected_idx` is `Some(i)` exactly when `completions` is
+/// non-empty, and `i < completions.len()`.
 #[derive(Debug, Clone)]
 pub struct PathCompleter {
-    /// Matching directory names from the last Tab press
+    /// Directory paths matching the current input.
     completions: Vec<String>,
-    /// Current cycling index (None = at common prefix stage)
-    cycle_index: Option<usize>,
-    /// The input value completions were computed from (staleness check)
+    /// Highlighted row within `completions`. See invariant above.
+    selected_idx: Option<usize>,
+    /// The expanded input `completions` were computed from — lets [`complete`]
+    /// reuse a recent refilter without re-reading the directory.
     completed_from: String,
 }
 
@@ -29,21 +38,46 @@ impl PathCompleter {
     pub fn new() -> Self {
         Self {
             completions: Vec::new(),
-            cycle_index: None,
+            selected_idx: None,
             completed_from: String::new(),
         }
     }
 
-    /// Handle a Tab press: compute or cycle completions.
+    /// Recompute the completion list from `value`.
     ///
-    /// Returns the new input value after completion.
+    /// Called on every keystroke in the modal so the list stays live. Resets
+    /// the highlighted row to the first entry (or clears it if the list is
+    /// now empty), which matches the palette's "fresh filter, fresh
+    /// selection" behaviour.
+    pub fn refilter(&mut self, value: &str) {
+        let expanded = expand_tilde(value);
+        self.completions = list_matching_dirs(&expanded);
+        self.selected_idx = if self.completions.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
+        self.completed_from = expanded;
+    }
+
+    /// Handle a Tab press: extend the input to the longest common prefix.
+    ///
+    /// Returns the new value (possibly unchanged). A single-match list
+    /// completes to `<name>/` so the next [`refilter`] lists the children.
+    /// Unlike the old implementation, repeated Tab never cycles — arrow keys
+    /// handle that instead.
     pub fn complete(&mut self, value: &str) -> String {
         let expanded = expand_tilde(value);
 
-        // If completions are stale, recompute
+        // Cheap guard: if the caller hasn't refiltered since the last edit,
+        // do it now so we're completing against a current view of disk.
         if self.completed_from != expanded {
             self.completions = list_matching_dirs(&expanded);
-            self.cycle_index = None;
+            self.selected_idx = if self.completions.is_empty() {
+                None
+            } else {
+                Some(0)
+            };
             self.completed_from = expanded.clone();
         }
 
@@ -52,51 +86,55 @@ impl PathCompleter {
         }
 
         if self.completions.len() == 1 {
-            // Single match — complete it with a trailing slash
-            let result = &self.completions[0];
-            let full = format!("{}/", result);
+            let full = format!("{}/", &self.completions[0]);
             self.completed_from = full.clone();
             return maybe_unexpand_tilde(value, &full);
         }
 
-        // Multiple matches
-        match self.cycle_index {
-            None => {
-                // First Tab: complete to longest common prefix
-                let lcp = longest_common_prefix(&self.completions);
-                if lcp != expanded {
-                    // We made progress — show the common prefix
-                    self.completed_from = lcp.clone();
-                    maybe_unexpand_tilde(value, &lcp)
-                } else {
-                    // Already at the common prefix — start cycling
-                    self.cycle_index = Some(0);
-                    let result = format!("{}/", &self.completions[0]);
-                    self.completed_from = result.clone();
-                    maybe_unexpand_tilde(value, &result)
-                }
-            }
-            Some(idx) => {
-                // Subsequent Tabs: cycle to next match
-                let next = (idx + 1) % self.completions.len();
-                self.cycle_index = Some(next);
-                let result = format!("{}/", &self.completions[next]);
-                self.completed_from = result.clone();
-                maybe_unexpand_tilde(value, &result)
-            }
+        // Multiple matches: only extend to the common prefix. Once the user
+        // has typed (or Tab-completed) to the common prefix, further Tabs are
+        // no-ops — the arrow keys do the cycling work.
+        let lcp = longest_common_prefix(&self.completions);
+        if lcp.len() > expanded.len() {
+            self.completed_from = lcp.clone();
+            maybe_unexpand_tilde(value, &lcp)
+        } else {
+            value.to_string()
         }
     }
 
-    /// Returns the current completion candidates and the highlighted index (if cycling).
-    pub fn visible_completions(&self) -> (&[String], Option<usize>) {
-        (&self.completions, self.cycle_index)
+    /// Move the highlighted row up, wrapping to the last entry from row 0.
+    pub fn move_selection_up(&mut self) {
+        if let Some(idx) = self.selected_idx
+            && !self.completions.is_empty()
+        {
+            self.selected_idx = Some(if idx == 0 {
+                self.completions.len() - 1
+            } else {
+                idx - 1
+            });
+        }
     }
 
-    /// Reset completion state. Call this on any character input or backspace.
-    pub fn invalidate(&mut self) {
-        self.completions.clear();
-        self.cycle_index = None;
-        self.completed_from.clear();
+    /// Move the highlighted row down, wrapping back to row 0 from the end.
+    pub fn move_selection_down(&mut self) {
+        if let Some(idx) = self.selected_idx
+            && !self.completions.is_empty()
+        {
+            self.selected_idx = Some((idx + 1) % self.completions.len());
+        }
+    }
+
+    /// The currently highlighted completion, or `None` when the list is empty.
+    pub fn selected_completion(&self) -> Option<&str> {
+        self.selected_idx
+            .and_then(|i| self.completions.get(i))
+            .map(String::as_str)
+    }
+
+    /// The full completion list and the currently highlighted row.
+    pub fn visible_completions(&self) -> (&[String], Option<usize>) {
+        (&self.completions, self.selected_idx)
     }
 }
 
@@ -259,54 +297,34 @@ mod tests {
     }
 
     #[test]
-    fn cycling_through_matches() {
+    fn repeated_tab_at_common_prefix_is_noop() {
+        // Regression guard: the old impl cycled through matches on repeat
+        // Tab. The new one delegates cycling to arrow keys, so Tab at the
+        // common prefix must leave the value alone.
         let tmp = setup_dirs(&["project-a", "project-b"]);
         let mut c = PathCompleter::new();
 
         let input = format!("{}/project-", tmp.path().display());
-
-        // First Tab: already at common prefix, starts cycling (index 0)
         let r1 = c.complete(&input);
-        assert_eq!(r1, format!("{}/project-a/", tmp.path().display()));
+        assert_eq!(r1, input, "already at LCP — Tab should not extend");
 
-        // Second Tab: cycle to next
         let r2 = c.complete(&r1);
-        assert_eq!(r2, format!("{}/project-b/", tmp.path().display()));
-
-        // Third Tab: wrap around
-        let r3 = c.complete(&r2);
-        assert_eq!(r3, format!("{}/project-a/", tmp.path().display()));
+        assert_eq!(r2, r1, "second Tab should not cycle");
     }
 
     #[test]
-    fn invalidation_resets_state() {
-        let tmp = setup_dirs(&["alpha", "beta"]);
-        let mut c = PathCompleter::new();
-
-        let input = format!("{}/", tmp.path().display());
-        c.complete(&input);
-        assert!(!c.completions.is_empty());
-
-        c.invalidate();
-        assert!(c.completions.is_empty());
-        assert!(c.cycle_index.is_none());
-    }
-
-    #[test]
-    fn trailing_slash_lists_children() {
+    fn trailing_slash_keeps_value_on_tab_but_populates_list() {
+        // With `<tmp>/` as input, LCP of the matches ("aaa", "bbb") is
+        // `<tmp>/` — already the input — so Tab is a no-op. The list still
+        // contains the children, so arrow-nav + Enter can pick one.
         let tmp = setup_dirs(&["aaa", "bbb"]);
         let mut c = PathCompleter::new();
 
         let input = format!("{}/", tmp.path().display());
         let result = c.complete(&input);
-        // Should complete to common prefix of aaa and bbb — which is just the parent dir + /
-        // Actually the LCP of "<tmp>/aaa" and "<tmp>/bbb" is "<tmp>/" since they diverge at the name
-        // So the first Tab does nothing new (already at LCP), starts cycling
-        assert!(
-            result.ends_with("aaa/") || result.ends_with("bbb/"),
-            "Expected cycling to start, got: {}",
-            result
-        );
+        assert_eq!(result, input);
+        let (completions, _) = c.visible_completions();
+        assert_eq!(completions.len(), 2);
     }
 
     #[test]
@@ -367,5 +385,86 @@ mod tests {
         let result = c.complete(&input);
         // Only dir_a should match, not file_a
         assert_eq!(result, format!("{}/dir_a/", tmp.path().display()));
+    }
+
+    // ------------------------------------------------------------------------
+    // Live-filter behaviour (new — drives the PathInput modal's visible list)
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn refilter_populates_list_and_selects_first() {
+        let tmp = setup_dirs(&["aaa", "bbb", "ccc"]);
+        let mut c = PathCompleter::new();
+
+        let input = format!("{}/", tmp.path().display());
+        c.refilter(&input);
+
+        let (completions, selected) = c.visible_completions();
+        assert_eq!(completions.len(), 3);
+        assert_eq!(selected, Some(0), "fresh list should highlight row 0");
+        assert_eq!(
+            c.selected_completion().map(str::to_string),
+            Some(format!("{}/aaa", tmp.path().display())),
+        );
+    }
+
+    #[test]
+    fn refilter_clears_selection_when_no_matches() {
+        let tmp = setup_dirs(&["alpha"]);
+        let mut c = PathCompleter::new();
+
+        c.refilter(&format!("{}/zzz", tmp.path().display()));
+
+        let (completions, selected) = c.visible_completions();
+        assert!(completions.is_empty());
+        assert_eq!(selected, None);
+        assert!(c.selected_completion().is_none());
+    }
+
+    #[test]
+    fn move_selection_wraps_both_directions() {
+        let tmp = setup_dirs(&["aaa", "bbb", "ccc"]);
+        let mut c = PathCompleter::new();
+        c.refilter(&format!("{}/", tmp.path().display()));
+
+        // Start at 0. Up wraps to last.
+        c.move_selection_up();
+        assert_eq!(c.visible_completions().1, Some(2));
+
+        // Down from last wraps to 0.
+        c.move_selection_down();
+        assert_eq!(c.visible_completions().1, Some(0));
+
+        // Down again → 1.
+        c.move_selection_down();
+        assert_eq!(c.visible_completions().1, Some(1));
+    }
+
+    #[test]
+    fn move_selection_on_empty_list_is_noop() {
+        let mut c = PathCompleter::new();
+        c.move_selection_up();
+        c.move_selection_down();
+        assert_eq!(c.visible_completions().1, None);
+    }
+
+    #[test]
+    fn refilter_after_typing_reselects_row_zero() {
+        // Guards the "Char → refilter → scroll = 0" contract the modal
+        // relies on: every keystroke yields a fresh list and puts the
+        // selection at the top, regardless of where it was before.
+        let tmp = setup_dirs(&["aaa", "bbb"]);
+        let mut c = PathCompleter::new();
+        c.refilter(&format!("{}/", tmp.path().display()));
+        c.move_selection_down();
+        assert_eq!(c.visible_completions().1, Some(1));
+
+        // User types a character that narrows the list
+        c.refilter(&format!("{}/b", tmp.path().display()));
+        assert_eq!(c.visible_completions().1, Some(0));
+        assert_eq!(
+            c.selected_completion().map(str::to_string),
+            Some(format!("{}/bbb", tmp.path().display()))
+        );
     }
 }

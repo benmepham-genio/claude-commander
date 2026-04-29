@@ -19,13 +19,13 @@ mod tests;
 
 pub use state::TreeListState;
 
-/// Tree branch prefix for worktree items (7 display columns)
-const TREE_INDENT: &str = "   └── ";
-/// Display width of `TREE_INDENT` in columns
-const TREE_INDENT_WIDTH: usize = 7;
-/// Width of the number field when `show_numbers` is enabled.
-/// Number + trailing space = TREE_INDENT_WIDTH, keeping alignment consistent.
-const NUMBER_WIDTH: usize = TREE_INDENT_WIDTH - 1;
+/// Width of the right-aligned session-number field. The rendered prefix is
+/// `"{n:>NUMBER_WIDTH$} "` — so the number occupies NUMBER_WIDTH columns and
+/// is followed by a single trailing space, giving a 7-column slot.
+const NUMBER_WIDTH: usize = 6;
+/// Extra indent prepended for stacked-child worktrees (3 display columns),
+/// so they sit one level deeper than the stack base they sit under.
+const STACK_INDENT: &str = "   ";
 
 /// Braille spinner frames for the Creating status indicator
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -40,8 +40,6 @@ pub struct TreeList<'a> {
     block: Option<Block<'a>>,
     /// Style for selected item
     highlight_style: Style,
-    /// Show sequential numbers instead of tree branch prefixes
-    show_numbers: bool,
     /// Tick counter for spinner animation
     tick: u64,
     /// Label names that mark an open PR as awaiting reviewer action.
@@ -49,6 +47,9 @@ pub struct TreeList<'a> {
     /// When true, render PR labels as colored text on default bg (pre-pill
     /// behavior). When false (default), render as a colored pill block.
     invert_pr_label_color: bool,
+    /// When true (default), show the running program as a `(program)`
+    /// suffix on session rows when sessions use more than one program.
+    show_session_program: bool,
 }
 
 impl<'a> TreeList<'a> {
@@ -59,11 +60,18 @@ impl<'a> TreeList<'a> {
             theme,
             block: None,
             highlight_style: theme.selection().add_modifier(Modifier::BOLD),
-            show_numbers: false,
             tick: 0,
             review_labels: &[],
             invert_pr_label_color: false,
+            show_session_program: true,
         }
+    }
+
+    /// When false, never show the `(program)` suffix. When true (default),
+    /// show it only if the list has more than one distinct program.
+    pub fn show_session_program(mut self, b: bool) -> Self {
+        self.show_session_program = b;
+        self
     }
 
     /// When true, render PR labels as colored text on default bg
@@ -91,31 +99,32 @@ impl<'a> TreeList<'a> {
         self
     }
 
-    /// Show sequential numbers instead of tree branch prefixes
-    pub fn show_numbers(mut self, show: bool) -> Self {
-        self.show_numbers = show;
-        self
-    }
-
     /// Pick the single status glyph and colour for a worktree row.
     ///
     /// Priority (first wins):
-    /// 1. Creating             → animated spinner
-    /// 2. Agent `Working`      → animated spinner
-    /// 3. Agent `WaitingForInput` → `?` glyph
-    /// 4. `unread`             → `◆` diamond
-    /// 5. Running (idle/unknown, no unread) → `●` filled circle
-    /// 6. Stopped              → `○` open circle
+    /// 1. Creating / Merging / Pushing → animated spinner
+    /// 2. CascadePaused        → `⏸` with warning accent
+    /// 3. Agent `Working`      → animated spinner
+    /// 4. Agent `WaitingForInput` → `?` glyph
+    /// 5. `unread`             → `◆` diamond
+    /// 6. Running (idle/unknown, no unread) → `●` filled circle
+    /// 7. Stopped              → `○` open circle
     fn session_status_glyph(
         &self,
         status: SessionStatus,
         agent_state: Option<AgentState>,
         unread: bool,
     ) -> Option<(String, Color)> {
-        if status == SessionStatus::Creating {
+        if matches!(
+            status,
+            SessionStatus::Creating | SessionStatus::Merging | SessionStatus::Pushing
+        ) {
             let step = self.tick as usize / 3;
             let frame = SPINNER_FRAMES[step % SPINNER_FRAMES.len()];
             return Some((frame.to_string(), self.theme.status_creating));
+        }
+        if status == SessionStatus::CascadePaused {
+            return Some(("⏸".to_string(), self.theme.agent_waiting));
         }
         if status == SessionStatus::Running {
             match agent_state {

@@ -20,6 +20,15 @@ A high-performance terminal UI for managing Claude coding sessions, written in R
 
 ## Installation
 
+### Homebrew (macOS and Linux)
+
+```bash
+brew tap sizeak/tap
+brew install claude-commander
+```
+
+### Cargo
+
 Install directly from GitHub:
 
 ```bash
@@ -38,6 +47,25 @@ Or build from source without installing:
 cargo build --release
 ./target/release/claude-commander
 ```
+
+## Releasing
+
+Releases are cut with [`cargo-release`](https://github.com/crate-ci/cargo-release):
+
+```bash
+cargo install cargo-release            # one-time
+
+cargo release patch                    # X.Y.Z -> X.Y.(Z+1), dry-run
+cargo release minor                    # X.Y.Z -> X.(Y+1).0, dry-run
+cargo release major                    # X.Y.Z -> (X+1).0.0, dry-run
+cargo release 1.2.3                    # explicit version, dry-run
+
+cargo release <patch|minor|major|X.Y.Z> --execute   # actually release
+```
+
+Every invocation is a dry-run by default; add `--execute` once the printed plan looks right. The command bumps the version in `Cargo.toml`, refreshes `Cargo.lock`, creates a GPG-signed commit (`Bump version to X.Y.Z`) and a GPG-signed tag (`vX.Y.Z`), and pushes both to `origin/main`.
+
+The tag push triggers `.github/workflows/publish-tap.yml`, which creates the GitHub release with auto-generated notes and bumps the formula in [`sizeak/homebrew-tap`](https://github.com/sizeak/homebrew-tap) so `brew upgrade claude-commander` sees the new version within ~60 seconds.
 
 ## Usage
 
@@ -75,15 +103,40 @@ The left pane shows projects and their worktree sessions in a tree view. Project
 
 Each session row shows the title and, in `[brackets]`, the branch name — but only when the branch differs from what the title would sanitize to. A session titled "Feature Auth" with branch `feature-auth` (or `prefix/feature-auth` when `branch_prefix` is set) renders as just `Feature Auth`; the bracket reappears only when the branch carries new information, e.g. you renamed it to `feature-auth-v2` outside the app.
 
+#### PR Stacks
+
+When a session's PR targets another session's branch (rather than `main`), the two form a stack. Stacked children render one indent deeper and sit directly beneath the session they're stacked on, in bottom-to-top stack order. The stack base keeps its normal position in the root session list sorted by creation time.
+
+Press `t` on any session in a stack to create a new session on top of that stack — regardless of which member you have selected, the new branch is forked from the topmost session. When you launch Claude in the new session it is told to use `gh pr create --base <parent-branch>` so the PR targets the right place automatically.
+
+Stacks are detected from the PR's `baseRefName` returned by the `gh` CLI, so they stay accurate across GitHub's auto-retargeting when a stack member is merged.
+
+Stack grouping is only active in the default project-grouped view. When [Session List Sections](#session-list-sections) is configured, sessions are ordered by their section instead and stacked children render at the normal indent — the `t` hotkey and `stack_parent_session_id` still work, but a base and its child may land in different sections depending on their PR state.
+
+##### Cascade merge main through a stack
+
+When `main` moves forward, use **Cascade merge main** from the command palette to propagate it up the stack in one step: the command merges `main` into the stack base, then the base into its child, and so on to the leaf. Running it from any session in a stack works — the cascade always starts from the base.
+
+Before touching any worktree, the cascade fetches `origin`, verifies no live agent in the stack is `Working` or `WaitingForInput` (racing a `git merge` against Claude writing files is unrecoverable), and refuses if any worktree has uncommitted changes. Each session shows a `⟳` spinner while its step is running.
+
+On the first conflict the cascade pauses: the affected session gets a persistent `⏸` glyph (survives a restart of the TUI), and the worktree is left in the usual `git merge` in-progress state so you can resolve it however you like — typically by attaching to the session and asking the live Claude. Once you've committed the resolved merge, **Cascade resume** from the palette picks up where it stopped and propagates the new commit on up the chain. **Cascade abandon** clears the pause without continuing, if you decide to back out.
+
+##### Push stack
+
+**Push stack** (palette) runs `git push -u origin <branch>` across every session in the stack, base first then each child up the chain — pushing the base before its children keeps GitHub's PR base refs consistent. Each session shows the spinner glyph while its own push is in flight.
+
+Pre-flight is the same as cascade merge: no live agent may be `Working` or `WaitingForInput`, and worktrees must have no uncommitted changes. On the first `git push` failure (rejection, auth, non-fast-forward, etc.) the chain stops and the toast shows git's stderr — no "resume" command is needed since `git push` is idempotent, so fix the root cause and re-run **Push stack** to continue.
+
 ### Status Symbols
 
 Each session displays a status indicator to the left of its name:
 
 | Symbol | Meaning |
 |--------|---------|
-| `⠋` (animated spinner) | Session is being created |
+| `⠋` (animated spinner) | Session is being created or mid-cascade-merge |
 | `●` (rainbow cycling) | Agent is actively working |
 | `?` | Agent is waiting for user input |
+| `⏸` | Cascade merge paused here — resolve conflicts and resume from the palette |
 | `◆` | Session has unread output |
 | `●` | Running (agent idle) |
 | `○` | Stopped |
@@ -96,8 +149,8 @@ When a session has a GitHub PR, a badge appears next to the session name. The ba
 
 | Color | Meaning |
 |-------|---------|
-| Green | Open |
-| Purple | Open and awaiting review |
+| Blue | Open |
+| Green | Open and awaiting review |
 | Grey | Draft |
 | Red | Closed |
 | Dark purple | Merged |
@@ -123,6 +176,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `>` (as first char in palette) | Filter palette to commands only |
 | `Enter` | Attach to selected session |
 | `n` | New worktree session |
+| `t` | New session stacked on top of the selected session's stack |
 | `N` | Add new project |
 | `c` | Checkout existing branch into a new worktree session (fetches `origin` in the background, filterable list) |
 | `d` | Delete session |
@@ -133,10 +187,11 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `o` | Open PR in browser (when the session has a PR) |
 | `S` | Scan directory for git repos and add them as projects |
 | `s` | Open shell in worktree |
+| palette only | Move session to section (manual override; see [Session List Sections](#session-list-sections)) |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |
 | `Ctrl-u/d` or `PageUp/Down` | Page up/down in preview |
-| `1`–`99` | Jump to session by number (requires `show_session_numbers`) |
+| `1`–`99` | Jump to session by number |
 | `g` | Generate AI summary (Info pane only) |
 | `,` | Open settings |
 | `?` | Show help |
@@ -219,13 +274,15 @@ dim_unfocused_opacity = 0.4
 # Supports: " ", "space", "ctrl+k", "f1", etc.
 # leader_key = " "
 
-# Show sequential numbers next to sessions and enable digit-key jumping (1–99)
-# show_session_numbers = true
-
 # Render PR labels as colored text on the default background (the pre-pill
 # style). Default false renders them as colored "pill" blocks that stand out
 # more in the session list.
 # invert_pr_label_color = false
+
+# Show the running program as a "(program)" suffix on session rows. Only
+# renders when sessions use more than one distinct program, so it's a no-op
+# for a single-program setup. Set to false to always hide it.
+# show_session_program = true
 
 # Debounce delay in ms when typing multi-digit session numbers
 # session_number_debounce_ms = 250
@@ -248,6 +305,89 @@ state_sync_interval_ms = 2000
 # quit = ["q", "Ctrl-c"]
 # toggle_pane = ["Tab"]
 ```
+
+### Session List Sections
+
+Group the session list under configurable headers based on GitHub PR state.
+
+By default `[[sections]]` is empty and the list keeps its project-grouped view. Once you declare one or more sections, the list switches to a section-grouped layout: section headers at the top level, each repo nested beneath as a sub-header, and sessions indented below their repo.
+
+Sections replace [PR-stack grouping](#pr-stacks) — when sections are configured, stacked children are no longer visually nested under their stack base. The underlying stack links are still tracked and the `t` hotkey still stacks new sessions onto the top of a stack, but ordering within the list follows the section rules.
+
+An implicit **"In Progress"** section is always the first row and acts as the catch-all — any session whose PR state doesn't match a later section's predicate lands here. It also lists every repo that hasn't placed a session into a later section, so newly added projects remain visible.
+
+#### Example
+
+This mirrors a label-driven code review workflow: author adds `dev-review-required` when the PR is ready, a reviewer removes the label and picks it up, the PR gets approved and merged.
+
+```toml
+[[sections]]
+name = "Needs Review"
+has_label = "dev-review-required"
+
+[[sections]]
+name = "In Review"
+pr_state = "open"          # scope to open PRs — otherwise merged PRs
+has_reviewer = true        # with reviewers would also match here
+
+[[sections]]
+name = "Merged"
+pr_state = ["merged", "closed"]
+
+[[sections]]
+name = "Stale"             # no predicates → manual-only waypoint
+```
+
+Visually:
+
+```
+In Progress (12)
+   terraform [main] (3)
+      session-a
+      session-b
+      session-c
+   genio     [main] (0)
+
+Needs Review (1)
+   genio     [main] (1)
+      fix-dns-spam
+
+In Review (2)
+   terraform [main] (1)
+      new-metrics-port
+   genio     [main] (1)
+      claude/add-elasticsearch-readonly-creds
+
+Merged (3)
+   …
+
+Stale (0)
+```
+
+#### Predicate fields
+
+All fields are optional; a section matches when **every declared field** matches (AND). A section declared with no predicates is a **manual-only waypoint** — auto-matching never puts sessions there; you only move in via the palette.
+
+| Field | Type | Notes |
+|---|---|---|
+| `pr_state` | `"open"` \| `"closed"` \| `"merged"` — scalar or array (any-of) | |
+| `is_draft` | `bool` | |
+| `has_pr` | `bool` | |
+| `has_label` | string (literal) or array (any-of) | |
+| `review_decision` | `"approved"` \| `"changes_requested"` \| `"review_required"` — scalar or array (any-of) | Mirrors GitHub's `reviewDecision` field |
+| `has_reviewer` | `true` / `false`, a specific login, or an array of logins (any-of) | `true` excludes Copilot via case-insensitive `"copilot"` substring match; specific/array forms match literally |
+
+#### Process order and forward-only
+
+Config order is the pipeline. A session's section is re-evaluated on every PR refresh, but the scan **only considers sections at or after the session's current position** — auto never moves a session backwards. This keeps `"Needs Review"` sticky when a reviewer removes the label without leaving other signals; the session doesn't slide back to `"In Progress"`.
+
+#### Moving sessions manually
+
+Select a session, open the palette (`Space`, or `Shift+Space` for commands-only), run **Move session to section…**, then pick a target. An **Auto** entry clears an existing pin. The override is persisted to `state.json` and survives restarts; auto-moves are suppressed until the pin is released.
+
+#### Reordering, adding, or removing sections
+
+These are edit-`config.toml`-and-restart actions — there's no hot reload. The cached `current_section` on each session is reconciled against the new config on next startup; if the referenced section no longer exists, the session falls back to `"In Progress"` and continues forward-only from there.
 
 ### AI Summary
 

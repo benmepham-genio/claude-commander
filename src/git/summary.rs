@@ -28,14 +28,16 @@ pub enum AiSummary {
 
 /// Compute the full branch diff: committed changes vs main + uncommitted working changes.
 ///
-/// Runs `git diff <main_branch>...HEAD` (committed) and `git diff HEAD` (uncommitted)
+/// Runs `git diff origin/<main_branch>...HEAD` (committed) and `git diff HEAD` (uncommitted)
 /// and concatenates them. This gives a complete picture of all changes on the branch.
+/// Uses `origin/<main_branch>` rather than local `<main_branch>` because the local ref
+/// is often stale — branches typically merge `origin/main`, not local `main`.
 pub async fn compute_branch_diff(worktree_path: &Path, main_branch: &str) -> String {
     let (committed, uncommitted) = tokio::join!(
         // Committed changes vs main branch
         Command::new("git")
             .current_dir(worktree_path)
-            .args(["diff", &format!("{main_branch}...HEAD")])
+            .args(["diff", &format!("origin/{main_branch}...HEAD")])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

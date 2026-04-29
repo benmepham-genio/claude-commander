@@ -69,7 +69,7 @@ pub enum StateUpdate {
     Error { message: String },
     /// PR status results ready from background check
     PrStatusReady {
-        results: Vec<(SessionId, Option<crate::git::PrInfo>)>,
+        results: Vec<(SessionId, crate::git::PrCheckResult)>,
     },
     /// Session creation completed successfully
     SessionCreated { session_id: SessionId },
@@ -116,6 +116,17 @@ pub enum StateUpdate {
         /// Shell pane content
         shell_content: String,
     },
+    /// Cascade-merge background task finished (completed, paused on conflict,
+    /// or errored). The TUI refreshes and shows an appropriate toast.
+    CascadeFinished {
+        result: std::result::Result<crate::session::CascadeOutcome, String>,
+    },
+    /// Push-stack background task finished. `Ok` carries the number of
+    /// sessions pushed before the task ended; `Err` carries the git error
+    /// from the first failed push (later sessions not attempted).
+    PushStackFinished {
+        result: std::result::Result<crate::session::PushStackOutcome, String>,
+    },
 }
 
 /// User commands triggered by input
@@ -131,6 +142,16 @@ pub enum UserCommand {
     SelectShell,
     /// Create new session
     NewSession,
+    /// Create a new session stacked on the selected session's branch
+    NewStackedSession,
+    /// Cascade-merge main through the selected session's stack
+    CascadeMergeMain,
+    /// Resume a cascade-merge that paused on conflicts
+    CascadeResume,
+    /// Abandon a paused cascade-merge without continuing
+    CascadeAbandon,
+    /// Push every branch in the selected session's stack to the remote
+    PushStack,
     /// Create new project
     NewProject,
     /// Checkout an existing branch into a new worktree session
@@ -183,6 +204,8 @@ pub enum UserCommand {
     GenerateSummary,
     /// Scan a directory for git repos and add them as projects
     ScanDirectory,
+    /// Open the "Move to section" modal for the selected session.
+    MoveToSection,
 }
 
 impl UserCommand {
@@ -223,6 +246,11 @@ impl From<BindableAction> for UserCommand {
             BindableAction::Select => Self::Select,
             BindableAction::SelectShell => Self::SelectShell,
             BindableAction::NewSession => Self::NewSession,
+            BindableAction::NewStackedSession => Self::NewStackedSession,
+            BindableAction::CascadeMergeMain => Self::CascadeMergeMain,
+            BindableAction::CascadeResume => Self::CascadeResume,
+            BindableAction::CascadeAbandon => Self::CascadeAbandon,
+            BindableAction::PushStack => Self::PushStack,
             BindableAction::NewProject => Self::NewProject,
             BindableAction::CheckoutBranch => Self::CheckoutBranch,
             BindableAction::DeleteSession => Self::DeleteSession,
@@ -244,6 +272,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::PageDown => Self::PageDown,
             BindableAction::GenerateSummary => Self::GenerateSummary,
             BindableAction::ScanDirectory => Self::ScanDirectory,
+            BindableAction::MoveToSection => Self::MoveToSection,
         }
     }
 }

@@ -315,7 +315,7 @@ checksum = "c3e64b0cc0439b12df2fa678eae89a1c56a529fd067a9115f7827f1fffd22b32"
 
 [[package]]
 name = "claude-commander"
-version = "0.2.0"
+version = "0.4.1"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
@@ -327,6 +327,7 @@ dependencies = [
  "directories",
  "figment",
  "futures",
+ "fuzzy-matcher",
  "gix",
  "insta",
  "nix",
@@ -763,6 +764,15 @@ dependencies = [
  "pin-project-lite",
  "pin-utils",
  "slab",
+]
+
+[[package]]
+name = "fuzzy-matcher"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54614a3312934d066701a80f20f15fa3b56d67ac7722b39eea5b4c9dd1d66c94"
+dependencies = [
+ "thread_local",
 ]
 
 [[package]]
