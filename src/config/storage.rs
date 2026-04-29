@@ -39,6 +39,13 @@ pub struct AppState {
     #[serde(default)]
     pub left_pane_pct: Option<u16>,
 
+    /// Session where an in-flight cascade-merge hit a conflict and paused.
+    /// While set, `CascadeResume` (or `CascadeAbandon`) is available; cleared
+    /// once resume succeeds or the user abandons. Pairs with the affected
+    /// session's `SessionStatus::CascadePaused`.
+    #[serde(default)]
+    pub cascade_paused_at: Option<SessionId>,
+
     /// Application version that last wrote this state
     #[serde(default)]
     pub version: String,
@@ -280,6 +287,38 @@ mod tests {
     }
 
     #[test]
+    fn test_section_fields_roundtrip() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let project_id = project.id;
+        state.add_project(project);
+
+        let mut session = create_test_session(project_id);
+        session.section_override = Some("Needs Review".to_string());
+        session.current_section = Some("In Progress".to_string());
+        let stamp = session.entered_section_at;
+        let session_id = session.id;
+        state.add_session(session);
+
+        state.save_to(&state_path).unwrap();
+        let loaded = AppState::load_from(&state_path).unwrap();
+        let loaded_session = loaded.get_session(&session_id).unwrap();
+
+        assert_eq!(
+            loaded_session.section_override.as_deref(),
+            Some("Needs Review")
+        );
+        assert_eq!(
+            loaded_session.current_section.as_deref(),
+            Some("In Progress")
+        );
+        assert_eq!(loaded_session.entered_section_at, stamp);
+    }
+
+    #[test]
     fn test_save_load_roundtrip() {
         let temp_dir = TempDir::new().unwrap();
         let state_path = temp_dir.path().join("state.json");
@@ -501,5 +540,35 @@ mod tests {
         let loaded = AppState::load_from(&state_path).unwrap();
         assert_eq!(loaded.left_pane_pct, None);
         assert!(loaded.seen_help);
+    }
+
+    #[test]
+    fn test_cascade_paused_at_defaults_to_none() {
+        let state = AppState::new();
+        assert!(state.cascade_paused_at.is_none());
+    }
+
+    #[test]
+    fn test_cascade_paused_at_roundtrips_through_json() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+
+        let mut state = AppState::new();
+        let sid = SessionId::new();
+        state.cascade_paused_at = Some(sid);
+        state.save_to(&state_path).unwrap();
+
+        let loaded = AppState::load_from(&state_path).unwrap();
+        assert_eq!(loaded.cascade_paused_at, Some(sid));
+    }
+
+    #[test]
+    fn test_cascade_paused_at_missing_from_json_defaults_to_none() {
+        // A state file written before this feature must still load cleanly.
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+        std::fs::write(&state_path, r#"{"seen_help": true, "version": "0.1.0"}"#).unwrap();
+        let loaded = AppState::load_from(&state_path).unwrap();
+        assert!(loaded.cascade_paused_at.is_none());
     }
 }

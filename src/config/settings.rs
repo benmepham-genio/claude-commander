@@ -84,6 +84,13 @@ pub struct Config {
     /// out more in the session list.
     pub invert_pr_label_color: bool,
 
+    /// Show the program running in each session as a `(program)` suffix in
+    /// the session list. Only rendered when sessions use more than one
+    /// distinct program, so enabling this for a single-program setup is a
+    /// no-op. Default true.
+    #[serde(default = "default_true")]
+    pub show_session_program: bool,
+
     /// Dim the right pane (preview/diff/shell) when the session list is focused
     pub dim_unfocused_preview: bool,
 
@@ -94,9 +101,6 @@ pub struct Config {
 
     /// Leader key for quick-switch modal (e.g. " " for Space, "ctrl+k", "f1")
     pub leader_key: String,
-
-    /// Show sequential numbers next to sessions for quick-jump hotkeys
-    pub show_session_numbers: bool,
 
     /// Debounce delay in ms when typing multi-digit session numbers
     pub session_number_debounce_ms: u64,
@@ -119,6 +123,12 @@ pub struct Config {
     /// Theme color overrides
     #[serde(default)]
     pub theme: ThemeOverrides,
+
+    /// Section definitions for grouping sessions in the TUI list.
+    /// First-match-wins in declared order; unmatched sessions fall into a
+    /// built-in "Other" catch-all.
+    #[serde(default)]
+    pub sections: Vec<crate::session::SectionConfig>,
 }
 
 impl Default for Config {
@@ -142,10 +152,10 @@ impl Default for Config {
             state_sync_interval_ms: 2000,
             agent_state_poll_interval_ms: 3000,
             invert_pr_label_color: false,
+            show_session_program: true,
             dim_unfocused_preview: true,
             dim_unfocused_opacity: 0.4,
             leader_key: " ".to_string(),
-            show_session_numbers: false,
             session_number_debounce_ms: 250,
             ai_summary_enabled: true,
             ai_summary_model: "claude-haiku-4-5-20251001".to_string(),
@@ -153,8 +163,13 @@ impl Default for Config {
             log_file: None,
             keybindings: KeyBindings::default(),
             theme: ThemeOverrides::default(),
+            sections: Vec::new(),
         }
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_pr_review_labels() -> Vec<String> {
@@ -384,6 +399,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_sections_toml_deserialises() {
+        let toml_src = r#"
+[[sections]]
+name = "Needs Review"
+has_label = "ready-for-review"
+is_draft = false
+
+[[sections]]
+name = "Drafts"
+pr_state = "open"
+is_draft = true
+
+[[sections]]
+name = "Blocked"
+has_label = ["blocked", "waiting-on-author"]
+"#;
+        let config: Config = toml::from_str(toml_src).expect("toml parse");
+
+        assert_eq!(config.sections.len(), 3);
+        assert_eq!(config.sections[0].name, "Needs Review");
+        assert_eq!(config.sections[1].name, "Drafts");
+        assert_eq!(config.sections[1].is_draft, Some(true));
+        assert_eq!(config.sections[2].name, "Blocked");
+    }
+
+    #[test]
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.default_program, "claude");
@@ -517,6 +558,23 @@ mod tests {
         assert_eq!(config.agent_state_poll_interval_ms, 3000);
         assert!(config.ai_summary_enabled);
         assert_eq!(config.ai_summary_model, "claude-haiku-4-5-20251001");
+        assert!(config.show_session_program);
+    }
+
+    #[test]
+    fn test_session_list_flags_deserialise() {
+        // Missing → default true.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.show_session_program);
+
+        // Explicit false survives round trip.
+        let cfg: Config = toml::from_str(
+            r#"
+show_session_program = false
+"#,
+        )
+        .unwrap();
+        assert!(!cfg.show_session_program);
     }
 
     #[test]
@@ -529,9 +587,8 @@ mod tests {
     }
 
     #[test]
-    fn test_default_session_numbers_config() {
+    fn test_default_session_number_debounce_ms() {
         let config = Config::default();
-        assert!(!config.show_session_numbers);
         assert_eq!(config.session_number_debounce_ms, 250);
     }
 

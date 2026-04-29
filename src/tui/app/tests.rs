@@ -1,4 +1,4 @@
-use super::actions::adjust_palette_scroll;
+use super::actions::adjust_list_scroll;
 use super::modals::centered_rect;
 use super::selection::session_number_to_list_index;
 use super::*;
@@ -31,6 +31,7 @@ fn make_project() -> SessionListItem {
         repo_path: std::path::PathBuf::from("/tmp/test"),
         main_branch: "main".to_string(),
         worktree_count: 0,
+        nested: false,
     }
 }
 
@@ -52,6 +53,7 @@ fn make_worktree() -> SessionListItem {
         created_at: chrono::Utc::now(),
         agent_state: None,
         unread: false,
+        stacked_child: false,
     }
 }
 
@@ -368,55 +370,55 @@ fn test_gather_command_entries_case_insensitive() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_adjust_palette_scroll_noop_when_selection_in_window() {
+fn test_adjust_list_scroll_noop_when_selection_in_window() {
     // selected in middle of window, scroll unchanged
-    assert_eq!(adjust_palette_scroll(5, 3, 10), 3);
+    assert_eq!(adjust_list_scroll(5, 3, 10), 3);
     // selected at top of window, scroll unchanged
-    assert_eq!(adjust_palette_scroll(3, 3, 10), 3);
+    assert_eq!(adjust_list_scroll(3, 3, 10), 3);
     // selected at bottom of window (scroll..scroll+visible is exclusive)
-    assert_eq!(adjust_palette_scroll(12, 3, 10), 3);
+    assert_eq!(adjust_list_scroll(12, 3, 10), 3);
 }
 
 #[test]
-fn test_adjust_palette_scroll_pulls_up_when_selection_above() {
+fn test_adjust_list_scroll_pulls_up_when_selection_above() {
     // Pressing Up past the top of the window: scroll snaps to selected
-    assert_eq!(adjust_palette_scroll(2, 5, 10), 2);
-    assert_eq!(adjust_palette_scroll(0, 5, 10), 0);
+    assert_eq!(adjust_list_scroll(2, 5, 10), 2);
+    assert_eq!(adjust_list_scroll(0, 5, 10), 0);
 }
 
 #[test]
-fn test_adjust_palette_scroll_pushes_down_when_selection_below() {
+fn test_adjust_list_scroll_pushes_down_when_selection_below() {
     // Pressing Down off the bottom: scroll advances just enough to keep
     // the selection on the last visible row.
-    assert_eq!(adjust_palette_scroll(13, 3, 10), 4);
-    assert_eq!(adjust_palette_scroll(20, 0, 10), 11);
+    assert_eq!(adjust_list_scroll(13, 3, 10), 4);
+    assert_eq!(adjust_list_scroll(20, 0, 10), 11);
 }
 
 #[test]
-fn test_adjust_palette_scroll_wrap_up_from_top_lands_on_last_row() {
+fn test_adjust_list_scroll_wrap_up_from_top_lands_on_last_row() {
     // A 25-item list, currently at the top. Pressing Up wraps to index 24;
     // scroll must jump so 24 is visible.
-    assert_eq!(adjust_palette_scroll(24, 0, 10), 15);
+    assert_eq!(adjust_list_scroll(24, 0, 10), 15);
 }
 
 #[test]
-fn test_adjust_palette_scroll_wrap_down_from_bottom_lands_on_first_row() {
+fn test_adjust_list_scroll_wrap_down_from_bottom_lands_on_first_row() {
     // 25-item list, selection on the last row; scrolled to the bottom.
     // Pressing Down wraps to 0, which is above the window — scroll to 0.
-    assert_eq!(adjust_palette_scroll(0, 15, 10), 0);
+    assert_eq!(adjust_list_scroll(0, 15, 10), 0);
 }
 
 #[test]
-fn test_adjust_palette_scroll_zero_visible_rows_safe() {
+fn test_adjust_list_scroll_zero_visible_rows_safe() {
     // Degenerate case: never panic.
-    assert_eq!(adjust_palette_scroll(5, 3, 0), 0);
+    assert_eq!(adjust_list_scroll(5, 3, 0), 0);
 }
 
 #[test]
-fn test_adjust_palette_scroll_short_list_stays_at_top() {
+fn test_adjust_list_scroll_short_list_stays_at_top() {
     // When the list is shorter than the window, scroll should always be 0.
     // (The caller starts at 0; our function returns 0 because selected
     // is always in [0, visible).)
-    assert_eq!(adjust_palette_scroll(2, 0, 10), 0);
-    assert_eq!(adjust_palette_scroll(0, 0, 10), 0);
+    assert_eq!(adjust_list_scroll(2, 0, 10), 0);
+    assert_eq!(adjust_list_scroll(0, 0, 10), 0);
 }

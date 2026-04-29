@@ -1,11 +1,10 @@
 ---
 source: src/tui/render_tests.rs
-assertion_line: 317
 expression: terminal.backend()
 ---
 " multi-agent [main] (2)                                                                                                 "
-"   └── ● Claude task (claude)                                                                                           "
-"   └── ● Aider task (aider)                                                                                             "
+"     1 ● Claude task (claude)                                                                                           "
+"     2 ● Aider task (aider)                                                                                             "
 "                                                                                                                        "
 "                                                                                                                        "
 "                                                                                                                        "

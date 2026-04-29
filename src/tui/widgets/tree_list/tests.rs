@@ -11,10 +11,15 @@ fn make_project(name: &str, count: usize) -> SessionListItem {
         repo_path: PathBuf::from("/tmp/test"),
         main_branch: "main".to_string(),
         worktree_count: count,
+        nested: false,
     }
 }
 
 fn make_worktree(title: &str) -> SessionListItem {
+    make_worktree_with_stack(title, false)
+}
+
+fn make_worktree_with_stack(title: &str, stacked_child: bool) -> SessionListItem {
     SessionListItem::Worktree {
         id: SessionId::new(),
         project_id: ProjectId::new(),
@@ -32,22 +37,32 @@ fn make_worktree(title: &str) -> SessionListItem {
         created_at: chrono::Utc::now(),
         agent_state: None,
         unread: false,
+        stacked_child,
     }
 }
 
 /// Render a TreeList to a buffer and return lines as strings
-fn render_tree(
+fn render_tree(items: &[SessionListItem], width: u16, height: u16) -> Vec<String> {
+    render_tree_with(items, width, height, |t| t)
+}
+
+/// Like `render_tree`, but lets the caller configure the TreeList (e.g. to
+/// toggle `show_session_program`).
+fn render_tree_with<F>(
     items: &[SessionListItem],
-    show_numbers: bool,
     width: u16,
     height: u16,
-) -> Vec<String> {
+    configure: F,
+) -> Vec<String>
+where
+    F: for<'a> FnOnce(TreeList<'a>) -> TreeList<'a>,
+{
     let theme = Theme::basic();
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|frame| {
-            let tree = TreeList::new(items, &theme).show_numbers(show_numbers);
+            let tree = configure(TreeList::new(items, &theme));
             frame.render_stateful_widget(tree, frame.area(), &mut ListState::default());
         })
         .unwrap();
@@ -61,26 +76,22 @@ fn render_tree(
         .collect()
 }
 
-#[test]
-fn test_to_list_items_without_numbers_uses_tree_branch() {
-    let items = vec![make_project("proj", 1), make_worktree("session-a")];
-    let lines = render_tree(&items, false, 40, 3);
-    // Worktree line should contain tree branch
-    assert!(
-        lines[1].contains("└──"),
-        "Expected tree branch in: {}",
-        lines[1]
-    );
+fn make_worktree_with_program(title: &str, program: &str) -> SessionListItem {
+    let mut w = make_worktree(title);
+    if let SessionListItem::Worktree { program: p, .. } = &mut w {
+        *p = program.to_string();
+    }
+    w
 }
 
 #[test]
-fn test_to_list_items_with_numbers_uses_number_prefix() {
+fn test_worktree_rows_use_number_prefix() {
     let items = vec![
         make_project("proj", 2),
         make_worktree("session-a"),
         make_worktree("session-b"),
     ];
-    let lines = render_tree(&items, true, 40, 4);
+    let lines = render_tree(&items, 40, 4);
     // First worktree starts with right-aligned "1"
     assert!(
         lines[1].trim_start().starts_with("1 "),
@@ -93,10 +104,10 @@ fn test_to_list_items_with_numbers_uses_number_prefix() {
         "Expected number prefix in: '{}'",
         lines[2]
     );
-    // No tree branches
+    // No ASCII tree glyph — numbering is the only supported prefix.
     assert!(
         !lines[1].contains("└──"),
-        "Should not have tree branch with numbers"
+        "Tree glyph should no longer appear"
     );
 }
 
@@ -108,7 +119,7 @@ fn test_numbers_are_sequential_across_projects() {
         make_project("proj-b", 1),
         make_worktree("session-2"),
     ];
-    let lines = render_tree(&items, true, 40, 5);
+    let lines = render_tree(&items, 40, 5);
     // Session under proj-a is #1
     assert!(
         lines[1].trim_start().starts_with("1 "),
@@ -129,7 +140,7 @@ fn test_double_digit_number_formatting() {
     for i in 1..=12 {
         items.push(make_worktree(&format!("s-{}", i)));
     }
-    let lines = render_tree(&items, true, 40, 14);
+    let lines = render_tree(&items, 40, 14);
     // Single digit right-aligned
     assert!(
         lines[1].trim_start().starts_with("1 "),
@@ -171,6 +182,35 @@ fn test_tree_list_state_navigation() {
 
     // Previous
     state.previous();
+    assert_eq!(state.selected(), Some(2));
+}
+
+#[test]
+fn test_navigation_skips_unselectable_rows() {
+    let mut state = TreeListState::new();
+    // 5 rows; indices 0 and 3 are section headers (unselectable), rest are selectable.
+    state.set_selectable(vec![false, true, true, false, true]);
+
+    state.next();
+    assert_eq!(state.selected(), Some(1));
+
+    state.next();
+    assert_eq!(state.selected(), Some(2));
+
+    state.next();
+    // skips 3, lands on 4
+    assert_eq!(state.selected(), Some(4));
+
+    state.next();
+    // wraps; skips 0, lands on 1
+    assert_eq!(state.selected(), Some(1));
+
+    state.previous();
+    // wraps backwards skipping 0
+    assert_eq!(state.selected(), Some(4));
+
+    state.previous();
+    // skips 3
     assert_eq!(state.selected(), Some(2));
 }
 
@@ -545,4 +585,91 @@ fn test_glyph_creating_shows_spinner() {
         .unwrap();
     assert!(SPINNER_FRAMES.contains(&g.as_str()));
     assert_eq!(c, theme.status_creating);
+}
+
+#[test]
+fn test_stacked_child_row_has_extra_indent() {
+    // The stacked child should sit one extra indent (STACK_INDENT) further
+    // right than its base. The prefix is the right-aligned session number.
+    let items = vec![
+        make_project("proj", 2),
+        make_worktree_with_stack("base", false),
+        make_worktree_with_stack("child", true),
+    ];
+    let lines = render_tree(&items, 60, 4);
+
+    let base_line = &lines[1];
+    let child_line = &lines[2];
+
+    // "1 " marks the base row, "2 " marks the child row. The child's number
+    // should sit STACK_INDENT columns further right.
+    let base_idx = base_line
+        .find("1 ")
+        .expect("base should have number prefix");
+    let child_idx = child_line
+        .find("2 ")
+        .expect("child should have number prefix");
+    assert_eq!(
+        child_idx - base_idx,
+        STACK_INDENT.chars().count(),
+        "stacked child indent should be exactly STACK_INDENT wider than the base\nbase:  {base_line:?}\nchild: {child_line:?}"
+    );
+}
+
+// -- show_session_program toggle --
+
+#[test]
+fn test_program_suffix_shown_by_default_when_mixed() {
+    let items = vec![
+        make_project("proj", 2),
+        make_worktree_with_program("sess-a", "claude"),
+        make_worktree_with_program("sess-b", "codex"),
+    ];
+    let lines = render_tree(&items, 60, 4);
+    assert!(
+        lines[1].contains("(claude)"),
+        "expected program suffix: {:?}",
+        lines[1]
+    );
+    assert!(
+        lines[2].contains("(codex)"),
+        "expected program suffix: {:?}",
+        lines[2]
+    );
+}
+
+#[test]
+fn test_program_suffix_hidden_when_flag_disabled() {
+    let items = vec![
+        make_project("proj", 2),
+        make_worktree_with_program("sess-a", "claude"),
+        make_worktree_with_program("sess-b", "codex"),
+    ];
+    let lines = render_tree_with(&items, 60, 4, |t| t.show_session_program(false));
+    assert!(
+        !lines[1].contains("(claude)"),
+        "expected no program suffix: {:?}",
+        lines[1]
+    );
+    assert!(
+        !lines[2].contains("(codex)"),
+        "expected no program suffix: {:?}",
+        lines[2]
+    );
+}
+
+#[test]
+fn test_program_suffix_hidden_when_programs_uniform() {
+    // Uniform program: suffix hidden regardless of the flag.
+    let items = vec![
+        make_project("proj", 2),
+        make_worktree_with_program("sess-a", "claude"),
+        make_worktree_with_program("sess-b", "claude"),
+    ];
+    let lines = render_tree(&items, 60, 4);
+    assert!(
+        !lines[1].contains("(claude)"),
+        "uniform programs should not render suffix: {:?}",
+        lines[1]
+    );
 }

@@ -75,8 +75,8 @@ impl App {
 
             let results = futures::future::join_all(sessions_to_check.into_iter().map(
                 |(session_id, branch, repo_path)| async move {
-                    let pr_info = check_pr_for_branch(&repo_path, &branch).await;
-                    (session_id, pr_info)
+                    let pr_result = check_pr_for_branch(&repo_path, &branch).await;
+                    (session_id, pr_result)
                 },
             ))
             .await;

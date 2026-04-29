@@ -39,9 +39,15 @@ pub enum AttachResult {
 /// single control byte for `Ctrl-<letter>` bindings, or CSI-u/modifyOtherKeys
 /// sequences for `Ctrl-<non-letter>` bindings. Bindings that cannot be
 /// detected in raw stdin (e.g. a bare letter) should simply be omitted.
+///
+/// When `intercept_ctrl_z` is true, Ctrl+Z (`0x1A`) bytes are stripped from
+/// stdin before reaching the pane. Use this for Claude sessions where SIGTSTP
+/// would freeze the pane with no shell to recover from. Leave it false for
+/// shell sessions, where Ctrl+Z is genuinely useful for job control.
 pub async fn attach_to_session(
     session_name: &str,
     editor_triggers: Vec<Vec<u8>>,
+    intercept_ctrl_z: bool,
 ) -> Result<AttachResult> {
     // Get terminal size
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
@@ -65,7 +71,7 @@ pub async fn attach_to_session(
 
     // Run the async I/O loop
     info!("Starting async I/O loop");
-    let result = run_async_loop(pty, pty_fd, &mut child, editor_triggers).await;
+    let result = run_async_loop(pty, pty_fd, &mut child, editor_triggers, intercept_ctrl_z).await;
     info!("Async I/O loop ended with result: {:?}", result);
 
     // Restore terminal
@@ -99,6 +105,19 @@ fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
         return false;
     }
     haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Strip Ctrl+Z (0x1A) bytes from `data`. Returns `Some(filtered)` when any
+/// were removed, `None` otherwise so callers can keep using the original
+/// borrow without an allocation.
+///
+/// Ctrl+Z reaches the foreground process inside the tmux pane as SIGTSTP and
+/// suspends it. Since tmux launches Claude directly with no shell wrapper,
+/// there's no `fg` to recover with — the pane just freezes. Users hit it by
+/// accident; Claude doesn't read it.
+fn strip_ctrl_z(data: &[u8]) -> Option<Vec<u8>> {
+    data.contains(&0x1A)
+        .then(|| data.iter().copied().filter(|b| *b != 0x1A).collect())
 }
 
 /// Log any pending bytes in stdin for debugging
@@ -185,6 +204,7 @@ async fn run_async_loop(
     pty_fd: i32,
     child: &mut tokio::process::Child,
     editor_triggers: Vec<Vec<u8>>,
+    intercept_ctrl_z: bool,
 ) -> AttachResult {
     // Channel for shutdown signal
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<AttachResult>(1);
@@ -260,6 +280,19 @@ async fn run_async_loop(
                         debug!("Editor trigger detected, opening editor");
                         let _ = stdin_shutdown.send(AttachResult::OpenEditor).await;
                         break;
+                    }
+
+                    let stripped = if intercept_ctrl_z {
+                        strip_ctrl_z(data)
+                    } else {
+                        None
+                    };
+                    if stripped.is_some() {
+                        debug!("Ctrl+Z stripped from input");
+                    }
+                    let data: &[u8] = stripped.as_deref().unwrap_or(data);
+                    if data.is_empty() {
+                        continue;
                     }
 
                     // Forward raw bytes to PTY
@@ -338,5 +371,21 @@ mod tests {
         assert!(!contains_subsequence(b"", b"x"));
         assert!(!contains_subsequence(b"x", b""));
         assert!(!contains_subsequence(b"ab", b"abc"));
+    }
+
+    #[test]
+    fn test_strip_ctrl_z_removes_byte() {
+        assert_eq!(strip_ctrl_z(b"\x1a"), Some(vec![]));
+        assert_eq!(strip_ctrl_z(b"a\x1ab"), Some(b"ab".to_vec()));
+        assert_eq!(strip_ctrl_z(b"\x1a\x1a\x1a"), Some(vec![]));
+        assert_eq!(strip_ctrl_z(b"hi\x1a"), Some(b"hi".to_vec()));
+    }
+
+    #[test]
+    fn test_strip_ctrl_z_passthrough_when_absent() {
+        assert_eq!(strip_ctrl_z(b""), None);
+        assert_eq!(strip_ctrl_z(b"hello"), None);
+        // Other control bytes must not be stripped.
+        assert_eq!(strip_ctrl_z(b"\x03\x11\x1c"), None);
     }
 }

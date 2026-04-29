@@ -59,6 +59,23 @@ pub enum SessionError {
 
     #[error("Tmux session not found: {0} (session may have crashed or been killed)")]
     TmuxSessionNotFound(String),
+
+    #[error("Cascade pre-flight failed for session {session}: {reason}")]
+    CascadePreflightFailed { session: SessionId, reason: String },
+
+    #[error("No cascade in progress")]
+    NoCascadeInProgress,
+
+    #[error(
+        "Cascade resume blocked: session {0} is still in a merge state — commit the resolved merge first"
+    )]
+    CascadeMergeIncomplete(SessionId),
+
+    #[error("Cascade merge failed in session {session}: {reason}")]
+    CascadeMergeFailed { session: SessionId, reason: String },
+
+    #[error("Push failed in session {session}: {reason}")]
+    PushFailed { session: SessionId, reason: String },
 }
 
 /// Tmux integration errors

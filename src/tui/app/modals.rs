@@ -44,9 +44,23 @@ impl App {
                 prompt,
                 value,
                 completer,
+                scroll,
                 ..
             } => {
-                let modal_area = centered_rect(60, 40, area);
+                // Fixed height: 2 border + 3 input block + LIST_MAX_VISIBLE
+                // rows + 1 hint = 16 when the full window fits, capped to
+                // the terminal height. Keeps the modal size predictable so
+                // navigation (which assumes LIST_MAX_VISIBLE) lines up with
+                // the rendered window.
+                let modal_width = (area.width * 60 / 100).max(50);
+                let list_rows = super::actions::LIST_MAX_VISIBLE as u16;
+                let modal_height: u16 = (2 + 3 + list_rows + 1).min(area.height.max(1));
+                let modal_area = Rect {
+                    x: area.x + (area.width.saturating_sub(modal_width)) / 2,
+                    y: area.y + (area.height.saturating_sub(modal_height)) / 2,
+                    width: modal_width,
+                    height: modal_height,
+                };
                 frame.render_widget(Clear, modal_area);
 
                 let block = Block::default()
@@ -71,18 +85,24 @@ impl App {
                 let input_para = Paragraph::new(input_text);
                 frame.render_widget(input_para, chunks[0]);
 
-                // Render completions list
+                // Render completions list with a scroll window so the
+                // highlighted row stays on-screen even when the list is
+                // longer than the visible area.
                 let (completions, highlighted) = completer.visible_completions();
                 if !completions.is_empty() {
+                    let visible = chunks[1].height as usize;
+                    let start = (*scroll).min(completions.len());
                     let lines: Vec<Line> = completions
                         .iter()
                         .enumerate()
-                        .map(|(i, c)| {
+                        .skip(start)
+                        .take(visible)
+                        .map(|(abs_idx, c)| {
                             // Show just the final path component for readability
                             let display = c.rsplit('/').next().unwrap_or(c);
-                            if highlighted == Some(i) {
+                            if highlighted == Some(abs_idx) {
                                 Line::from(Span::styled(
-                                    format!("  > {}", display),
+                                    format!("  ❯ {}", display),
                                     Style::default()
                                         .fg(self.theme.modal_info)
                                         .add_modifier(Modifier::BOLD),
@@ -97,7 +117,7 @@ impl App {
                 }
 
                 let hint = Line::from(Span::styled(
-                    "[Tab] complete  [Enter] submit  [Esc] cancel",
+                    "↑/↓ navigate  Tab complete  Enter submit  Esc cancel",
                     Style::default().add_modifier(Modifier::DIM),
                 ));
                 frame.render_widget(Paragraph::new(hint), chunks[2]);
@@ -165,28 +185,12 @@ impl App {
                 frame.render_widget(paragraph, inner);
             }
 
-            Modal::Help => {
-                let modal_area = centered_rect(70, 80, area);
-                frame.render_widget(Clear, modal_area);
-
-                let block = Block::default()
-                    .title(" Help ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(self.theme.modal_info));
-
-                let inner = block.inner(modal_area);
-                frame.render_widget(block, modal_area);
-
-                // Add margin inside the modal for better readability
-                let content_area = inner.inner(Margin {
-                    horizontal: 2,
-                    vertical: 1,
-                });
-
-                let help_lines = self.build_help_lines();
-
-                let paragraph = Paragraph::new(help_lines);
-                frame.render_widget(paragraph, content_area);
+            Modal::Help { scroll } => {
+                let mut offset = *scroll;
+                self.render_help_modal(frame, area, &mut offset);
+                if let Modal::Help { scroll } = &mut self.ui_state.modal {
+                    *scroll = offset;
+                }
             }
 
             Modal::Settings(state) => {
@@ -200,7 +204,7 @@ impl App {
                 selected_idx,
                 scroll,
             } => {
-                let max_visible = super::actions::PALETTE_MAX_VISIBLE;
+                let max_visible = super::actions::LIST_MAX_VISIBLE;
                 let visible_matches = matches.len().min(max_visible);
                 // Dynamic height: border(2) + input(1) + matches
                 let modal_height = (3 + visible_matches) as u16;
@@ -222,6 +226,7 @@ impl App {
                 let title = match effective_mode {
                     PaletteMode::Unified => " Quick Switch ",
                     PaletteMode::CommandOnly => " Commands ",
+                    PaletteMode::SectionPicker { .. } => " Move to Section ",
                 };
                 let block = Block::default()
                     .title(title)
@@ -262,14 +267,20 @@ impl App {
                     match item {
                         QuickSwitchItem::Session(m) => {
                             let status_icon = match m.status {
-                                SessionStatus::Creating => "⠋",
+                                SessionStatus::Creating
+                                | SessionStatus::Merging
+                                | SessionStatus::Pushing => "⠋",
                                 SessionStatus::Running => "●",
                                 SessionStatus::Stopped => "○",
+                                SessionStatus::CascadePaused => "⏸",
                             };
                             let status_color = match m.status {
-                                SessionStatus::Creating => self.theme.status_creating,
+                                SessionStatus::Creating
+                                | SessionStatus::Merging
+                                | SessionStatus::Pushing => self.theme.status_creating,
                                 SessionStatus::Running => self.theme.status_running,
                                 SessionStatus::Stopped => self.theme.status_stopped,
+                                SessionStatus::CascadePaused => self.theme.agent_waiting,
                             };
 
                             let mut spans = vec![
@@ -344,6 +355,15 @@ impl App {
                             );
                             let line = Line::from(Span::styled(content, row_style));
                             frame.render_widget(Paragraph::new(line).style(row_style), line_area);
+                        }
+                        QuickSwitchItem::SectionMove { label, .. } => {
+                            let style = if is_selected {
+                                self.theme.selection()
+                            } else {
+                                Style::default()
+                            };
+                            let line = Line::from(Span::styled(format!(" ❯ {label}"), style));
+                            frame.render_widget(Paragraph::new(line).style(style), line_area);
                         }
                     }
                 }
@@ -525,24 +545,91 @@ impl App {
         ]));
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled("●", Style::default().fg(self.theme.status_pr)),
-            Span::raw("  PR open"),
-        ]));
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled("●", Style::default().fg(self.theme.status_pr_merged)),
-            Span::raw("  PR merged"),
-        ]));
-        lines.push(Line::from(vec![
-            Span::raw("  "),
             Span::styled("○", Style::default().fg(self.theme.status_stopped)),
             Span::raw("  Stopped"),
         ]));
 
+        // PR badges legend
         lines.push(Line::from(""));
-        lines.push(Line::from("Press any key to close this help."));
+        lines.push(Line::from("PR Badges:"));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("●", Style::default().fg(self.theme.pr_open)),
+            Span::raw("  Open"),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("●", Style::default().fg(self.theme.status_pr)),
+            Span::raw("  Open — awaiting review"),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("●", Style::default().fg(self.theme.pr_draft)),
+            Span::raw("  Draft"),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("●", Style::default().fg(self.theme.pr_closed)),
+            Span::raw("  Closed"),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("●", Style::default().fg(self.theme.status_pr_merged)),
+            Span::raw("  Merged"),
+        ]));
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            "Esc/Enter/q/? to close · ↑/↓ k/j to scroll · PgUp/PgDn · Home/End",
+        ));
 
         lines
+    }
+
+    pub(super) fn render_help_modal(&mut self, frame: &mut Frame, area: Rect, scroll: &mut u16) {
+        let modal_area = centered_rect(70, 80, area);
+        frame.render_widget(Clear, modal_area);
+
+        let block = Block::default()
+            .title(" Help ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.theme.modal_info));
+        let inner = block.inner(modal_area);
+        frame.render_widget(block, modal_area);
+
+        let content_area = inner.inner(Margin {
+            horizontal: 2,
+            vertical: 1,
+        });
+
+        let help_lines = self.build_help_lines();
+        let total_lines = help_lines.len() as u16;
+        let visible = content_area.height;
+        let max_scroll = total_lines.saturating_sub(visible);
+
+        if *scroll > max_scroll {
+            *scroll = max_scroll;
+        }
+        let offset = *scroll;
+
+        let paragraph = Paragraph::new(help_lines).scroll((offset, 0));
+        frame.render_widget(paragraph, content_area);
+
+        if max_scroll > 0 {
+            // ratatui 0.29's Scrollbar treats `content_length - 1` as the
+            // max scroll position (scrollbar.rs:562). Passing the full line
+            // count leaves the thumb short of the bottom at max scroll —
+            // use the number of distinct scroll positions instead so the
+            // thumb hits the track ends at offset=0 and offset=max_scroll.
+            let mut sb_state = ScrollbarState::new(max_scroll as usize + 1)
+                .position(offset as usize)
+                .viewport_content_length(visible as usize);
+            let scrollbar = Scrollbar::default()
+                .orientation(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None);
+            frame.render_stateful_widget(scrollbar, content_area, &mut sb_state);
+        }
     }
 }
 

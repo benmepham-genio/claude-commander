@@ -1,8 +1,14 @@
 //! Copies `.worktreeinclude`-matched files into new worktrees.
 //!
-//! When a `.worktreeinclude` file exists in the repo root, files that are both
-//! gitignored and match its patterns are copied into the worktree at creation
-//! time (e.g. `node_modules/`, build caches).
+//! When the newly-created worktree has a `.worktreeinclude` file at its root,
+//! files that are both gitignored in the source working tree and match its
+//! patterns are copied from the source (e.g. `node_modules/`, build caches,
+//! local env files).
+//!
+//! The include file is read from the new worktree rather than the source
+//! working tree, so a stale source (on an older commit than the ref being
+//! forked from) still triggers the copy as long as the ref itself contains
+//! `.worktreeinclude`.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -22,10 +28,14 @@ use crate::error::{GitError, Result};
 /// The intersection (files that are both gitignored AND match `.worktreeinclude`)
 /// is copied into the worktree. Symlinks are skipped for security.
 pub(super) async fn copy_worktree_includes(repo_path: &Path, worktree_path: &Path) -> Result<()> {
-    let include_file = repo_path.join(".worktreeinclude");
+    let include_file = worktree_path.join(".worktreeinclude");
     if !tokio::fs::try_exists(&include_file).await.unwrap_or(false) {
         return Ok(());
     }
+
+    // Build --exclude-from=<abs path> without losing non-UTF-8 bytes.
+    let mut exclude_from_arg = std::ffi::OsString::from("--exclude-from=");
+    exclude_from_arg.push(include_file.as_os_str());
 
     // Run both git ls-files commands concurrently
     let (gitignored_result, included_result) = tokio::join!(
@@ -45,14 +55,9 @@ pub(super) async fn copy_worktree_includes(repo_path: &Path, worktree_path: &Pat
             .output(),
         Command::new("git")
             .current_dir(repo_path)
-            .args([
-                "ls-files",
-                "--ignored",
-                "--exclude-from=.worktreeinclude",
-                "-o",
-                "-z",
-                "--directory",
-            ])
+            .args(["ls-files", "--ignored"])
+            .arg(&exclude_from_arg)
+            .args(["-o", "-z", "--directory"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -73,7 +78,8 @@ pub(super) async fn copy_worktree_includes(repo_path: &Path, worktree_path: &Pat
     if !included_output.status.success() {
         let stderr = String::from_utf8_lossy(&included_output.stderr);
         warn!(
-            "git ls-files --exclude-from=.worktreeinclude failed: {}",
+            "git ls-files --exclude-from={} failed: {}",
+            include_file.display(),
             stderr
         );
         return Ok(());
@@ -273,11 +279,6 @@ mod tests {
         tokio::fs::create_dir(&repo).await.unwrap();
         init_repo(&repo).await;
 
-        // Create empty .worktreeinclude
-        tokio::fs::write(repo.join(".worktreeinclude"), "")
-            .await
-            .unwrap();
-
         // Create a gitignored file
         tokio::fs::write(repo.join(".gitignore"), "*.log\n")
             .await
@@ -288,6 +289,12 @@ mod tests {
 
         let worktree = tmp.path().join("wt");
         tokio::fs::create_dir(&worktree).await.unwrap();
+
+        // Create empty .worktreeinclude in the new worktree (where the
+        // function reads it from)
+        tokio::fs::write(worktree.join(".worktreeinclude"), "")
+            .await
+            .unwrap();
 
         let result = copy_worktree_includes(&repo, &worktree).await;
         assert!(result.is_ok());
@@ -306,7 +313,8 @@ mod tests {
         tokio::fs::write(repo.join(".gitignore"), "*.log\n.env\n")
             .await
             .unwrap();
-        // .worktreeinclude only wants *.log
+        // .worktreeinclude only wants *.log (committed to the repo so it's in
+        // the ref; copied into wt below to simulate checkout)
         tokio::fs::write(repo.join(".worktreeinclude"), "*.log\n")
             .await
             .unwrap();
@@ -337,6 +345,9 @@ mod tests {
 
         let worktree = tmp.path().join("wt");
         tokio::fs::create_dir(&worktree).await.unwrap();
+        tokio::fs::write(worktree.join(".worktreeinclude"), "*.log\n")
+            .await
+            .unwrap();
 
         let result = copy_worktree_includes(&repo, &worktree).await;
         assert!(result.is_ok());
@@ -390,6 +401,9 @@ mod tests {
 
         let worktree = tmp.path().join("wt");
         tokio::fs::create_dir(&worktree).await.unwrap();
+        tokio::fs::write(worktree.join(".worktreeinclude"), "node_modules/\n")
+            .await
+            .unwrap();
 
         let result = copy_worktree_includes(&repo, &worktree).await;
         assert!(result.is_ok());
@@ -433,6 +447,9 @@ mod tests {
 
         let worktree = tmp.path().join("wt");
         tokio::fs::create_dir(&worktree).await.unwrap();
+        tokio::fs::write(worktree.join(".worktreeinclude"), "build/\n")
+            .await
+            .unwrap();
 
         let result = copy_worktree_includes(&repo, &worktree).await;
         assert!(result.is_ok());
@@ -441,5 +458,49 @@ mod tests {
         assert!(worktree.join("build/output.bin").exists());
         // Symlink is NOT copied
         assert!(!worktree.join("build/sneaky_link").exists());
+    }
+
+    /// Regression: the include file should be read from the new worktree,
+    /// not the source working tree. If the source is on a stale commit that
+    /// predates `.worktreeinclude` being added to the repo, the file won't be
+    /// on disk in the source — but the newly-created worktree (checked out at
+    /// a newer ref) will have it, and that's what should drive the copy.
+    #[tokio::test]
+    async fn test_copy_worktree_includes_reads_from_worktree_not_source() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        tokio::fs::create_dir(&repo).await.unwrap();
+        init_repo(&repo).await;
+
+        tokio::fs::write(repo.join(".gitignore"), "*.log\n")
+            .await
+            .unwrap();
+        tokio::fs::write(repo.join("app.log"), "log data")
+            .await
+            .unwrap();
+        git(&repo, &["add", ".gitignore"]).await;
+        git(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "gitignore"],
+        )
+        .await;
+
+        // Deliberately DO NOT create .worktreeinclude in the source repo —
+        // simulating a stale main worktree that doesn't yet have it.
+        assert!(!repo.join(".worktreeinclude").exists());
+
+        let worktree = tmp.path().join("wt");
+        tokio::fs::create_dir(&worktree).await.unwrap();
+        // The new worktree was forked from a newer ref that contains the
+        // include file.
+        tokio::fs::write(worktree.join(".worktreeinclude"), "*.log\n")
+            .await
+            .unwrap();
+
+        let result = copy_worktree_includes(&repo, &worktree).await;
+        assert!(result.is_ok());
+
+        // Copy should happen despite the source repo having no include file.
+        assert!(worktree.join("app.log").exists());
     }
 }

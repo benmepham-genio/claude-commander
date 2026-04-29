@@ -109,6 +109,7 @@ fn test_session_list_single_project() {
                 repo_path: PathBuf::from("/home/user/projects/my-project"),
                 main_branch: "main".to_string(),
                 worktree_count: 0,
+                nested: false,
             }];
             let tree_list = TreeList::new(&items, &theme)
                 .highlight_style(theme.selection().add_modifier(Modifier::BOLD));
@@ -139,6 +140,7 @@ fn test_session_list_with_sessions() {
                     repo_path: PathBuf::from("/home/user/projects/cc"),
                     main_branch: "main".to_string(),
                     worktree_count: 3,
+                    nested: false,
                 },
                 SessionListItem::Worktree {
                     id: SessionId::new(),
@@ -157,6 +159,7 @@ fn test_session_list_with_sessions() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
                 SessionListItem::Worktree {
                     id: SessionId::new(),
@@ -175,6 +178,7 @@ fn test_session_list_with_sessions() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
                 SessionListItem::Worktree {
                     id: SessionId::new(),
@@ -193,6 +197,7 @@ fn test_session_list_with_sessions() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
             ];
             let tree_list = TreeList::new(&items, &theme)
@@ -224,6 +229,7 @@ fn test_session_list_with_pr_badges() {
                     repo_path: PathBuf::from("/home/user/my-app"),
                     main_branch: "main".to_string(),
                     worktree_count: 2,
+                    nested: false,
                 },
                 SessionListItem::Worktree {
                     id: SessionId::new(),
@@ -242,6 +248,7 @@ fn test_session_list_with_pr_badges() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
                 SessionListItem::Worktree {
                     id: SessionId::new(),
@@ -260,6 +267,7 @@ fn test_session_list_with_pr_badges() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
             ];
             let tree_list = TreeList::new(&items, &theme)
@@ -291,6 +299,7 @@ fn test_session_list_mixed_programs() {
                     repo_path: PathBuf::from("/home/user/multi"),
                     main_branch: "main".to_string(),
                     worktree_count: 2,
+                    nested: false,
                 },
                 SessionListItem::Worktree {
                     id: SessionId::new(),
@@ -309,6 +318,7 @@ fn test_session_list_mixed_programs() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
                 SessionListItem::Worktree {
                     id: SessionId::new(),
@@ -327,6 +337,7 @@ fn test_session_list_mixed_programs() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
             ];
             let tree_list = TreeList::new(&items, &theme)
@@ -358,6 +369,7 @@ fn test_session_list_with_numbers() {
                     repo_path: PathBuf::from("/home/user/projects/cc"),
                     main_branch: "main".to_string(),
                     worktree_count: 3,
+                    nested: false,
                 },
                 SessionListItem::Worktree {
                     id: SessionId::new(),
@@ -376,6 +388,7 @@ fn test_session_list_with_numbers() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
                 SessionListItem::Worktree {
                     id: SessionId::new(),
@@ -394,6 +407,7 @@ fn test_session_list_with_numbers() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
                 SessionListItem::Worktree {
                     id: SessionId::new(),
@@ -412,11 +426,11 @@ fn test_session_list_with_numbers() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
             ];
             let tree_list = TreeList::new(&items, &theme)
-                .highlight_style(theme.selection().add_modifier(Modifier::BOLD))
-                .show_numbers(true);
+                .highlight_style(theme.selection().add_modifier(Modifier::BOLD));
             frame.render_stateful_widget(
                 tree_list,
                 frame.area(),
@@ -1114,7 +1128,7 @@ fn test_quick_switch_with_matches() {
         .draw(|frame| {
             let area = frame.area();
             let modal_width = area.width * 60 / 100;
-            let matches = vec![
+            let matches = [
                 (
                     "●",
                     theme.status_running,
@@ -1213,6 +1227,7 @@ fn test_session_list_creating_status() {
                     repo_path: PathBuf::from("/home/user/my-project"),
                     main_branch: "main".to_string(),
                     worktree_count: 2,
+                    nested: false,
                 },
                 SessionListItem::Worktree {
                     id: SessionId::new(),
@@ -1231,6 +1246,7 @@ fn test_session_list_creating_status() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
                 SessionListItem::Worktree {
                     id: SessionId::new(),
@@ -1249,6 +1265,7 @@ fn test_session_list_creating_status() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
             ];
             // tick=0 → spinner frame 0 → "⠋"

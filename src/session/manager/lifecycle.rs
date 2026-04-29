@@ -55,17 +55,23 @@ impl SessionManager {
     /// setup. On success, transitions the session from `Creating` to `Running`.
     #[instrument(skip(self))]
     pub async fn finalize_session(&self, session_id: &SessionId) -> Result<SessionId> {
-        // Read session and project info
-        let (project_id, title, branch_name, program) = {
+        // Read session and project info, plus stack parent's branch if any so
+        // we know to fork from it below.
+        let (project_id, title, branch_name, program, stack_parent_branch) = {
             let state = self.store.read().await;
             let session = state
                 .get_session(session_id)
                 .ok_or(SessionError::NotFound(*session_id))?;
+            let parent_branch = session
+                .stack_parent_session_id
+                .and_then(|pid| state.get_session(&pid))
+                .map(|p| p.branch.clone());
             (
                 session.project_id,
                 session.title.clone(),
                 session.branch.clone(),
                 session.program.clone(),
+                parent_branch,
             )
         };
 
@@ -126,18 +132,30 @@ impl SessionManager {
         let (branch_exists, start_point) = {
             let backend = GitBackend::open(&repo_path)?;
             let exists = backend.branch_exists(&branch_name)?;
-            // Prefer origin/<branch_name> as the start point when the local
-            // branch doesn't exist — this supports checking out an existing
-            // remote branch (e.g. via the Checkout modal) as well as falling
-            // back to origin/<main_branch> when creating a fresh branch.
-            let branch_remote_ref = format!("refs/remotes/origin/{}", branch_name);
-            let main_remote_ref = format!("refs/remotes/origin/{}", main_branch);
-            let sp = if !exists && backend.ref_exists(&branch_remote_ref)? {
-                Some(format!("origin/{}", branch_name))
-            } else if backend.ref_exists(&main_remote_ref)? {
-                Some(format!("origin/{}", main_branch))
+            // For a stacked session we fork the new branch off the parent
+            // session's local branch (which exists on disk thanks to its own
+            // worktree). This overrides the usual origin/<branch>/origin/<main>
+            // fallback so the stack topology is preserved.
+            let sp = if let Some(parent_branch) = stack_parent_branch.as_deref() {
+                if !exists && backend.branch_exists(parent_branch)? {
+                    Some(parent_branch.to_string())
+                } else {
+                    None
+                }
             } else {
-                None
+                // Prefer origin/<branch_name> as the start point when the local
+                // branch doesn't exist — this supports checking out an existing
+                // remote branch (e.g. via the Checkout modal) as well as falling
+                // back to origin/<main_branch> when creating a fresh branch.
+                let branch_remote_ref = format!("refs/remotes/origin/{}", branch_name);
+                let main_remote_ref = format!("refs/remotes/origin/{}", main_branch);
+                if !exists && backend.ref_exists(&branch_remote_ref)? {
+                    Some(format!("origin/{}", branch_name))
+                } else if backend.ref_exists(&main_remote_ref)? {
+                    Some(format!("origin/{}", main_branch))
+                } else {
+                    None
+                }
             };
             (exists, sp)
         };
@@ -161,9 +179,17 @@ impl SessionManager {
             session.tmux_session_name.clone()
         };
 
+        // For stacked sessions running `claude`, prepend an initial prompt
+        // arg so Claude knows the correct `--base` when the user asks it to
+        // open a PR. Non-claude programs get the unchanged program string.
+        let launch_cmd = match stack_parent_branch.as_deref() {
+            Some(pb) if program_is_claude(&program) => program_with_stack_context(&program, pb),
+            _ => program.clone(),
+        };
+
         // Create tmux session in the worktree directory
         self.tmux
-            .create_session(&tmux_session_name, &worktree_info.path, Some(&program))
+            .create_session(&tmux_session_name, &worktree_info.path, Some(&launch_cmd))
             .await?;
 
         // Update session to Running with the real worktree info
@@ -364,5 +390,64 @@ impl SessionManager {
 
         info!("Deleted session {}", session_id);
         Ok(())
+    }
+}
+
+/// Whether the program string starts with the `claude` CLI. Used to decide
+/// whether an appended initial-prompt arg will be understood or will break
+/// the invocation (e.g. for `bash` or `zsh` as the program).
+fn program_is_claude(program: &str) -> bool {
+    program.split_whitespace().next() == Some("claude")
+}
+
+/// Build the launch command for a stacked session running Claude Code.
+///
+/// Appends a single-quoted initial prompt telling Claude the stack parent's
+/// branch name, so that when the user later asks Claude to open a PR it uses
+/// `--base <parent_branch>` rather than defaulting to `main`. Branch names
+/// cannot contain single quotes per git's refname rules, so no extra escaping
+/// is needed.
+fn program_with_stack_context(program: &str, parent_branch: &str) -> String {
+    let prompt = format!(
+        "This branch is stacked on `{parent_branch}` (not main). \
+         When creating a PR for this session, use: gh pr create --base {parent_branch}"
+    );
+    format!("{program} '{prompt}'")
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn program_is_claude_matches_bare_command() {
+        assert!(program_is_claude("claude"));
+    }
+
+    #[test]
+    fn program_is_claude_matches_with_args() {
+        assert!(program_is_claude("claude --resume"));
+    }
+
+    #[test]
+    fn program_is_claude_rejects_other_shells() {
+        assert!(!program_is_claude("bash"));
+        assert!(!program_is_claude("zsh -l"));
+        assert!(!program_is_claude(""));
+    }
+
+    #[test]
+    fn stack_context_embeds_parent_branch() {
+        let cmd = program_with_stack_context("claude", "feature-auth");
+        assert!(cmd.starts_with("claude '"));
+        assert!(cmd.contains("feature-auth"));
+        assert!(cmd.contains("gh pr create --base feature-auth"));
+        assert!(cmd.ends_with('\''));
+    }
+
+    #[test]
+    fn stack_context_preserves_program_flags() {
+        let cmd = program_with_stack_context("claude --resume", "base-branch");
+        assert!(cmd.starts_with("claude --resume '"));
     }
 }
