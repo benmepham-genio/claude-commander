@@ -372,9 +372,10 @@ impl App {
             Modal::MultiRepoProjectPicker {
                 projects,
                 selected_idx,
-                ..
+                scroll,
             } => {
-                let visible_rows = projects.len().clamp(1, 12);
+                let max_visible = super::actions::LIST_MAX_VISIBLE;
+                let visible_rows = projects.len().clamp(1, max_visible);
                 // border(2) + title(1) + hint(1) + rows
                 let modal_height = (4 + visible_rows) as u16;
                 let modal_width = (area.width * 60 / 100).max(40);
@@ -410,9 +411,16 @@ impl App {
                     hint_area,
                 );
 
-                // Project rows
-                for (i, (_, name, checked)) in projects.iter().enumerate() {
-                    let row = inner.y + 1 + i as u16;
+                // Project rows — slice the visible window using `scroll`.
+                let start = (*scroll).min(projects.len());
+                for (i, (_, name, checked)) in projects
+                    .iter()
+                    .enumerate()
+                    .skip(start)
+                    .take(max_visible)
+                {
+                    let row_offset = (i - start) as u16;
+                    let row = inner.y + 1 + row_offset;
                     if row >= inner.y + inner.height {
                         break;
                     }

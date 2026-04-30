@@ -481,7 +481,7 @@ impl App {
             Modal::MultiRepoProjectPicker {
                 projects,
                 selected_idx,
-                ..
+                scroll,
             } => {
                 use crate::config::keybindings::BindableAction;
 
@@ -493,11 +493,21 @@ impl App {
                             } else {
                                 *selected_idx - 1
                             };
+                            *scroll = super::actions::adjust_list_scroll(
+                                *selected_idx,
+                                *scroll,
+                                super::actions::LIST_MAX_VISIBLE,
+                            );
                         }
                     }
                     Some(BindableAction::NavigateDown) => {
                         if !projects.is_empty() {
                             *selected_idx = (*selected_idx + 1) % projects.len();
+                            *scroll = super::actions::adjust_list_scroll(
+                                *selected_idx,
+                                *scroll,
+                                super::actions::LIST_MAX_VISIBLE,
+                            );
                         }
                     }
                     _ => match key.code {
