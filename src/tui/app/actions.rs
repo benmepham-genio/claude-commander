@@ -181,6 +181,22 @@ impl App {
                     };
                 }
             }
+        } else if let Some(mr_id) = self.ui_state.selected_multi_repo_id {
+            match self
+                .session_manager
+                .get_multi_repo_shell_attach_command(&mr_id)
+                .await
+            {
+                Ok(cmd) => {
+                    self.ui_state.attach_command = Some(cmd);
+                    self.ui_state.should_quit = true;
+                }
+                Err(e) => {
+                    self.ui_state.modal = Modal::Error {
+                        message: format!("Cannot open shell: {}", e),
+                    };
+                }
+            }
         }
     }
 

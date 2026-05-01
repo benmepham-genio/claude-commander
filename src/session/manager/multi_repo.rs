@@ -251,6 +251,10 @@ impl SessionManager {
         if let Err(e) = self.tmux.kill_session(&session.tmux_session_name).await {
             warn!("Failed to kill tmux session: {}", e);
         }
+        // Kill the lazily-created shell tmux session if one exists
+        if let Some(ref shell_name) = session.shell_tmux_session_name {
+            let _ = self.tmux.kill_session(shell_name).await;
+        }
 
         // Remove each worktree via git CLI (avoids holding non-Send gix types across await)
         for entry in &session.repos {
@@ -346,5 +350,114 @@ impl SessionManager {
             branch
         ));
         md
+    }
+
+    /// Ensure a shell tmux session exists for this multi-repo session, creating
+    /// one rooted at `parent_dir` on first use. Returns the tmux session name.
+    pub async fn ensure_multi_repo_shell_session(
+        &self,
+        session_id: &MultiRepoSessionId,
+    ) -> Result<String> {
+        let (existing_shell_name, parent_dir, id_prefix) = {
+            let state = self.store.read().await;
+            let session = state.get_multi_repo_session(session_id).ok_or_else(|| {
+                SessionError::CreationFailed("Multi-repo session not found".into())
+            })?;
+            (
+                session.shell_tmux_session_name.clone(),
+                session.parent_dir.clone(),
+                session.id.to_string(),
+            )
+        };
+
+        if let Some(ref shell_name) = existing_shell_name
+            && self.tmux.session_exists(shell_name).await.unwrap_or(false)
+        {
+            return Ok(shell_name.clone());
+        }
+
+        let shell_name = format!("cc-mr-{}-sh", id_prefix);
+
+        if self.tmux.session_exists(&shell_name).await.unwrap_or(false) {
+            let pane_dead = self.tmux.is_pane_dead(&shell_name).await.unwrap_or(false);
+            if pane_dead {
+                let _ = self.tmux.kill_session(&shell_name).await;
+            } else {
+                let sid = *session_id;
+                let name = shell_name.clone();
+                self.store
+                    .mutate(move |state| {
+                        if let Some(s) = state.get_multi_repo_session_mut(&sid) {
+                            s.shell_tmux_session_name = Some(name);
+                        }
+                    })
+                    .await?;
+                return Ok(shell_name);
+            }
+        }
+
+        let shell_program = self.config_store.read().shell_program.clone();
+        self.tmux
+            .create_session(&shell_name, &parent_dir, Some(&shell_program))
+            .await?;
+
+        let sid = *session_id;
+        let name = shell_name.clone();
+        self.store
+            .mutate(move |state| {
+                if let Some(s) = state.get_multi_repo_session_mut(&sid) {
+                    s.shell_tmux_session_name = Some(name);
+                }
+            })
+            .await?;
+
+        info!(
+            "Created shell session {} for multi-repo session {}",
+            shell_name, session_id
+        );
+        Ok(shell_name)
+    }
+
+    /// Get attach command for the multi-repo shell session (creates it if needed).
+    pub async fn get_multi_repo_shell_attach_command(
+        &self,
+        session_id: &MultiRepoSessionId,
+    ) -> Result<String> {
+        let shell_name = self.ensure_multi_repo_shell_session(session_id).await?;
+
+        let exists = self.tmux.session_exists(&shell_name).await?;
+        if !exists {
+            let sid = *session_id;
+            let _ = self
+                .store
+                .mutate(move |state| {
+                    if let Some(s) = state.get_multi_repo_session_mut(&sid) {
+                        s.shell_tmux_session_name = None;
+                    }
+                })
+                .await;
+            return Err(SessionError::TmuxSessionNotFound(shell_name).into());
+        }
+
+        let pane_dead = self.tmux.is_pane_dead(&shell_name).await.unwrap_or(false);
+        if pane_dead {
+            let _ = self.tmux.kill_session(&shell_name).await;
+            let sid = *session_id;
+            let _ = self
+                .store
+                .mutate(move |state| {
+                    if let Some(s) = state.get_multi_repo_session_mut(&sid) {
+                        s.shell_tmux_session_name = None;
+                    }
+                })
+                .await;
+            return Err(SessionError::TmuxSessionNotFound(format!(
+                "{} (shell exited)",
+                shell_name
+            ))
+            .into());
+        }
+
+        Ok(format!("tmux attach-session -t {}", shell_name))
     }
 }

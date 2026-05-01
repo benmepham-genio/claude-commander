@@ -595,6 +595,9 @@ pub struct MultiRepoSession {
     pub last_active_at: DateTime<Utc>,
     /// Tmux session name (for tmux commands)
     pub tmux_session_name: String,
+    /// Shell tmux session name (for the cross-repo shell — lazily created)
+    #[serde(default)]
+    pub shell_tmux_session_name: Option<String>,
     /// Whether the session has unread output
     #[serde(default)]
     pub unread: bool,
@@ -625,6 +628,7 @@ impl MultiRepoSession {
             created_at: now,
             last_active_at: now,
             tmux_session_name,
+            shell_tmux_session_name: None,
             unread: false,
         }
     }
