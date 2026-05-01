@@ -262,6 +262,24 @@ impl App {
             return Ok(shell_name);
         }
 
+        // Multi-repo session: look up by tmux_session_name and ensure its shell.
+        let mr_id = {
+            let state = self.store.read().await;
+            state
+                .multi_repo_sessions
+                .values()
+                .find(|s| s.tmux_session_name == current_tmux_name)
+                .map(|s| s.id)
+        };
+
+        if let Some(mr_id) = mr_id {
+            let shell_name = self
+                .session_manager
+                .ensure_multi_repo_shell_session(&mr_id)
+                .await?;
+            return Ok(shell_name);
+        }
+
         Err(crate::error::Error::Session(
             crate::error::SessionError::TmuxSessionNotFound(format!(
                 "No session found for tmux name: {}",
