@@ -145,7 +145,7 @@ impl Default for Config {
             editor: None,
             editor_gui: None,
             shell_program: std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string()),
-            pr_check_interval_secs: 600,
+            pr_check_interval_secs: 120,
             pr_review_labels: default_pr_review_labels(),
             fetch_before_create: true,
             resume_session: true,
@@ -551,7 +551,7 @@ has_label = ["blocked", "waiting-on-author"]
     fn test_default_config_additional_values() {
         let config = Config::default();
         assert_eq!(config.diff_cache_ttl_ms, 500);
-        assert_eq!(config.pr_check_interval_secs, 600);
+        assert_eq!(config.pr_check_interval_secs, 120);
         assert!(config.fetch_before_create);
         assert!(config.resume_session);
         assert_eq!(config.state_sync_interval_ms, 2000);

@@ -261,7 +261,7 @@ ui_refresh_fps = 30
 # editor_gui = true
 
 # Interval in seconds between GitHub PR checks (0 = disabled)
-pr_check_interval_secs = 600
+pr_check_interval_secs = 120
 
 # Dim the right pane (preview/diff/shell) when the session list is focused
 dim_unfocused_preview = true
