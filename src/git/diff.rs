@@ -53,9 +53,14 @@ impl DiffInfo {
         }
     }
 
-    /// Check if this diff is stale
+    /// Check if this diff is stale.
+    ///
+    /// A `ttl` of zero means "always stale": entries computed in the same
+    /// instant as the check are considered expired. The `>=` (rather than
+    /// strict `>`) also avoids a flake where two back-to-back `Instant::now()`
+    /// calls return the same value on a fast machine.
     pub fn is_stale(&self, ttl: Duration) -> bool {
-        self.computed_at.elapsed() > ttl
+        self.computed_at.elapsed() >= ttl
     }
 
     /// Check if there are any changes
