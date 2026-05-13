@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use crossterm::{
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+        KeyboardEnhancementFlags, MouseButton, MouseEventKind, PopKeyboardEnhancementFlags,
         PushKeyboardEnhancementFlags,
     },
     execute,
@@ -455,6 +455,9 @@ pub struct AppUiState {
     pub cascade_paused: bool,
     /// Section names that are currently collapsed in the list view.
     pub collapsed_sections: std::collections::HashSet<String>,
+    /// Last left-mouse click on a session-list row: (list index, timestamp).
+    /// Used to detect double-click on the same row within `DOUBLE_CLICK_WINDOW`.
+    pub last_left_click: Option<(usize, Instant)>,
 }
 
 impl Default for AppUiState {
@@ -492,6 +495,7 @@ impl Default for AppUiState {
             agent_states: HashMap::new(),
             cascade_paused: false,
             collapsed_sections: std::collections::HashSet::new(),
+            last_left_click: None,
         }
     }
 }

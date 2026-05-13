@@ -126,6 +126,15 @@ impl App {
                 MouseEventKind::ScrollDown => {
                     self.scroll_pane_at(mouse.column, ScrollDirection::Down);
                 }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    // Ignore clicks while a modal is open — modal input is
+                    // keyboard-only and an underlying row select would be
+                    // confusing.
+                    if !matches!(self.ui_state.modal, Modal::None) {
+                        return;
+                    }
+                    self.handle_left_click(mouse.column, mouse.row).await;
+                }
                 _ => {}
             },
             InputEvent::Paste(text) => {
@@ -479,6 +488,56 @@ impl App {
             }
 
             Modal::None => {}
+        }
+    }
+
+    /// Handle a left-mouse click at the given absolute terminal position.
+    ///
+    /// Clicks outside the session list area are ignored. Clicks on a selectable
+    /// row move the highlight there and refresh the preview; two clicks on the
+    /// same row within [`DOUBLE_CLICK_WINDOW`] act as `UserCommand::Select`
+    /// (attach for sessions, toggle for section headers).
+    async fn handle_left_click(&mut self, col: u16, row: u16) {
+        use super::selection::DOUBLE_CLICK_WINDOW;
+
+        let Some(idx) = self.list_index_at(col, row) else {
+            self.ui_state.last_left_click = None;
+            return;
+        };
+        // Skip rows that aren't selectable (e.g. Spacer).
+        match self.ui_state.list_items.get(idx) {
+            Some(item) if !item.is_selectable() => {
+                self.ui_state.last_left_click = None;
+                return;
+            }
+            None => {
+                self.ui_state.last_left_click = None;
+                return;
+            }
+            _ => {}
+        }
+
+        let now = Instant::now();
+        let is_double_click = matches!(
+            self.ui_state.last_left_click,
+            Some((prev_idx, prev_at))
+                if prev_idx == idx && now.duration_since(prev_at) <= DOUBLE_CLICK_WINDOW
+        );
+
+        if self.ui_state.list_state.selected() != Some(idx) {
+            self.ui_state.list_state.select(Some(idx));
+            self.update_selection();
+            self.ui_state.preview_update_spawned_at = None;
+            self.spawn_preview_update();
+        }
+
+        if is_double_click {
+            // Consume the click pair so a third click within the window
+            // doesn't fire again.
+            self.ui_state.last_left_click = None;
+            self.handle_command(UserCommand::Select).await;
+        } else {
+            self.ui_state.last_left_click = Some((idx, now));
         }
     }
 

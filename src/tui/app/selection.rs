@@ -2,6 +2,10 @@
 
 use super::*;
 
+/// Maximum delay between two same-row left clicks for them to count as a
+/// double-click that triggers `UserCommand::Select`.
+pub(super) const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
+
 impl App {
     /// Update selection tracking based on list position
     pub(super) fn update_selection(&mut self) {
@@ -57,6 +61,20 @@ impl App {
             RightPaneView::Info => &mut self.ui_state.info_state,
             RightPaneView::Shell => &mut self.ui_state.shell_state,
         }
+    }
+
+    /// Map a mouse `(col, row)` in absolute terminal coordinates to a row in
+    /// the session list. Returns `None` if the position is outside the list
+    /// area or maps past the last rendered item.
+    pub(super) fn list_index_at(&self, col: u16, row: u16) -> Option<usize> {
+        list_index_at(
+            col,
+            row,
+            self.ui_state.terminal_size,
+            self.ui_state.left_pane_pct,
+            self.ui_state.list_state.list_state.offset(),
+            self.ui_state.list_items.len(),
+        )
     }
 
     /// Scroll the pane under the given mouse column position
@@ -119,6 +137,59 @@ impl App {
     }
 }
 
+/// Pure mapping from absolute mouse coordinates to a list item index.
+///
+/// Mirrors the layout in `App::render` (see `render.rs`): the content area
+/// inset by 1 on each side and 3 on the bottom (for status bar), split
+/// horizontally by `left_pane_pct`, then the left column is split vertically
+/// into a 1-row heading and the list below it. The list itself has no
+/// border, so the list's top-left maps directly to item index `offset`.
+pub(super) fn list_index_at(
+    col: u16,
+    row: u16,
+    terminal_size: Rect,
+    left_pane_pct: u16,
+    offset: usize,
+    item_count: usize,
+) -> Option<usize> {
+    if terminal_size.width == 0 || terminal_size.height == 0 {
+        return None;
+    }
+
+    let content_area = Rect {
+        x: terminal_size.x + 1,
+        y: terminal_size.y + 1,
+        width: terminal_size.width.saturating_sub(2),
+        height: terminal_size.height.saturating_sub(3),
+    };
+
+    let main_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(left_pane_pct),
+            Constraint::Percentage(100 - left_pane_pct),
+        ])
+        .split(content_area);
+    let left = main_chunks[0];
+
+    // Left pane: 1-line heading then the list. The list area starts at
+    // `left.y + 1` and runs to `left.bottom()`.
+    let list_y = left.y.checked_add(1)?;
+    if col < left.x || col >= left.right() {
+        return None;
+    }
+    if row < list_y || row >= left.bottom() {
+        return None;
+    }
+
+    let visible = (row - list_y) as usize;
+    let idx = offset.checked_add(visible)?;
+    if idx >= item_count {
+        return None;
+    }
+    Some(idx)
+}
+
 /// Map a 1-based session number to its index in the flat list_items vec.
 /// Returns None if the number is out of range.
 pub(super) fn session_number_to_list_index(
@@ -135,4 +206,85 @@ pub(super) fn session_number_to_list_index(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A typical 80x24 terminal split 30/70 with the standard 1-cell margins
+    /// — used as a fixture for the `list_index_at` tests below.
+    fn term() -> Rect {
+        Rect::new(0, 0, 80, 24)
+    }
+
+    /// Returns the rendered list rect for the 80x24 / 30% fixture so tests
+    /// can compute valid click positions without duplicating layout math.
+    fn list_rect() -> Rect {
+        let size = term();
+        let content_area = Rect {
+            x: size.x + 1,
+            y: size.y + 1,
+            width: size.width.saturating_sub(2),
+            height: size.height.saturating_sub(3),
+        };
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+            .split(content_area);
+        let left = chunks[0];
+        Rect::new(left.x, left.y + 1, left.width, left.height - 1)
+    }
+
+    #[test]
+    fn list_index_at_first_row_with_no_offset_is_zero() {
+        let lr = list_rect();
+        assert_eq!(list_index_at(lr.x, lr.y, term(), 30, 0, 10), Some(0));
+    }
+
+    #[test]
+    fn list_index_at_adds_scroll_offset() {
+        let lr = list_rect();
+        // Second visible row, list scrolled by 5 → item index 6
+        assert_eq!(list_index_at(lr.x, lr.y + 1, term(), 30, 5, 20), Some(6));
+    }
+
+    #[test]
+    fn list_index_at_returns_none_on_heading_row() {
+        // The heading row sits at `list_rect().y - 1` (the first row of the
+        // left pane, before the list). A click there must not select a row.
+        let lr = list_rect();
+        assert_eq!(list_index_at(lr.x, lr.y - 1, term(), 30, 0, 10), None);
+    }
+
+    #[test]
+    fn list_index_at_returns_none_beyond_item_count() {
+        let lr = list_rect();
+        // Click far enough down that the item index exceeds item_count.
+        assert_eq!(list_index_at(lr.x, lr.y, term(), 30, 0, 0), None);
+        assert_eq!(list_index_at(lr.x, lr.y + 5, term(), 30, 0, 3), None);
+    }
+
+    #[test]
+    fn list_index_at_returns_none_outside_left_pane() {
+        let lr = list_rect();
+        // Click in the right pane — should map to nothing in the list.
+        let right_col = lr.right() + 1;
+        assert_eq!(list_index_at(right_col, lr.y, term(), 30, 0, 10), None);
+    }
+
+    #[test]
+    fn list_index_at_returns_none_below_content_area() {
+        let lr = list_rect();
+        // Click on the status-bar row at the bottom of the terminal.
+        let below = term().bottom() - 1;
+        assert!(below >= lr.bottom());
+        assert_eq!(list_index_at(lr.x, below, term(), 30, 0, 100), None);
+    }
+
+    #[test]
+    fn list_index_at_zero_size_terminal_returns_none() {
+        let size = Rect::new(0, 0, 0, 0);
+        assert_eq!(list_index_at(0, 0, size, 30, 0, 10), None);
+    }
 }
