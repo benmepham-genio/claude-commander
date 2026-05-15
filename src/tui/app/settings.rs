@@ -31,6 +31,16 @@ impl App {
                         color_swatch: None,
                     },
                     SettingsRow {
+                        label: "Worktrees Directory".into(),
+                        value: c
+                            .worktrees_dir
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "(default)".into()),
+                        field_key: "worktrees_dir".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
                         label: "Per-Repo Worktree Dirs".into(),
                         value: c.per_repo_worktree_dirs.to_string(),
                         field_key: "per_repo_worktree_dirs".into(),
@@ -641,6 +651,14 @@ impl App {
                 "default_program" => self.config.default_program = value.to_string(),
                 "branch_prefix" => self.config.branch_prefix = value.to_string(),
                 "shell_program" => self.config.shell_program = value.to_string(),
+                "worktrees_dir" => {
+                    self.config.worktrees_dir =
+                        if value.is_empty() || value == "(default)" {
+                            None
+                        } else {
+                            Some(PathBuf::from(value))
+                        };
+                }
                 "per_repo_worktree_dirs" => {
                     if let Ok(b) = value.parse::<bool>() {
                         self.config.per_repo_worktree_dirs = b;
