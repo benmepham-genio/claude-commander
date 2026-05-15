@@ -11,11 +11,16 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures::StreamExt;
 use tokio::process::Command;
 use tokio::sync::RwLock;
 use tracing::{debug, instrument};
 
 use crate::error::{GitError, Result};
+
+/// Cap concurrent `git diff --no-index` subprocesses for untracked files.
+/// A noisy worktree with many untracked files can otherwise EMFILE.
+const UNTRACKED_DIFF_CONCURRENCY: usize = 8;
 
 /// Default diff cache TTL (500ms)
 pub const DEFAULT_DIFF_CACHE_TTL: Duration = Duration::from_millis(500);
@@ -209,24 +214,31 @@ pub async fn compute_diff_for_path(path: &Path) -> Result<DiffInfo> {
         let untracked = String::from_utf8_lossy(&untracked_output.stdout);
         let untracked_files: Vec<&str> = untracked.lines().filter(|l| !l.is_empty()).collect();
 
-        let untracked_diffs = futures::future::join_all(untracked_files.iter().map(|file| {
-            Command::new("git")
-                .current_dir(path)
-                .args([
-                    "diff",
-                    "--no-index",
-                    "--src-prefix=a/",
-                    "--dst-prefix=b/",
-                    "--",
-                    "/dev/null",
-                    file,
-                ])
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .output()
-        }))
-        .await;
+        let mut diff_futures = Vec::with_capacity(untracked_files.len());
+        for file in &untracked_files {
+            diff_futures.push(
+                Command::new("git")
+                    .current_dir(path)
+                    .args([
+                        "diff",
+                        "--no-index",
+                        "--src-prefix=a/",
+                        "--dst-prefix=b/",
+                        "--",
+                        "/dev/null",
+                        file,
+                    ])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .output(),
+            );
+        }
+
+        let untracked_diffs: Vec<_> = futures::stream::iter(diff_futures)
+            .buffered(UNTRACKED_DIFF_CONCURRENCY)
+            .collect()
+            .await;
 
         for output in untracked_diffs.into_iter().flatten() {
             // git diff --no-index exits with 1 when files differ (expected)
