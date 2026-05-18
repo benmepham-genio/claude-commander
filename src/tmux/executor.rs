@@ -308,22 +308,24 @@ pub struct StatusBarInfo {
 }
 
 impl StatusBarInfo {
+    const SEP: &'static str = " \u{2502} ";
+
     /// Format the left side of the status bar.
     ///
-    /// Agent session: `project | branch | PR #N | Ctrl-q: detach | Ctrl-\: shell | Ctrl-o: switch`
-    /// Shell session: `project | branch | PR #N | Ctrl-q: detach | Ctrl-\: agent | Ctrl-o: switch`
+    /// Uses bold labels and box-drawing separators (`│`) for a polished look.
     /// `#` is escaped to `##` for tmux format safety.
     pub fn format_left(&self) -> String {
         let safe_branch = self.branch.replace('#', "##");
         let pr = match self.pr_number {
-            Some(n) if self.pr_merged => format!(" | PR ##{} merged", n),
-            Some(n) => format!(" | PR ##{}", n),
+            Some(n) if self.pr_merged => format!("{}PR ##{} merged", Self::SEP, n),
+            Some(n) => format!("{}PR ##{}", Self::SEP, n),
             None => String::new(),
         };
         let toggle_hint = if self.is_shell { "agent" } else { "shell" };
         format!(
-            " {} | {}{} | Ctrl-q: detach | Ctrl-\\: {} | Ctrl-o: switch ",
-            self.project_name, safe_branch, pr, toggle_hint
+            " #[bold]{}#[nobold]{}{}{}{sep}#[bold]Ctrl-q#[nobold]: detach{sep}#[bold]Ctrl-\\#[nobold]: {}{sep}#[bold]Ctrl-o#[nobold]: switch ",
+            self.project_name, Self::SEP, safe_branch, pr, toggle_hint,
+            sep = Self::SEP,
         )
     }
 
@@ -375,7 +377,7 @@ mod tests {
         let info = test_info("feature-auth", None, false);
         assert_eq!(
             info.format_left(),
-            " my-project | feature-auth | Ctrl-q: detach | Ctrl-\\: shell | Ctrl-o: switch "
+            " #[bold]my-project#[nobold] \u{2502} feature-auth \u{2502} #[bold]Ctrl-q#[nobold]: detach \u{2502} #[bold]Ctrl-\\#[nobold]: shell \u{2502} #[bold]Ctrl-o#[nobold]: switch "
         );
     }
 
@@ -390,7 +392,7 @@ mod tests {
         let info = test_info("feature", Some(42), false);
         assert_eq!(
             info.format_left(),
-            " my-project | feature | PR ##42 | Ctrl-q: detach | Ctrl-\\: shell | Ctrl-o: switch "
+            " #[bold]my-project#[nobold] \u{2502} feature \u{2502} PR ##42 \u{2502} #[bold]Ctrl-q#[nobold]: detach \u{2502} #[bold]Ctrl-\\#[nobold]: shell \u{2502} #[bold]Ctrl-o#[nobold]: switch "
         );
     }
 
@@ -399,7 +401,7 @@ mod tests {
         let info = test_info("feature", Some(42), true);
         assert_eq!(
             info.format_left(),
-            " my-project | feature | PR ##42 merged | Ctrl-q: detach | Ctrl-\\: shell | Ctrl-o: switch "
+            " #[bold]my-project#[nobold] \u{2502} feature \u{2502} PR ##42 merged \u{2502} #[bold]Ctrl-q#[nobold]: detach \u{2502} #[bold]Ctrl-\\#[nobold]: shell \u{2502} #[bold]Ctrl-o#[nobold]: switch "
         );
     }
 
@@ -409,7 +411,7 @@ mod tests {
         info.is_shell = true;
         assert_eq!(
             info.format_left(),
-            " my-project | feature-auth | Ctrl-q: detach | Ctrl-\\: agent | Ctrl-o: switch "
+            " #[bold]my-project#[nobold] \u{2502} feature-auth \u{2502} #[bold]Ctrl-q#[nobold]: detach \u{2502} #[bold]Ctrl-\\#[nobold]: agent \u{2502} #[bold]Ctrl-o#[nobold]: switch "
         );
     }
 

@@ -424,44 +424,88 @@ impl App {
             height: 1,
         };
 
-        let status = if let Some((ref msg, expires)) = self.ui_state.status_message {
+        let base_style = self.theme.status_bar();
+        let sep = Span::styled(" \u{2502} ", base_style);
+
+        // Fill the entire status bar background
+        let bg_line = Line::from(vec![Span::styled(
+            " ".repeat(status_area.width as usize),
+            base_style,
+        )]);
+        frame.render_widget(Paragraph::new(bg_line), status_area);
+
+        let toast = if let Some((ref msg, expires)) = self.ui_state.status_message {
             if Instant::now() < expires {
-                msg.clone()
+                Some(msg.clone())
             } else {
-                String::new()
+                None
             }
         } else {
-            String::new()
+            None
         };
 
         let restart_needed = self.config_store.restart_required();
 
-        let status = if status.is_empty() {
-            let session_count = self
-                .ui_state
-                .list_items
-                .iter()
-                .filter(|i| i.is_worktree())
-                .count();
+        let session_count = self
+            .ui_state
+            .list_items
+            .iter()
+            .filter(|i| i.is_worktree())
+            .count();
+
+        let sessions_span = Span::styled(
+            format!(" Sessions: {session_count}"),
+            base_style.add_modifier(Modifier::BOLD),
+        );
+
+        let help_hint = Span::styled("? help ", base_style);
+
+        // Build left-side spans and right-side help hint based on state
+        let left_spans = if let Some(msg) = toast {
+            let mut spans = vec![sessions_span, sep.clone(), Span::styled(msg, base_style)];
             if restart_needed {
-                format!(
-                    "Sessions: {} | Restart to apply config changes | ? help",
-                    session_count
-                )
-            } else {
-                format!(
-                    "Sessions: {} | Press ? for help | n: new session | N: add project",
-                    session_count
-                )
+                spans.push(sep);
+                spans.push(Span::styled("Restart to apply config changes", base_style));
             }
+            spans
         } else if restart_needed {
-            format!("{} | Restart to apply config changes", status)
+            vec![
+                sessions_span,
+                sep,
+                Span::styled("Restart to apply config changes", base_style),
+            ]
         } else {
-            status
+            vec![
+                sessions_span,
+                sep.clone(),
+                Span::styled("n", base_style.add_modifier(Modifier::BOLD)),
+                Span::styled(": new session", base_style),
+                sep,
+                Span::styled("N", base_style.add_modifier(Modifier::BOLD)),
+                Span::styled(": add project", base_style),
+            ]
         };
 
-        let paragraph = Paragraph::new(status).style(self.theme.status_bar());
+        // Split the status area into left (fill) and right (fixed width for help hint)
+        let help_width = 8u16; // "? help " + padding
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Fill(1),
+                Constraint::Length(help_width),
+            ])
+            .split(status_area);
 
-        frame.render_widget(paragraph, status_area);
+        let left_line = Line::from(left_spans);
+        frame.render_widget(
+            Paragraph::new(left_line).style(base_style),
+            chunks[0],
+        );
+
+        let right_line = Line::from(vec![help_hint]).alignment(Alignment::Right);
+        frame.render_widget(
+            Paragraph::new(right_line).style(base_style),
+            chunks[1],
+        );
     }
 }
