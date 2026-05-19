@@ -62,11 +62,11 @@ enum Commands {
         prompt: Option<String>,
 
         /// Claude effort level
-        #[arg(short, long, value_parser = ["high", "medium", "low"])]
+        #[arg(short, long)]
         effort: Option<String>,
 
         /// Claude permission mode
-        #[arg(short, long, value_parser = ["auto", "plan", "default"])]
+        #[arg(short, long)]
         mode: Option<String>,
 
         /// Branch to fork from (default: origin/main)
