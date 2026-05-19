@@ -116,18 +116,11 @@ impl App {
         Line::from(spans)
     }
 
-    /// Render the preview pane
-    pub(super) fn render_preview(&mut self, frame: &mut Frame, area: Rect) {
+    /// Build a standard right-pane block with tabs, border styling, and focus state.
+    fn pane_block(&self, tabs: &[&str], active_tab: usize) -> Block<'static> {
         let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
-        let dim_opacity = if !is_focused && self.config.dim_unfocused_preview {
-            Some(self.config.dim_unfocused_opacity)
-        } else {
-            None
-        };
-
-        let title = self.build_pane_tabs(&["Preview", "Info", "Shell"], 0);
-
-        let block = Block::default()
+        let title = self.build_pane_tabs(tabs, active_tab);
+        Block::default()
             .title(title)
             .borders(Borders::ALL)
             .border_type(self.border_type())
@@ -135,7 +128,24 @@ impl App {
                 self.theme.border_focused()
             } else {
                 self.theme.border_unfocused()
-            });
+            })
+    }
+
+    /// Return `Some(opacity)` when the right pane is unfocused and dim is enabled,
+    /// `None` otherwise. Used by preview and shell panes.
+    fn pane_dim_opacity(&self) -> Option<f32> {
+        let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
+        if !is_focused && self.config.dim_unfocused_preview {
+            Some(self.config.dim_unfocused_opacity)
+        } else {
+            None
+        }
+    }
+
+    /// Render the preview pane
+    pub(super) fn render_preview(&mut self, frame: &mut Frame, area: Rect) {
+        let dim_opacity = self.pane_dim_opacity();
+        let block = self.pane_block(&["Preview", "Info", "Shell"], 0);
 
         // Update preview state with visible area
         let inner_height = area.height.saturating_sub(2);
@@ -153,7 +163,6 @@ impl App {
 
     /// Render the info pane (session metadata, PR details, AI summary)
     pub(super) fn render_info(&mut self, frame: &mut Frame, area: Rect) {
-        let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
         let on_project = self.is_project_selected();
 
         // Compute display string for the generate-summary hotkey (None = AI disabled)
@@ -167,21 +176,11 @@ impl App {
             None
         };
 
-        let title = if on_project {
-            self.build_pane_tabs(&["Shell", "Info"], 1)
+        let block = if on_project {
+            self.pane_block(&["Shell", "Info"], 1)
         } else {
-            self.build_pane_tabs(&["Preview", "Info", "Shell"], 1)
+            self.pane_block(&["Preview", "Info", "Shell"], 1)
         };
-
-        let block = Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_type(self.border_type())
-            .border_style(if is_focused {
-                self.theme.border_focused()
-            } else {
-                self.theme.border_unfocused()
-            });
 
         // Build the info content based on current selection
         let content = if let Some(session_id) = self.ui_state.selected_session_id {
@@ -318,28 +317,13 @@ impl App {
 
     /// Render the shell pane
     pub(super) fn render_shell(&mut self, frame: &mut Frame, area: Rect) {
-        let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
-        let dim_opacity = if !is_focused && self.config.dim_unfocused_preview {
-            Some(self.config.dim_unfocused_opacity)
-        } else {
-            None
-        };
+        let dim_opacity = self.pane_dim_opacity();
 
-        let title = if self.is_project_selected() {
-            self.build_pane_tabs(&["Shell", "Info"], 0)
+        let block = if self.is_project_selected() {
+            self.pane_block(&["Shell", "Info"], 0)
         } else {
-            self.build_pane_tabs(&["Preview", "Info", "Shell"], 2)
+            self.pane_block(&["Preview", "Info", "Shell"], 2)
         };
-
-        let block = Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_type(self.border_type())
-            .border_style(if is_focused {
-                self.theme.border_focused()
-            } else {
-                self.theme.border_unfocused()
-            });
 
         let inner_height = area.height.saturating_sub(2);
         self.ui_state
