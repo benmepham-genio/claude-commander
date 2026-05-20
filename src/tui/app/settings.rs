@@ -440,10 +440,7 @@ impl App {
                         height: 1,
                     };
                     frame.render_widget(Clear, clear_area);
-                    frame.render_widget(
-                        Paragraph::new(Span::raw("")),
-                        clear_area,
-                    );
+                    frame.render_widget(Paragraph::new(Span::raw("")), clear_area);
                 }
 
                 let opt_area = Rect {
@@ -1081,23 +1078,19 @@ impl App {
                                 let options: Vec<String> =
                                     PRESET_NAMES.iter().map(|s| (*s).to_string()).collect();
                                 let current_value = &state.rows[state.selected_row].value;
-                                let selected = options
-                                    .iter()
-                                    .position(|o| o == current_value)
-                                    .unwrap_or(0);
+                                let selected =
+                                    options.iter().position(|o| o == current_value).unwrap_or(0);
                                 state.editing =
                                     Some(SettingsEditing::OptionPicker { options, selected });
                             } else {
-                                let current_value =
-                                    state.rows[state.selected_row].value.clone();
+                                let current_value = state.rows[state.selected_row].value.clone();
                                 let initial =
                                     if current_value == "(auto)" || current_value == "(none)" {
                                         String::new()
                                     } else {
                                         current_value
                                     };
-                                state.editing =
-                                    Some(SettingsEditing::TextInput { value: initial });
+                                state.editing = Some(SettingsEditing::TextInput { value: initial });
                             }
                         }
                         self.ui_state.modal = Modal::Settings(state);

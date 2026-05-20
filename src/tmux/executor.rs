@@ -324,7 +324,11 @@ impl StatusBarInfo {
         let toggle_hint = if self.is_shell { "agent" } else { "shell" };
         format!(
             " #[bold]{}#[nobold]{}{}{}{sep}#[bold]Ctrl-q#[nobold]: detach{sep}#[bold]Ctrl-\\#[nobold]: {}{sep}#[bold]Ctrl-o#[nobold]: switch ",
-            self.project_name, Self::SEP, safe_branch, pr, toggle_hint,
+            self.project_name,
+            Self::SEP,
+            safe_branch,
+            pr,
+            toggle_hint,
             sep = Self::SEP,
         )
     }

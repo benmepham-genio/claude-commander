@@ -417,22 +417,13 @@ impl App {
         let help_width = 8u16; // "? help " + padding
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Fill(1),
-                Constraint::Length(help_width),
-            ])
+            .constraints([Constraint::Fill(1), Constraint::Length(help_width)])
             .split(status_area);
 
         let left_line = Line::from(left_spans);
-        frame.render_widget(
-            Paragraph::new(left_line).style(base_style),
-            chunks[0],
-        );
+        frame.render_widget(Paragraph::new(left_line).style(base_style), chunks[0]);
 
         let right_line = Line::from(vec![help_hint]).alignment(Alignment::Right);
-        frame.render_widget(
-            Paragraph::new(right_line).style(base_style),
-            chunks[1],
-        );
+        frame.render_widget(Paragraph::new(right_line).style(base_style), chunks[1]);
     }
 }

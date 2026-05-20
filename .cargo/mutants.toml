@@ -1,0 +1,64 @@
+# cargo-mutants configuration for claude-commander.
+#
+# Scope: pure-logic modules. Files in `examine_globs` are side-effect-free
+# enough that mutating them only exercises in-process behaviour; any IO
+# functions co-located in these files are excluded by name in `exclude_re`
+# below. Files that primarily perform real tmux/git/filesystem work
+# (executor.rs, worktree.rs, manager/lifecycle.rs, settings.rs, store.rs,
+# main.rs, app.rs, picker.rs) are out of scope: mutation results there are
+# only meaningful with mocked or containerised side-effect tests, which we
+# don't have yet.
+
+examine_globs = [
+    # Pure parsing, state machines, and pattern matching
+    "src/tui/digit_accumulator.rs",
+    "src/tmux/state.rs",
+    "src/tui/event.rs",
+    "src/session/types.rs",
+    "src/config/keybindings.rs",
+    "src/fuzzy.rs",
+    "src/error.rs",
+    "src/git/diff.rs",
+    # Widget state and rendering helpers (no IO)
+    "src/tui/widgets/mod.rs",
+    "src/tui/widgets/preview.rs",
+    "src/tui/widgets/info_view.rs",
+    "src/tui/widgets/tree_list/mod.rs",
+    "src/tui/widgets/tree_list/state.rs",
+    "src/tui/widgets/tree_list/render.rs",
+    "src/tui/widgets/tree_list/pr_colors.rs",
+]
+
+# Belt-and-braces: even if examine_globs is widened later, these stay
+# off-limits because mutating them could cause real filesystem, tmux, or git
+# side effects on the host. The outer container also sandboxes these, but
+# excluding here keeps mutation output focused on testable, deterministic code.
+exclude_re = [
+    # Real filesystem writes
+    "Config::save",
+    "ensure_directories",
+    "atomic_write",
+    # Real tmux/process side effects
+    "TmuxExecutor::execute",
+    "TmuxExecutor::kill_session",
+    "TmuxExecutor::create_session",
+    # Real git mutations
+    "remove_worktree",
+    "run_create_worktree",
+    # Session lifecycle orchestration that ties the above together
+    "SessionManager::kill_session",
+    # Pure-logic files that contain one IO function each
+    "compute_diff_for_path",  # in src/git/diff.rs — shells out to `git diff`
+]
+
+# Local runs can tolerate slowness; CI tuning can come later.
+timeout_multiplier = 3.0
+
+# Only run library unit tests during mutation testing.
+#
+# Integration tests under tests/ exercise the real tmux/git toolchain and rely
+# on an interactive TTY for some flows (e.g. session restart), which isn't
+# available inside the sandbox container. Pure-logic mutation targets are
+# fully covered by unit tests, so excluding integration tests gives us a
+# stable baseline without losing signal on the modules we care about.
+additional_cargo_test_args = ["--lib"]
