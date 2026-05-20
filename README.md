@@ -188,7 +188,9 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `S` | Scan directory for git repos and add them as projects |
 | `s` | Open shell in worktree |
 | palette only | Move session to section (manual override; see [Session List Sections](#session-list-sections)) |
-| `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
+| `Tab` / `Shift-Tab` | Cycle right-pane tabs (Preview → Info → Shell → Notes) |
+| `i` / `e` | Notes tab: enter inline edit mode |
+| `Esc` | Notes tab: save notes and exit edit mode |
 | `<` / `>` | Shrink / grow left pane |
 | `Ctrl-u/d` or `PageUp/Down` | Page up/down in preview |
 | `1`–`99` | Jump to session by number |

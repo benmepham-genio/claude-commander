@@ -535,6 +535,20 @@ impl App {
             width = key_col_width,
         )));
 
+        // Notes tab editing (not configurable, stays hardcoded)
+        lines.push(Line::from(""));
+        lines.push(Line::from("Notes tab:"));
+        lines.push(Line::from(format!(
+            "  {:<width$}Enter edit mode (Notes tab focused)",
+            "i / e",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}Save notes and exit edit mode",
+            "Esc",
+            width = key_col_width,
+        )));
+
         // Status indicators (not keybinding-related, stays hardcoded)
         lines.push(Line::from(""));
         lines.push(Line::from("Status Indicators:"));

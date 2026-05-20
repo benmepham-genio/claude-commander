@@ -74,6 +74,17 @@ impl App {
                     return;
                 }
 
+                // Notes tab inline edit: intercept all keys before any global
+                // hotkey resolves. `i` (or `e`) enters edit mode when not editing;
+                // while editing, Esc commits & exits, everything else types into
+                // notes_draft.
+                if self.ui_state.right_pane_view == RightPaneView::Notes
+                    && matches!(self.ui_state.focused_pane, FocusedPane::RightPane)
+                    && self.handle_notes_key(key).await
+                {
+                    return;
+                }
+
                 // Check for configurable leader key (quick-switch).
                 // Shift+<leader> opens directly in command-only mode
                 // (VSCode-style command palette). We check the Shift-variant
@@ -129,6 +140,11 @@ impl App {
                 _ => {}
             },
             InputEvent::Paste(text) => {
+                // Paste into notes draft when editing — newlines preserved.
+                if self.ui_state.notes_editing {
+                    self.ui_state.notes_draft.push_str(&text);
+                    return;
+                }
                 // Handle paste in modal input, ignore otherwise
                 let clean = text.replace(['\n', '\r'], "");
                 match &mut self.ui_state.modal {
@@ -554,42 +570,20 @@ impl App {
                 self.handle_open_pull_request().await;
             }
             UserCommand::TogglePane => {
+                self.commit_notes_edit_if_active().await;
                 let on_project = self.ui_state.selected_session_id.is_none()
                     && self.ui_state.selected_project_id.is_some();
-                self.ui_state.right_pane_view = if on_project {
-                    // Project: Shell → Info → Shell (no Preview)
-                    match self.ui_state.right_pane_view {
-                        RightPaneView::Shell => RightPaneView::Info,
-                        _ => RightPaneView::Shell,
-                    }
-                } else {
-                    // Session: Preview → Info → Shell → Preview
-                    match self.ui_state.right_pane_view {
-                        RightPaneView::Preview => RightPaneView::Info,
-                        RightPaneView::Info => RightPaneView::Shell,
-                        RightPaneView::Shell => RightPaneView::Preview,
-                    }
-                };
+                self.ui_state.right_pane_view =
+                    super::notes::next_pane(self.ui_state.right_pane_view, on_project);
                 self.ui_state.clear_right_pane = true;
                 self.spawn_info_fetch();
             }
             UserCommand::TogglePaneReverse => {
+                self.commit_notes_edit_if_active().await;
                 let on_project = self.ui_state.selected_session_id.is_none()
                     && self.ui_state.selected_project_id.is_some();
-                self.ui_state.right_pane_view = if on_project {
-                    // Project: Info → Shell → Info (no Preview)
-                    match self.ui_state.right_pane_view {
-                        RightPaneView::Info => RightPaneView::Shell,
-                        _ => RightPaneView::Info,
-                    }
-                } else {
-                    // Session: Shell → Info → Preview → Shell
-                    match self.ui_state.right_pane_view {
-                        RightPaneView::Preview => RightPaneView::Shell,
-                        RightPaneView::Info => RightPaneView::Preview,
-                        RightPaneView::Shell => RightPaneView::Info,
-                    }
-                };
+                self.ui_state.right_pane_view =
+                    super::notes::prev_pane(self.ui_state.right_pane_view, on_project);
                 self.ui_state.clear_right_pane = true;
                 self.spawn_info_fetch();
             }

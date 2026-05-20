@@ -31,8 +31,10 @@ impl App {
         // Render either preview, diff, or shell based on current view
         // Defensive: if a project is selected and view is Preview, render Shell instead
         let view = if self.is_project_selected()
-            && self.ui_state.right_pane_view == RightPaneView::Preview
-        {
+            && matches!(
+                self.ui_state.right_pane_view,
+                RightPaneView::Preview | RightPaneView::Notes
+            ) {
             RightPaneView::Shell
         } else {
             self.ui_state.right_pane_view
@@ -41,6 +43,7 @@ impl App {
             RightPaneView::Preview => self.render_preview(frame, main_chunks[1]),
             RightPaneView::Info => self.render_info(frame, main_chunks[1]),
             RightPaneView::Shell => self.render_shell(frame, main_chunks[1]),
+            RightPaneView::Notes => self.render_notes(frame, main_chunks[1]),
         }
 
         // Render modal if open
@@ -116,7 +119,7 @@ impl App {
             None
         };
 
-        let title = self.build_pane_tabs(&["Preview", "Info", "Shell"], 0);
+        let title = self.build_pane_tabs(&["Preview", "Info", "Shell", "Notes"], 0);
 
         let block = Block::default()
             .title(title)
@@ -160,7 +163,7 @@ impl App {
         let title = if on_project {
             self.build_pane_tabs(&["Shell", "Info"], 1)
         } else {
-            self.build_pane_tabs(&["Preview", "Info", "Shell"], 1)
+            self.build_pane_tabs(&["Preview", "Info", "Shell", "Notes"], 1)
         };
 
         let block = Block::default()
@@ -386,7 +389,7 @@ impl App {
         let title = if self.is_project_selected() {
             self.build_pane_tabs(&["Shell", "Info"], 0)
         } else {
-            self.build_pane_tabs(&["Preview", "Info", "Shell"], 2)
+            self.build_pane_tabs(&["Preview", "Info", "Shell", "Notes"], 2)
         };
 
         let block = Block::default()
@@ -407,6 +410,63 @@ impl App {
             .block(block)
             .scroll(self.ui_state.shell_state.scroll_offset)
             .dim_opacity(dim_opacity);
+
+        frame.render_widget(preview, area);
+    }
+
+    /// Render the Notes pane — per-session free-form notes with an inline edit mode.
+    pub(super) fn render_notes(&mut self, frame: &mut Frame, area: Rect) {
+        let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
+        let editing = self.ui_state.notes_editing;
+
+        let mut tab_line = self.build_pane_tabs(&["Preview", "Info", "Shell", "Notes"], 3);
+        if editing {
+            tab_line.spans.push(Span::styled(
+                "  [editing — Esc to save]",
+                Style::default()
+                    .fg(self.theme.text_accent)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        let border_style = if editing {
+            Style::default().fg(self.theme.text_accent)
+        } else if is_focused {
+            self.theme.border_focused()
+        } else {
+            self.theme.border_unfocused()
+        };
+
+        let block = Block::default()
+            .title(tab_line)
+            .borders(Borders::ALL)
+            .border_style(border_style);
+
+        // Source: notes_draft while editing; otherwise the persisted session notes.
+        let persisted = self
+            .ui_state
+            .selected_session_id
+            .and_then(|sid| {
+                self.store
+                    .try_read()
+                    .and_then(|state| state.sessions.get(&sid).map(|s| s.notes.clone()))
+            })
+            .unwrap_or_default();
+
+        let body = if editing {
+            self.ui_state.notes_draft.clone()
+        } else if persisted.is_empty() {
+            "(no notes — press i to edit)".to_string()
+        } else {
+            persisted
+        };
+
+        let inner_height = area.height.saturating_sub(2);
+        self.ui_state.notes_state.set_content(&body, inner_height);
+
+        let preview = Preview::new(&body)
+            .block(block)
+            .scroll(self.ui_state.notes_state.scroll_offset);
 
         frame.render_widget(preview, area);
     }

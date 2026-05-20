@@ -56,6 +56,7 @@ mod background;
 mod event_loop;
 mod input;
 mod modals;
+mod notes;
 mod render;
 mod selection;
 mod settings;
@@ -92,6 +93,7 @@ pub enum RightPaneView {
     Preview,
     Info,
     Shell,
+    Notes,
 }
 
 /// Modal dialog state
@@ -365,6 +367,12 @@ pub struct AppUiState {
     pub shell_state: PreviewState,
     /// Shell content
     pub shell_content: String,
+    /// Notes pane scroll state
+    pub notes_state: PreviewState,
+    /// True while the Notes tab is in inline edit mode
+    pub notes_editing: bool,
+    /// Working copy of the notes while editing — committed to the store on Esc
+    pub notes_draft: String,
     /// Diff info
     pub diff_info: Arc<DiffInfo>,
     /// Status message (with expiry time)
@@ -417,6 +425,9 @@ impl Default for AppUiState {
             ai_summaries: std::collections::HashMap::new(),
             shell_state: PreviewState::new(),
             shell_content: String::new(),
+            notes_state: PreviewState::new(),
+            notes_editing: false,
+            notes_draft: String::new(),
             focused_pane: FocusedPane::default(),
             right_pane_view: RightPaneView::default(),
             modal: Modal::None,

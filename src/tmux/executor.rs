@@ -147,8 +147,9 @@ impl TmuxExecutor {
         // launched command with explicit env assignments so child processes
         // (the shell, then `claude` itself) see Claude Commander instead.
         let version = env!("CARGO_PKG_VERSION");
-        let wrapped_cmd = command
-            .map(|cmd| format!("TERM_PROGRAM=claude-commander TERM_PROGRAM_VERSION={version} {cmd}"));
+        let wrapped_cmd = command.map(|cmd| {
+            format!("TERM_PROGRAM=claude-commander TERM_PROGRAM_VERSION={version} {cmd}")
+        });
 
         // Create session with remain-on-exit option so pane stays open if command exits
         let args: Vec<&str> = if let Some(cmd) = wrapped_cmd.as_deref() {

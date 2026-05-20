@@ -307,6 +307,9 @@ pub struct WorktreeSession {
     /// oldest-in-section-first sort order.
     #[serde(default = "chrono::Utc::now")]
     pub entered_section_at: DateTime<Utc>,
+    /// Free-form user notes for this session. Edited inline in the Notes tab.
+    #[serde(default)]
+    pub notes: String,
 }
 
 impl WorktreeSession {
@@ -352,6 +355,7 @@ impl WorktreeSession {
             section_override: None,
             current_section: None,
             entered_section_at: now,
+            notes: String::new(),
         }
     }
 
@@ -397,6 +401,7 @@ impl WorktreeSession {
             section_override: None,
             current_section: None,
             entered_section_at: now,
+            notes: String::new(),
         }
     }
 
