@@ -1,0 +1,42 @@
+# cargo-mutants configuration for claude-commander.
+#
+# Spike scope: only mutate pure-logic files for now. Once we trust the workflow
+# and have triaged the initial results, widen `examine_globs` to other
+# side-effect-free modules (tui/widgets/, fuzzy.rs, git/diff parsing, ...).
+
+examine_globs = [
+    "src/tui/digit_accumulator.rs",
+    "src/tmux/state.rs",
+]
+
+# Belt-and-braces: even if examine_globs is widened later, these stay
+# off-limits because mutating them could cause real filesystem, tmux, or git
+# side effects on the host. The outer container also sandboxes these, but
+# excluding here keeps mutation output focused on testable, deterministic code.
+exclude_re = [
+    # Real filesystem writes
+    "Config::save",
+    "ensure_directories",
+    "atomic_write",
+    # Real tmux/process side effects
+    "TmuxExecutor::execute",
+    "TmuxExecutor::kill_session",
+    "TmuxExecutor::create_session",
+    # Real git mutations
+    "remove_worktree",
+    "run_create_worktree",
+    # Session lifecycle orchestration that ties the above together
+    "SessionManager::kill_session",
+]
+
+# Local runs can tolerate slowness; CI tuning can come later.
+timeout_multiplier = 3.0
+
+# Only run library unit tests during mutation testing.
+#
+# Integration tests under tests/ exercise the real tmux/git toolchain and rely
+# on an interactive TTY for some flows (e.g. session restart), which isn't
+# available inside the sandbox container. Pure-logic mutation targets are
+# fully covered by unit tests, so excluding integration tests gives us a
+# stable baseline without losing signal on the modules we care about.
+additional_cargo_test_args = ["--lib"]
