@@ -399,7 +399,8 @@ async fn main() -> Result<()> {
                         let parent_id = state
                             .sessions
                             .values()
-                            .find(|s| s.project_id == pid && s.branch == base && s.id != sid)
+                            .filter(|s| s.project_id == pid && s.branch == base && s.id != sid)
+                            .max_by_key(|s| s.created_at)
                             .map(|s| s.id);
                         if let Some(parent_id) = parent_id
                             && let Some(session) = state.get_session_mut(&sid)
