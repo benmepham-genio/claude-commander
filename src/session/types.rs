@@ -1189,4 +1189,81 @@ mod tests {
         assert_eq!(roundtripped.pr_base_branch.as_deref(), Some("base"));
         assert_eq!(roundtripped.stack_parent_session_id, Some(parent_id));
     }
+
+    #[test]
+    fn project_id_from_uuid_round_trips() {
+        // Kills the mutant that replaces ProjectId::from_uuid with
+        // Default::default(): Default uses Uuid::new_v4(), so the inner UUID
+        // would not match the one we pass in.
+        let uuid = Uuid::from_u128(0x1234_5678_9abc_def0_1234_5678_9abc_def0);
+        let id = ProjectId::from_uuid(uuid);
+        assert_eq!(id.0, uuid);
+
+        // And the nil UUID — Default would never produce this.
+        let nil = ProjectId::from_uuid(Uuid::nil());
+        assert_eq!(nil.0, Uuid::nil());
+    }
+
+    #[test]
+    fn session_id_from_uuid_and_as_uuid_round_trip() {
+        // Kills two mutants together:
+        //   * `from_uuid -> Self with Default::default()` — Default would
+        //     generate a fresh v4 UUID, so the round-trip would fail.
+        //   * `as_uuid -> &Uuid with Box::leak(Box::new(Default::default()))`
+        //     — the leaked value would be Uuid::nil(), not the wrapped UUID.
+        let uuid = Uuid::from_u128(0xdead_beef_0000_0000_0000_0000_dead_beef);
+        let id = SessionId::from_uuid(uuid);
+        assert_eq!(*id.as_uuid(), uuid);
+
+        // Reference identity: as_uuid must borrow the inner field, not return
+        // a reference to a freshly leaked value.
+        assert!(std::ptr::eq(id.as_uuid(), &id.0));
+
+        // Nil UUID also round-trips — pins down both mutants in a second case.
+        let nil = SessionId::from_uuid(Uuid::nil());
+        assert_eq!(*nil.as_uuid(), Uuid::nil());
+    }
+
+    #[test]
+    fn mark_attached_sets_last_attached_at() {
+        // Kills the mutant that replaces mark_attached's body with `()`:
+        // the field would stay None instead of being set to Some(now).
+        let mut session = WorktreeSession::new(
+            ProjectId::new(),
+            "Test",
+            "branch",
+            PathBuf::from("/tmp/wt"),
+            "claude",
+        );
+        assert!(session.last_attached_at.is_none());
+
+        let before = Utc::now();
+        session.mark_attached();
+        let after = Utc::now();
+
+        let stamp = session
+            .last_attached_at
+            .expect("mark_attached must set last_attached_at");
+        assert!(stamp >= before);
+        assert!(stamp <= after);
+    }
+
+    #[test]
+    fn session_list_item_spacer_is_not_selectable() {
+        // Kills the mutant that makes is_selectable always return true:
+        // Spacer rows are never selectable.
+        assert!(!SessionListItem::Spacer.is_selectable());
+
+        // And the positive cases still hold, so the assertion above is the
+        // discriminating one.
+        let project = SessionListItem::Project {
+            id: ProjectId::new(),
+            name: "p".to_string(),
+            repo_path: PathBuf::from("/tmp"),
+            main_branch: "main".to_string(),
+            worktree_count: 0,
+            nested: false,
+        };
+        assert!(project.is_selectable());
+    }
 }
