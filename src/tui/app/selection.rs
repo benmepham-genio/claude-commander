@@ -19,10 +19,17 @@ impl App {
                 SessionListItem::Project { id, .. } => {
                     self.ui_state.selected_project_id = Some(*id);
                     self.ui_state.selected_session_id = None;
+                    self.ui_state.selected_multi_repo_id = None;
                 }
                 SessionListItem::Worktree { id, project_id, .. } => {
                     self.ui_state.selected_session_id = Some(*id);
                     self.ui_state.selected_project_id = Some(*project_id);
+                    self.ui_state.selected_multi_repo_id = None;
+                }
+                SessionListItem::MultiRepo { id, .. } => {
+                    self.ui_state.selected_multi_repo_id = Some(*id);
+                    self.ui_state.selected_session_id = None;
+                    self.ui_state.selected_project_id = None;
                 }
                 SessionListItem::SectionHeader { .. } => {
                     self.ui_state.selected_session_id = None;
@@ -121,7 +128,8 @@ impl App {
     /// Jump the selection to the session with the given 1-based number,
     /// update the selection state, and refresh the preview pane.
     /// Does nothing if the number is out of range.
-    /// Numbering matches `TreeList::to_list_items` — the Nth `Worktree` variant.
+    /// Numbering matches `TreeList::to_list_items` — the Nth `Worktree` or
+    /// `MultiRepo` variant (counted together in render order).
     pub(super) fn jump_to_session_number(&mut self, number: usize) {
         if let Some(idx) = session_number_to_list_index(&self.ui_state.list_items, number) {
             self.ui_state.list_state.list_state.select(Some(idx));
@@ -191,14 +199,19 @@ pub(super) fn list_index_at(
 }
 
 /// Map a 1-based session number to its index in the flat list_items vec.
-/// Returns None if the number is out of range.
+/// Returns None if the number is out of range. Counts both worktree rows
+/// and multi-repo rows in the same numbering sequence — matches the prefix
+/// rendered by `TreeList::to_list_items`.
 pub(super) fn session_number_to_list_index(
     items: &[SessionListItem],
     number: usize,
 ) -> Option<usize> {
     let mut count = 0usize;
     for (idx, item) in items.iter().enumerate() {
-        if matches!(item, SessionListItem::Worktree { .. }) {
+        if matches!(
+            item,
+            SessionListItem::Worktree { .. } | SessionListItem::MultiRepo { .. }
+        ) {
             count += 1;
             if count == number {
                 return Some(idx);

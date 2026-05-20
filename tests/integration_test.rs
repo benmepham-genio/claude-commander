@@ -409,6 +409,85 @@ async fn test_sync_worktrees_imports_external() {
     drop(worktrees_dir);
 }
 
+#[tokio::test]
+async fn test_sync_worktrees_skips_multi_repo_owned() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+    let config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        ..Config::default()
+    };
+
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    let store = create_isolated_store(&state_temp_dir);
+    let manager = SessionManager::new(config_store, store.clone(), "");
+
+    let project_id = manager.add_project(repo_path.clone()).await.unwrap();
+
+    // Simulate a multi-repo session having created a per-repo worktree inside
+    // its shared parent directory: `<worktrees_dir>/<parent>/<repo-name>`.
+    let parent_dir = worktrees_dir.path().join("multi-task-abcd1234");
+    std::fs::create_dir_all(&parent_dir).unwrap();
+    let mr_wt_path = parent_dir.join("test-repo");
+    let output = tokio::process::Command::new("git")
+        .current_dir(&repo_path)
+        .args([
+            "worktree",
+            "add",
+            "-b",
+            "multi-task",
+            mr_wt_path.to_str().unwrap(),
+        ])
+        .output()
+        .await
+        .unwrap();
+    assert!(output.status.success(), "git worktree add should succeed");
+
+    // Register a multi-repo session that owns that worktree.
+    let mut mr = claude_commander::session::MultiRepoSession::new_creating(
+        "multi-task",
+        "multi-task",
+        "claude",
+    );
+    mr.parent_dir = parent_dir.clone();
+    mr.repos.push(claude_commander::session::MultiRepoEntry {
+        project_id,
+        worktree_path: mr_wt_path.clone(),
+        base_commit: None,
+    });
+    store
+        .mutate(move |state| state.add_multi_repo_session(mr))
+        .await
+        .unwrap();
+
+    // Sync should NOT import the multi-repo-owned worktree.
+    let imported = manager.sync_worktrees(&project_id).await.unwrap();
+    assert_eq!(
+        imported, 0,
+        "Multi-repo-owned worktree must not be imported as a standalone session"
+    );
+
+    {
+        let st = store.read().await;
+        let project = st.get_project(&project_id).unwrap();
+        assert_eq!(
+            project.worktrees.len(),
+            0,
+            "Project should have no worktree sessions after sync"
+        );
+    }
+
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
+}
+
 /// Helper to create a bare repo as "origin" and a working repo with that remote configured.
 async fn create_test_repo_with_remote() -> (TempDir, PathBuf, TempDir, PathBuf) {
     // Create bare "origin" repo

@@ -78,6 +78,15 @@ pub enum StateUpdate {
         session_id: SessionId,
         message: String,
     },
+    /// Multi-repo session creation completed successfully
+    MultiRepoSessionCreated {
+        session_id: crate::session::MultiRepoSessionId,
+    },
+    /// Multi-repo session creation failed
+    MultiRepoSessionCreateFailed {
+        session_id: crate::session::MultiRepoSessionId,
+        message: String,
+    },
     /// State file was modified by another instance
     ExternalChange,
     /// Enriched PR info ready from background fetch
@@ -206,6 +215,8 @@ pub enum UserCommand {
     GenerateSummary,
     /// Scan a directory for git repos and add them as projects
     ScanDirectory,
+    /// Create a new multi-repo session
+    NewMultiRepoSession,
     /// Open the "Move to section" modal for the selected session.
     MoveToSection,
     /// Collapse or expand the section containing the selected item.
@@ -277,6 +288,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::PageDown => Self::PageDown,
             BindableAction::GenerateSummary => Self::GenerateSummary,
             BindableAction::ScanDirectory => Self::ScanDirectory,
+            BindableAction::NewMultiRepoSession => Self::NewMultiRepoSession,
             BindableAction::MoveToSection => Self::MoveToSection,
             BindableAction::ToggleSection => Self::ToggleSection,
         }

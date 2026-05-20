@@ -152,12 +152,15 @@ impl<'a> TreeList<'a> {
     fn has_mixed_programs(&self) -> bool {
         let mut first = None;
         for item in self.items {
-            if let SessionListItem::Worktree { program, .. } = item {
-                match first {
-                    None => first = Some(program.as_str()),
-                    Some(p) if p != program => return true,
-                    _ => {}
-                }
+            let program = match item {
+                SessionListItem::Worktree { program, .. }
+                | SessionListItem::MultiRepo { program, .. } => program.as_str(),
+                _ => continue,
+            };
+            match first {
+                None => first = Some(program),
+                Some(p) if p != program => return true,
+                _ => {}
             }
         }
         false

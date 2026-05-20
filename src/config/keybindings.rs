@@ -55,6 +55,7 @@ pub enum BindableAction {
     PageDown,
     GenerateSummary,
     ScanDirectory,
+    NewMultiRepoSession,
     MoveToSection,
     ToggleSection,
 }
@@ -82,6 +83,7 @@ impl BindableAction {
         Self::OpenInEditor,
         Self::OpenPullRequest,
         Self::ScanDirectory,
+        Self::NewMultiRepoSession,
         Self::MoveToSection,
         Self::ToggleSection,
         Self::TogglePane,
@@ -133,6 +135,7 @@ impl BindableAction {
             Self::PageDown => "page_down",
             Self::GenerateSummary => "generate_summary",
             Self::ScanDirectory => "scan_directory",
+            Self::NewMultiRepoSession => "new_multi_repo_session",
             Self::MoveToSection => "move_to_section",
             Self::ToggleSection => "toggle_section",
         }
@@ -173,6 +176,7 @@ impl BindableAction {
             Self::PageDown => "Page down",
             Self::GenerateSummary => "Generate AI summary",
             Self::ScanDirectory => "Scan directory for repos",
+            Self::NewMultiRepoSession => "New multi-repo session",
             Self::MoveToSection => "Move session to section…",
             Self::ToggleSection => "Collapse/expand section",
         }
@@ -199,6 +203,7 @@ impl BindableAction {
             | Self::OpenInEditor
             | Self::OpenPullRequest
             | Self::ScanDirectory
+            | Self::NewMultiRepoSession
             | Self::MoveToSection
             | Self::ToggleSection => "Session Management",
             Self::TogglePane
@@ -249,6 +254,7 @@ impl FromStr for BindableAction {
             "page_down" => Ok(Self::PageDown),
             "generate_summary" => Ok(Self::GenerateSummary),
             "scan_directory" => Ok(Self::ScanDirectory),
+            "new_multi_repo_session" => Ok(Self::NewMultiRepoSession),
             "move_to_section" => Ok(Self::MoveToSection),
             "toggle_section" => Ok(Self::ToggleSection),
             _ => Err(format!("unknown action: {s}")),

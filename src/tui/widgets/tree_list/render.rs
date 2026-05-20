@@ -51,7 +51,7 @@ impl<'a> TreeList<'a> {
     pub(super) fn to_list_items(&self) -> Vec<ListItem<'a>> {
         let show_program = self.show_session_program && self.has_mixed_programs();
         let mut project_index: usize = 0;
-        let mut worktree_number: usize = 0;
+        let mut session_number: usize = 0;
         let mut current_session_color = self.theme.project_color(0).1;
 
         self.items
@@ -123,7 +123,7 @@ impl<'a> TreeList<'a> {
                     stacked_child,
                     ..
                 } => {
-                    worktree_number += 1;
+                    session_number += 1;
 
                     // Right-aligned session number prefix, with an extra
                     // indent for stacked children so they sit one level deeper
@@ -132,7 +132,7 @@ impl<'a> TreeList<'a> {
                     let indent_span = Span::styled(
                         format!(
                             "{stack_prefix}{:>width$} ",
-                            worktree_number,
+                            session_number,
                             width = NUMBER_WIDTH
                         ),
                         Style::default().fg(self.theme.text_secondary),
@@ -213,6 +213,72 @@ impl<'a> TreeList<'a> {
                     let line = Line::from(spans);
 
                     ListItem::new(line)
+                }
+
+                SessionListItem::MultiRepo {
+                    title,
+                    branch,
+                    status,
+                    program,
+                    project_count,
+                    project_names,
+                    agent_state,
+                    unread,
+                    ..
+                } => {
+                    session_number += 1;
+
+                    // Right-aligned session number prefix so digit-jump
+                    // (1/2/…) lands on multi-repo rows too.
+                    let indent_span = Span::styled(
+                        format!("{:>width$} ", session_number, width = NUMBER_WIDTH),
+                        Style::default().fg(self.theme.text_secondary),
+                    );
+                    let mut spans = vec![indent_span];
+
+                    // Status glyph
+                    if let Some((glyph, color)) =
+                        self.session_status_glyph(*status, *agent_state, *unread)
+                    {
+                        spans.push(Span::styled(
+                            format!("{glyph} "),
+                            Style::default().fg(color),
+                        ));
+                    }
+
+                    let title_style = if *unread {
+                        Style::default()
+                            .fg(self.theme.text_primary)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(self.theme.text_primary)
+                    };
+                    spans.push(Span::styled(title.clone(), title_style));
+                    spans.push(Span::styled(
+                        format!(" [{}]", branch),
+                        Style::default().fg(self.theme.text_accent),
+                    ));
+                    spans.push(Span::styled(
+                        format!(
+                            " ({})",
+                            if project_names.len() <= 3 {
+                                project_names.join(", ")
+                            } else {
+                                format!("{} repos", project_count)
+                            }
+                        ),
+                        Style::default().fg(self.theme.text_secondary),
+                    ));
+
+                    if show_program {
+                        spans.push(Span::raw(" "));
+                        spans.push(Span::styled(
+                            format!("({})", program),
+                            Style::default().fg(self.theme.text_secondary),
+                        ));
+                    }
+
+                    ListItem::new(Line::from(spans))
                 }
                 SessionListItem::SectionHeader {
                     name,

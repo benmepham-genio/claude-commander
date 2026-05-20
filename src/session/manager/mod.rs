@@ -26,6 +26,7 @@ pub struct ScanResult {
 mod cascade;
 mod content;
 mod lifecycle;
+mod multi_repo;
 mod project_shell;
 mod projects;
 mod shell;

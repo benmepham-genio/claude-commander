@@ -47,8 +47,8 @@ use crate::git::{
     fetch_branch_summary, fetch_enriched_pr, is_gh_available,
 };
 use crate::session::{
-    AgentState, ProjectId, SessionId, SessionListItem, SessionManager, SessionStatus,
-    WorktreeSession,
+    AgentState, MultiRepoSessionId, ProjectId, SessionId, SessionListItem, SessionManager,
+    SessionStatus, WorktreeSession,
 };
 use crate::tmux::AgentStateDetector;
 
@@ -161,6 +161,23 @@ pub enum Modal {
         /// Index of the first visible row — keeps `selected_idx` inside
         /// the visible window when the list is longer than can fit.
         scroll: usize,
+    },
+    /// Multi-repo session project picker. Shows checkboxes for each
+    /// registered project; on confirm, transitions to title input.
+    MultiRepoProjectPicker {
+        /// All projects with their checked state
+        projects: Vec<(ProjectId, String, bool)>,
+        /// Currently highlighted row
+        selected_idx: usize,
+        /// Scroll offset
+        scroll: usize,
+    },
+    /// Title input for a new multi-repo session (after projects are picked)
+    MultiRepoTitle {
+        /// Selected project IDs
+        project_ids: Vec<ProjectId>,
+        /// Title text
+        value: String,
     },
     /// Checkout-existing-branch modal. Shows an input field plus a
     /// filterable/scrollable list of branches (local + remote) and
@@ -401,6 +418,7 @@ pub enum ConfirmAction {
     DeleteMergedPrSessions { session_ids: Vec<SessionId> },
     RestartSession { session_id: SessionId },
     RemoveProject { project_id: ProjectId },
+    DeleteMultiRepoSession { session_id: MultiRepoSessionId },
 }
 
 /// Application UI state
@@ -441,6 +459,8 @@ pub struct AppUiState {
     pub selected_session_id: Option<SessionId>,
     /// Currently selected project
     pub selected_project_id: Option<ProjectId>,
+    /// Currently selected multi-repo session
+    pub selected_multi_repo_id: Option<MultiRepoSessionId>,
     /// Attach command to run after exiting TUI
     pub attach_command: Option<String>,
     /// Editor command + path to open after exiting TUI
@@ -497,6 +517,7 @@ impl Default for AppUiState {
             should_quit: false,
             selected_session_id: None,
             selected_project_id: None,
+            selected_multi_repo_id: None,
             attach_command: None,
             editor_command: None,
             shell_toggle_pair: None,

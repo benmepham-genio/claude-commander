@@ -513,6 +513,112 @@ impl App {
                 }
             }
 
+            Modal::MultiRepoProjectPicker {
+                projects,
+                selected_idx,
+                scroll,
+            } => {
+                use crate::config::keybindings::BindableAction;
+
+                // The picker has `projects.len() + 1` visible rows: row 0 is
+                // the "select all / deselect all" toggle, rows 1..=N are the
+                // real projects (mapped to `projects[i - 1]`).
+                let total_rows = projects.len() + 1;
+
+                match self.config.keybindings.resolve(&key) {
+                    Some(BindableAction::NavigateUp) => {
+                        *selected_idx = if *selected_idx == 0 {
+                            total_rows - 1
+                        } else {
+                            *selected_idx - 1
+                        };
+                        *scroll = super::actions::adjust_list_scroll(
+                            *selected_idx,
+                            *scroll,
+                            super::actions::LIST_MAX_VISIBLE,
+                        );
+                    }
+                    Some(BindableAction::NavigateDown) => {
+                        *selected_idx = (*selected_idx + 1) % total_rows;
+                        *scroll = super::actions::adjust_list_scroll(
+                            *selected_idx,
+                            *scroll,
+                            super::actions::LIST_MAX_VISIBLE,
+                        );
+                    }
+                    _ => match key.code {
+                        KeyCode::Esc => {
+                            self.ui_state.modal = Modal::None;
+                        }
+                        // Space toggles the row under the cursor. On row 0
+                        // (Select all): if any project is unchecked, check
+                        // them all; otherwise uncheck them all.
+                        KeyCode::Char(' ') => {
+                            if *selected_idx == 0 {
+                                let any_unchecked =
+                                    projects.iter().any(|(_, _, checked)| !checked);
+                                for entry in projects.iter_mut() {
+                                    entry.2 = any_unchecked;
+                                }
+                            } else {
+                                let idx = *selected_idx - 1;
+                                if let Some(entry) = projects.get_mut(idx) {
+                                    entry.2 = !entry.2;
+                                }
+                            }
+                        }
+                        // Enter confirms selection — move to title input
+                        KeyCode::Enter => {
+                            let selected: Vec<ProjectId> = projects
+                                .iter()
+                                .filter(|(_, _, checked)| *checked)
+                                .map(|(id, _, _)| *id)
+                                .collect();
+                            if selected.len() < 2 {
+                                self.ui_state.status_message = Some((
+                                    "Select at least 2 projects".to_string(),
+                                    Instant::now() + Duration::from_secs(3),
+                                ));
+                            } else {
+                                self.ui_state.modal = Modal::MultiRepoTitle {
+                                    project_ids: selected,
+                                    value: String::new(),
+                                };
+                            }
+                        }
+                        _ => {}
+                    },
+                }
+            }
+
+            Modal::MultiRepoTitle {
+                project_ids,
+                value,
+            } => match key.code {
+                KeyCode::Enter => {
+                    if value.trim().is_empty() {
+                        return;
+                    }
+                    let project_ids = project_ids.clone();
+                    let title = value.clone();
+                    self.ui_state.modal = Modal::Loading {
+                        title: "Creating Multi-Repo Session".to_string(),
+                        message: format!("Setting up worktrees across {} repos...", project_ids.len()),
+                    };
+                    self.start_multi_repo_session(project_ids, title).await;
+                }
+                KeyCode::Esc => {
+                    self.ui_state.modal = Modal::None;
+                }
+                KeyCode::Backspace => {
+                    value.pop();
+                }
+                KeyCode::Char(c) => {
+                    value.push(c);
+                }
+                _ => {}
+            },
+
             Modal::None => {}
         }
     }
@@ -588,6 +694,9 @@ impl App {
             }
             UserCommand::NewSession => {
                 self.handle_new_session().await;
+            }
+            UserCommand::NewMultiRepoSession => {
+                self.handle_new_multi_repo_session().await;
             }
             UserCommand::NewStackedSession => {
                 self.handle_new_stacked_session().await;

@@ -90,6 +90,88 @@ impl SessionManager {
         Ok(cmd)
     }
 
+    /// Attach to a multi-repo session (returns tmux attach command)
+    pub async fn get_multi_repo_attach_command(
+        &self,
+        session_id: &crate::session::MultiRepoSessionId,
+    ) -> Result<String> {
+        let (tmux_name, parent_dir, program, status) = {
+            let state = self.store.read().await;
+            let session = state.get_multi_repo_session(session_id).ok_or_else(|| {
+                SessionError::CreationFailed("Multi-repo session not found".into())
+            })?;
+            if !session.status.can_attach() {
+                return Err(SessionError::CreationFailed(
+                    "Session is not in an attachable state".into(),
+                )
+                .into());
+            }
+            (
+                session.tmux_session_name.clone(),
+                session.parent_dir.clone(),
+                session.program.clone(),
+                session.status,
+            )
+        };
+
+        let exists = self.tmux.session_exists(&tmux_name).await?;
+        let needs_recreate = if !exists {
+            true
+        } else {
+            let pane_dead = self.tmux.is_pane_dead(&tmux_name).await.unwrap_or(false);
+            if pane_dead {
+                let _ = self.tmux.kill_session(&tmux_name).await;
+                true
+            } else {
+                false
+            }
+        };
+
+        if needs_recreate {
+            let resume_program = if self.config_store.read().resume_session
+                && status == SessionStatus::Stopped
+            {
+                format!("{} --resume", program)
+            } else {
+                program.clone()
+            };
+            self.tmux
+                .create_session(&tmux_name, &parent_dir, Some(&resume_program))
+                .await?;
+
+            let sid = *session_id;
+            let _ = self
+                .store
+                .mutate(move |state| {
+                    if let Some(session) = state.get_multi_repo_session_mut(&sid) {
+                        session.set_status(SessionStatus::Running);
+                    }
+                })
+                .await;
+        }
+
+        Ok(format!("tmux attach-session -t {}", tmux_name))
+    }
+
+    /// Get captured content for a multi-repo session
+    pub async fn get_multi_repo_content(
+        &self,
+        session_id: &crate::session::MultiRepoSessionId,
+    ) -> Result<CapturedContent> {
+        let tmux_session_name = {
+            let state = self.store.read().await;
+            state
+                .get_multi_repo_session(session_id)
+                .ok_or_else(|| {
+                    SessionError::CreationFailed("Multi-repo session not found".into())
+                })?
+                .tmux_session_name
+                .clone()
+        };
+
+        self.content_capture.get_content(&tmux_session_name).await
+    }
+
     /// Get captured content for a session
     pub async fn get_content(&self, session_id: &SessionId) -> Result<CapturedContent> {
         let tmux_session_name = {

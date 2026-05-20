@@ -11,7 +11,7 @@ impl SessionManager {
     /// recreate the tmux session on demand).
     #[instrument(skip(self))]
     pub async fn sync_worktrees(&self, project_id: &ProjectId) -> Result<usize> {
-        let (repo_path, existing_paths) = {
+        let (repo_path, existing_paths, multi_repo_paths) = {
             let state = self.store.read().await;
             let project = match state.get_project(project_id) {
                 Some(p) => p,
@@ -28,7 +28,17 @@ impl SessionManager {
                 .filter_map(|s| std::fs::canonicalize(&s.worktree_path).ok())
                 .collect();
 
-            (repo_path, paths)
+            // Collect canonicalized worktree paths owned by multi-repo sessions
+            // so we don't re-import their per-repo worktrees as standalone
+            // single-repo sessions on every sync tick.
+            let mr_paths: std::collections::HashSet<PathBuf> = state
+                .multi_repo_sessions
+                .values()
+                .flat_map(|mr| mr.repos.iter())
+                .filter_map(|entry| std::fs::canonicalize(&entry.worktree_path).ok())
+                .collect();
+
+            (repo_path, paths, mr_paths)
         };
 
         // Open git backend and list worktrees
@@ -81,6 +91,13 @@ impl SessionManager {
 
             // Skip if already tracked by an existing session
             if existing_paths.contains(&canonical_wt) {
+                continue;
+            }
+
+            // Skip worktrees that are owned by a multi-repo session — they
+            // live inside the shared parent dir and are managed there, not
+            // as standalone per-project sessions.
+            if multi_repo_paths.contains(&canonical_wt) {
                 continue;
             }
 
