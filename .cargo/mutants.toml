@@ -10,10 +10,9 @@
 # don't have yet.
 
 examine_globs = [
-    # Original spike targets
+    # Pure parsing, state machines, and pattern matching
     "src/tui/digit_accumulator.rs",
     "src/tmux/state.rs",
-    # Pure parsing, state machines, and pattern matching
     "src/tui/event.rs",
     "src/session/types.rs",
     "src/config/keybindings.rs",
