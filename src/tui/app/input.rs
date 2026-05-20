@@ -520,40 +520,51 @@ impl App {
             } => {
                 use crate::config::keybindings::BindableAction;
 
+                // The picker has `projects.len() + 1` visible rows: row 0 is
+                // the "select all / deselect all" toggle, rows 1..=N are the
+                // real projects (mapped to `projects[i - 1]`).
+                let total_rows = projects.len() + 1;
+
                 match self.config.keybindings.resolve(&key) {
                     Some(BindableAction::NavigateUp) => {
-                        if !projects.is_empty() {
-                            *selected_idx = if *selected_idx == 0 {
-                                projects.len() - 1
-                            } else {
-                                *selected_idx - 1
-                            };
-                            *scroll = super::actions::adjust_list_scroll(
-                                *selected_idx,
-                                *scroll,
-                                super::actions::LIST_MAX_VISIBLE,
-                            );
-                        }
+                        *selected_idx = if *selected_idx == 0 {
+                            total_rows - 1
+                        } else {
+                            *selected_idx - 1
+                        };
+                        *scroll = super::actions::adjust_list_scroll(
+                            *selected_idx,
+                            *scroll,
+                            super::actions::LIST_MAX_VISIBLE,
+                        );
                     }
                     Some(BindableAction::NavigateDown) => {
-                        if !projects.is_empty() {
-                            *selected_idx = (*selected_idx + 1) % projects.len();
-                            *scroll = super::actions::adjust_list_scroll(
-                                *selected_idx,
-                                *scroll,
-                                super::actions::LIST_MAX_VISIBLE,
-                            );
-                        }
+                        *selected_idx = (*selected_idx + 1) % total_rows;
+                        *scroll = super::actions::adjust_list_scroll(
+                            *selected_idx,
+                            *scroll,
+                            super::actions::LIST_MAX_VISIBLE,
+                        );
                     }
                     _ => match key.code {
                         KeyCode::Esc => {
                             self.ui_state.modal = Modal::None;
                         }
-                        // Space toggles checkbox
+                        // Space toggles the row under the cursor. On row 0
+                        // (Select all): if any project is unchecked, check
+                        // them all; otherwise uncheck them all.
                         KeyCode::Char(' ') => {
-                            let idx = *selected_idx;
-                            if let Some(entry) = projects.get_mut(idx) {
-                                entry.2 = !entry.2;
+                            if *selected_idx == 0 {
+                                let any_unchecked =
+                                    projects.iter().any(|(_, _, checked)| !checked);
+                                for entry in projects.iter_mut() {
+                                    entry.2 = any_unchecked;
+                                }
+                            } else {
+                                let idx = *selected_idx - 1;
+                                if let Some(entry) = projects.get_mut(idx) {
+                                    entry.2 = !entry.2;
+                                }
                             }
                         }
                         // Enter confirms selection — move to title input

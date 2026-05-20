@@ -406,9 +406,11 @@ impl App {
                 scroll,
             } => {
                 let max_visible = super::actions::LIST_MAX_VISIBLE;
-                let visible_rows = projects.len().clamp(1, max_visible);
-                // border(2) + title(1) + hint(1) + rows
-                let modal_height = (4 + visible_rows) as u16;
+                // One virtual "select all" row at the top + one row per project.
+                let total_rows = projects.len() + 1;
+                let visible_rows = total_rows.clamp(1, max_visible);
+                // border(2) + hint(1) + rows + 1 buffer line
+                let modal_height = (3 + visible_rows + 1) as u16;
                 let modal_width = (area.width * 60 / 100).max(40);
 
                 let modal_area = Rect {
@@ -434,45 +436,77 @@ impl App {
 
                 // Hint line
                 let hint_area = Rect { height: 1, ..inner };
+                let all_checked =
+                    !projects.is_empty() && projects.iter().all(|(_, _, c)| *c);
+                let toggle_hint = if all_checked {
+                    "deselect all"
+                } else {
+                    "select all"
+                };
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(
-                        "[Space] toggle  [Enter] confirm  [Esc] cancel",
+                        format!(
+                            "[Space] toggle ({toggle_hint} on top row)  [Enter] confirm  [Esc] cancel"
+                        ),
                         Style::default().fg(self.theme.text_secondary),
                     ))),
                     hint_area,
                 );
 
-                // Project rows — slice the visible window using `scroll`.
-                let start = (*scroll).min(projects.len());
-                for (i, (_, name, checked)) in projects
-                    .iter()
-                    .enumerate()
-                    .skip(start)
-                    .take(max_visible)
-                {
-                    let row_offset = (i - start) as u16;
+                // Build rows: virtual select-all row (i=0) + project rows
+                // (i=1..=projects.len(), mapped to projects[i-1]).
+                let start = (*scroll).min(total_rows);
+                for row_idx in start..total_rows.min(start + max_visible) {
+                    let row_offset = (row_idx - start) as u16;
                     let row = inner.y + 1 + row_offset;
                     if row >= inner.y + inner.height {
                         break;
                     }
-                    let is_selected = i == *selected_idx;
-                    let checkbox = if *checked { "[x]" } else { "[ ]" };
+                    let is_selected = row_idx == *selected_idx;
                     let style = if is_selected {
                         self.theme.selection()
                     } else {
                         Style::default()
                     };
-                    let line = Line::from(vec![
-                        Span::styled(
-                            format!(" {} ", checkbox),
-                            if *checked {
-                                Style::default().fg(self.theme.status_running)
-                            } else {
-                                Style::default().fg(self.theme.text_secondary)
-                            },
-                        ),
-                        Span::styled(name.clone(), style),
-                    ]);
+
+                    let line = if row_idx == 0 {
+                        // Virtual top row
+                        let label = if all_checked {
+                            "Deselect all"
+                        } else {
+                            "Select all"
+                        };
+                        let glyph = if all_checked { "[x]" } else { "[ ]" };
+                        Line::from(vec![
+                            Span::styled(
+                                format!(" {} ", glyph),
+                                if all_checked {
+                                    Style::default().fg(self.theme.status_running)
+                                } else {
+                                    Style::default().fg(self.theme.text_secondary)
+                                },
+                            ),
+                            Span::styled(
+                                label.to_string(),
+                                style.add_modifier(Modifier::BOLD),
+                            ),
+                        ])
+                    } else {
+                        let (_, name, checked) = &projects[row_idx - 1];
+                        let checkbox = if *checked { "[x]" } else { "[ ]" };
+                        Line::from(vec![
+                            Span::styled(
+                                format!(" {} ", checkbox),
+                                if *checked {
+                                    Style::default().fg(self.theme.status_running)
+                                } else {
+                                    Style::default().fg(self.theme.text_secondary)
+                                },
+                            ),
+                            Span::styled(name.clone(), style),
+                        ])
+                    };
+
                     let line_area = Rect {
                         y: row,
                         height: 1,
