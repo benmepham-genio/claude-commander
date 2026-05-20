@@ -2,7 +2,7 @@
 source: src/tui/render_tests.rs
 expression: terminal.backend()
 ---
-"┌ Preview · Info · Shell ────────────────────────────────────────────┐"
+"╭ Preview · Info · Shell ────────────────────────────────────────────╮"
 "│ Session: test-session                                              │"
 "│ Branch:  test-branch                                               │"
 "│ Created: 2026-04-01 12:00 UTC                                      │"
@@ -15,4 +15,4 @@ expression: terminal.backend()
 "│                                                                    │"
 "│ PR: None                                                           │"
 "│                                                                    │"
-"└────────────────────────────────────────────────────────────────────┘"
+"╰────────────────────────────────────────────────────────────────────╯"

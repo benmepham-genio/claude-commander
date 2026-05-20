@@ -11,13 +11,27 @@ impl App {
                 title,
                 prompt,
                 value,
+                existing_branches,
                 ..
             } => {
-                // Fixed height: 2 borders + prompt line + blank + input = 5 rows.
-                // Previous 20%-of-terminal rule wasted ~4 lines of vertical
-                // space for a single-line input.
+                // Resolve the hint up-front so we know whether to reserve a
+                // line for it. Only the new-session flows populate
+                // `existing_branches`; everyone else gets the original
+                // 5-row layout.
+                let hint = existing_branches.as_ref().and_then(|branches| {
+                    crate::session::match_existing_branch(
+                        value,
+                        &self.config.branch_prefix,
+                        branches,
+                    )
+                    .map(|b| format!("↳ existing branch: {} — will check out", b))
+                });
+
+                // Base: 2 borders + prompt + blank + input = 5 rows. Add one
+                // row when the existing-branch hint is showing so the layout
+                // doesn't jump when it appears/disappears.
                 let modal_width = (area.width * 60 / 100).max(40);
-                let modal_height = 5u16;
+                let modal_height = if hint.is_some() { 6u16 } else { 5u16 };
                 let modal_area = Rect {
                     x: area.x + (area.width.saturating_sub(modal_width)) / 2,
                     y: area.y + (area.height.saturating_sub(modal_height)) / 2,
@@ -29,14 +43,26 @@ impl App {
                 let block = Block::default()
                     .title(format!(" {} ", title))
                     .borders(Borders::ALL)
+                    .border_type(self.border_type())
                     .border_style(Style::default().fg(self.theme.modal_warning));
 
                 let inner = block.inner(modal_area);
                 frame.render_widget(block, modal_area);
 
-                let text = format!("{}\n\n❯ {}_", prompt, value);
-                let paragraph = Paragraph::new(text);
-                frame.render_widget(paragraph, inner);
+                let mut lines: Vec<Line> = vec![
+                    Line::from(prompt.as_str()),
+                    Line::from(""),
+                    Line::from(format!("❯ {}_", value)),
+                ];
+                if let Some(h) = hint {
+                    lines.push(Line::from(Span::styled(
+                        h,
+                        Style::default()
+                            .fg(self.theme.modal_info)
+                            .add_modifier(Modifier::ITALIC),
+                    )));
+                }
+                frame.render_widget(Paragraph::new(lines), inner);
             }
 
             Modal::PathInput {
@@ -66,6 +92,7 @@ impl App {
                 let block = Block::default()
                     .title(format!(" {} ", title))
                     .borders(Borders::ALL)
+                    .border_type(self.border_type())
                     .border_style(Style::default().fg(self.theme.modal_warning));
 
                 let inner = block.inner(modal_area);
@@ -130,6 +157,7 @@ impl App {
                 let block = Block::default()
                     .title(format!(" {} ", title))
                     .borders(Borders::ALL)
+                    .border_type(self.border_type())
                     .border_style(Style::default().fg(self.theme.modal_info));
 
                 let inner = block.inner(modal_area);
@@ -158,6 +186,7 @@ impl App {
                 let block = Block::default()
                     .title(format!(" {} ", title))
                     .borders(Borders::ALL)
+                    .border_type(self.border_type())
                     .border_style(Style::default().fg(self.theme.modal_error));
 
                 let inner = block.inner(modal_area);
@@ -175,6 +204,7 @@ impl App {
                 let block = Block::default()
                     .title(" Error ")
                     .borders(Borders::ALL)
+                    .border_type(self.border_type())
                     .border_style(Style::default().fg(self.theme.modal_error));
 
                 let inner = block.inner(modal_area);
@@ -231,6 +261,7 @@ impl App {
                 let block = Block::default()
                     .title(title)
                     .borders(Borders::ALL)
+                    .border_type(self.border_type())
                     .border_style(Style::default().fg(self.theme.modal_info));
 
                 let inner = block.inner(modal_area);
@@ -369,6 +400,143 @@ impl App {
                 }
             }
 
+            Modal::MultiRepoProjectPicker {
+                projects,
+                selected_idx,
+                scroll,
+            } => {
+                let max_visible = super::actions::LIST_MAX_VISIBLE;
+                // One virtual "select all" row at the top + one row per project.
+                let total_rows = projects.len() + 1;
+                let visible_rows = total_rows.clamp(1, max_visible);
+                // border(2) + hint(1) + rows + 1 buffer line
+                let modal_height = (3 + visible_rows + 1) as u16;
+                let modal_width = (area.width * 60 / 100).max(40);
+
+                let modal_area = Rect {
+                    x: area.x + (area.width.saturating_sub(modal_width)) / 2,
+                    y: area.y + area.height / 5,
+                    width: modal_width,
+                    height: modal_height.min(area.height),
+                };
+
+                frame.render_widget(Clear, modal_area);
+
+                let block = Block::default()
+                    .title(" New Multi-Repo Session — Select Projects ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.theme.modal_info));
+
+                let inner = block.inner(modal_area);
+                frame.render_widget(block, modal_area);
+
+                if inner.height == 0 {
+                    return;
+                }
+
+                // Hint line
+                let hint_area = Rect { height: 1, ..inner };
+                let all_checked =
+                    !projects.is_empty() && projects.iter().all(|(_, _, c)| *c);
+                let toggle_hint = if all_checked {
+                    "deselect all"
+                } else {
+                    "select all"
+                };
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        format!(
+                            "[Space] toggle ({toggle_hint} on top row)  [Enter] confirm  [Esc] cancel"
+                        ),
+                        Style::default().fg(self.theme.text_secondary),
+                    ))),
+                    hint_area,
+                );
+
+                // Build rows: virtual select-all row (i=0) + project rows
+                // (i=1..=projects.len(), mapped to projects[i-1]).
+                let start = (*scroll).min(total_rows);
+                for row_idx in start..total_rows.min(start + max_visible) {
+                    let row_offset = (row_idx - start) as u16;
+                    let row = inner.y + 1 + row_offset;
+                    if row >= inner.y + inner.height {
+                        break;
+                    }
+                    let is_selected = row_idx == *selected_idx;
+                    let style = if is_selected {
+                        self.theme.selection()
+                    } else {
+                        Style::default()
+                    };
+
+                    let line = if row_idx == 0 {
+                        // Virtual top row
+                        let label = if all_checked {
+                            "Deselect all"
+                        } else {
+                            "Select all"
+                        };
+                        let glyph = if all_checked { "[x]" } else { "[ ]" };
+                        Line::from(vec![
+                            Span::styled(
+                                format!(" {} ", glyph),
+                                if all_checked {
+                                    Style::default().fg(self.theme.status_running)
+                                } else {
+                                    Style::default().fg(self.theme.text_secondary)
+                                },
+                            ),
+                            Span::styled(
+                                label.to_string(),
+                                style.add_modifier(Modifier::BOLD),
+                            ),
+                        ])
+                    } else {
+                        let (_, name, checked) = &projects[row_idx - 1];
+                        let checkbox = if *checked { "[x]" } else { "[ ]" };
+                        Line::from(vec![
+                            Span::styled(
+                                format!(" {} ", checkbox),
+                                if *checked {
+                                    Style::default().fg(self.theme.status_running)
+                                } else {
+                                    Style::default().fg(self.theme.text_secondary)
+                                },
+                            ),
+                            Span::styled(name.clone(), style),
+                        ])
+                    };
+
+                    let line_area = Rect {
+                        y: row,
+                        height: 1,
+                        ..inner
+                    };
+                    frame.render_widget(Paragraph::new(line), line_area);
+                }
+            }
+
+            Modal::MultiRepoTitle {
+                value,
+                project_ids,
+                ..
+            } => {
+                let modal_area = centered_rect(60, 20, area);
+                frame.render_widget(Clear, modal_area);
+
+                let block = Block::default()
+                    .title(format!(" Multi-Repo Session ({} repos) ", project_ids.len()))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.theme.modal_warning));
+
+                let inner = block.inner(modal_area);
+                frame.render_widget(block, modal_area);
+
+                let text = format!("Enter session name:\n\n❯ {}_", value);
+                let paragraph = Paragraph::new(text);
+                frame.render_widget(paragraph, inner);
+            }
+
             Modal::CheckoutBranch {
                 query,
                 filtered,
@@ -402,6 +570,7 @@ impl App {
                 let block = Block::default()
                     .title(title)
                     .borders(Borders::ALL)
+                    .border_type(self.border_type())
                     .border_style(Style::default().fg(self.theme.modal_info));
 
                 let inner = block.inner(modal_area);
@@ -607,6 +776,7 @@ impl App {
         let block = Block::default()
             .title(" Help ")
             .borders(Borders::ALL)
+            .border_type(self.border_type())
             .border_style(Style::default().fg(self.theme.modal_info));
         let inner = block.inner(modal_area);
         frame.render_widget(block, modal_area);

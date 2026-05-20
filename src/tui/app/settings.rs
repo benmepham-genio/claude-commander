@@ -107,6 +107,12 @@ impl App {
                         color_swatch: None,
                     },
                     SettingsRow {
+                        label: "Rounded Borders".into(),
+                        value: c.rounded_borders.to_string(),
+                        field_key: "rounded_borders".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
                         label: "Number Debounce (ms)".into(),
                         value: c.session_number_debounce_ms.to_string(),
                         field_key: "session_number_debounce_ms".into(),
@@ -124,17 +130,10 @@ impl App {
                         field_key: "ai_summary_model".into(),
                         color_swatch: None,
                     },
-                    SettingsRow {
-                        label: "Sections".into(),
-                        value: if c.sections.is_empty() {
-                            "(none — see config.toml)".into()
-                        } else {
-                            format!("{} configured (edit config.toml)", c.sections.len())
-                        },
-                        field_key: "sections_readonly".into(),
-                        color_swatch: None,
-                    },
                 ]
+            }
+            SettingsTab::Sections => {
+                vec![]
             }
             SettingsTab::Keybindings => {
                 let kb = &self.config.keybindings;
@@ -218,6 +217,7 @@ impl App {
         let block = Block::default()
             .title(" Settings ")
             .borders(Borders::ALL)
+            .border_type(self.border_type())
             .border_style(Style::default().fg(self.theme.modal_info));
         let inner = block.inner(modal_area);
         frame.render_widget(block, modal_area);
@@ -268,13 +268,34 @@ impl App {
             sep_area,
         );
 
-        // --- Settings rows ---
-        let rows_area = Rect {
+        // --- Body area (between separator and footer) ---
+        let body_area = Rect {
             y: content_area.y + 2,
             height: content_area.height.saturating_sub(4),
             ..content_area
         };
 
+        // --- Footer ---
+        let footer_area = Rect {
+            y: content_area.y + content_area.height.saturating_sub(1),
+            height: 1,
+            ..content_area
+        };
+
+        if state.tab == SettingsTab::Sections {
+            self.render_sections_tab(frame, body_area, footer_area, &state.sections_state);
+        } else {
+            self.render_settings_rows(frame, body_area, footer_area, state);
+        }
+    }
+
+    fn render_settings_rows(
+        &self,
+        frame: &mut Frame,
+        rows_area: Rect,
+        footer_area: Rect,
+        state: &SettingsState,
+    ) {
         let label_width = 24_u16;
         let value_width = rows_area.width.saturating_sub(label_width + 3);
 
@@ -285,6 +306,24 @@ impl App {
             0
         };
 
+        // Check if the OptionPicker is active and how many rows it occupies
+        let picker_info: Option<(usize, &[String], usize)> =
+            if let Some(SettingsEditing::OptionPicker { options, selected }) = &state.editing {
+                // screen_row is the row index (within visible area) where the picker starts
+                let screen_row = state.selected_row.saturating_sub(scroll_offset);
+                Some((screen_row, options.as_slice(), *selected))
+            } else {
+                None
+            };
+
+        // How many rows the picker will overlay (starting from the selected row)
+        let picker_row_count = picker_info
+            .map(|(screen_row, opts, _)| {
+                let rows_below = visible_rows.saturating_sub(screen_row);
+                opts.len().min(rows_below)
+            })
+            .unwrap_or(0);
+
         for (i, row) in state
             .rows
             .iter()
@@ -292,8 +331,19 @@ impl App {
             .skip(scroll_offset)
             .take(visible_rows)
         {
-            let y = rows_area.y + (i - scroll_offset) as u16;
+            let screen_idx = i - scroll_offset;
+            let y = rows_area.y + screen_idx as u16;
             let is_selected = i == state.selected_row;
+
+            // If the OptionPicker is open, skip rendering normal rows that are
+            // overlaid by picker options (except the first picker row itself,
+            // which replaces the selected row).
+            if let Some((picker_screen_row, _, _)) = picker_info
+                && screen_idx > picker_screen_row
+                && screen_idx < picker_screen_row + picker_row_count
+            {
+                continue;
+            }
 
             let row_style = if is_selected {
                 self.theme.selection()
@@ -347,6 +397,11 @@ impl App {
                 let display_val = if is_selected {
                     if let Some(SettingsEditing::TextInput { value }) = &state.editing {
                         format!("{value}▏")
+                    } else if let Some(SettingsEditing::OptionPicker { options, selected }) =
+                        &state.editing
+                    {
+                        // Show the currently highlighted option on the selected row
+                        format!("▸ {}", options[*selected])
                     } else {
                         row.value.clone()
                     }
@@ -367,16 +422,290 @@ impl App {
             }
         }
 
-        // --- Footer ---
-        let footer_area = Rect {
-            y: content_area.y + content_area.height.saturating_sub(1),
-            height: 1,
-            ..content_area
-        };
+        // Render the OptionPicker dropdown rows below the selected row
+        if let Some((picker_screen_row, options, selected_opt)) = picker_info {
+            let val_x = rows_area.x + label_width + 2;
+            let val_w = value_width;
+
+            for (opt_idx, option) in options.iter().enumerate().take(picker_row_count) {
+                let row_y = rows_area.y + (picker_screen_row + opt_idx) as u16;
+                let is_highlighted = opt_idx == selected_opt;
+
+                // Clear the label area for overlay rows beyond the first
+                if opt_idx > 0 {
+                    let clear_area = Rect {
+                        x: rows_area.x,
+                        y: row_y,
+                        width: label_width.min(rows_area.width),
+                        height: 1,
+                    };
+                    frame.render_widget(Clear, clear_area);
+                    frame.render_widget(
+                        Paragraph::new(Span::raw("")),
+                        clear_area,
+                    );
+                }
+
+                let opt_area = Rect {
+                    x: val_x,
+                    y: row_y,
+                    width: val_w,
+                    height: 1,
+                };
+
+                // Clear before rendering
+                frame.render_widget(Clear, opt_area);
+
+                let prefix = if is_highlighted { "▸ " } else { "  " };
+                let opt_style = if is_highlighted {
+                    self.theme.selection()
+                } else {
+                    Style::default().fg(self.theme.text_accent)
+                };
+
+                frame.render_widget(
+                    Paragraph::new(Span::styled(format!("{prefix}{option}"), opt_style)),
+                    opt_area,
+                );
+            }
+        }
+
         let footer_text = if state.editing.is_some() {
-            "Enter: save  Esc: cancel"
+            match &state.editing {
+                Some(SettingsEditing::OptionPicker { .. }) => {
+                    "j/k: navigate  Enter: select  Esc: cancel"
+                }
+                _ => "Enter: save  Esc: cancel",
+            }
         } else {
             "Tab: switch tab  j/k: navigate  Enter: edit  Esc: close"
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                footer_text,
+                Style::default().fg(self.theme.text_secondary),
+            )),
+            footer_area,
+        );
+    }
+
+    fn render_sections_tab(
+        &self,
+        frame: &mut Frame,
+        body_area: Rect,
+        footer_area: Rect,
+        sec: &SectionsState,
+    ) {
+        let sections = &self.config.sections;
+        let list_width = body_area.width.clamp(16, 28);
+        let divider_width = 1_u16;
+        let pred_width = body_area
+            .width
+            .saturating_sub(list_width + divider_width + 1);
+
+        let list_area = Rect {
+            width: list_width,
+            ..body_area
+        };
+        let divider_area = Rect {
+            x: body_area.x + list_width,
+            width: divider_width,
+            ..body_area
+        };
+        let pred_area = Rect {
+            x: body_area.x + list_width + divider_width + 1,
+            width: pred_width,
+            ..body_area
+        };
+
+        // --- Divider ---
+        for row in 0..body_area.height {
+            let y = divider_area.y + row;
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "│",
+                    Style::default().fg(self.theme.border_unfocused),
+                )),
+                Rect {
+                    x: divider_area.x,
+                    y,
+                    width: 1,
+                    height: 1,
+                },
+            );
+        }
+
+        // --- Section list ---
+        if let Some(SectionsEditing::CreatingSection { value }) = &sec.editing {
+            let visible = list_area.height as usize;
+            let name_rows = sections.len().min(visible.saturating_sub(1));
+            for (i, section) in sections.iter().enumerate().take(name_rows) {
+                let y = list_area.y + i as u16;
+                let style = Style::default().fg(self.theme.text_secondary);
+                let name = truncate_str(&section.name, list_width as usize - 2);
+                frame.render_widget(
+                    Paragraph::new(Span::styled(format!("  {name}"), style)),
+                    Rect {
+                        y,
+                        height: 1,
+                        ..list_area
+                    },
+                );
+            }
+            let input_y = list_area.y + name_rows as u16;
+            let input_style = self.theme.selection().add_modifier(Modifier::UNDERLINED);
+            let display = format!("  {value}▏");
+            frame.render_widget(
+                Paragraph::new(Span::styled(display, input_style)),
+                Rect {
+                    y: input_y,
+                    height: 1,
+                    ..list_area
+                },
+            );
+        } else {
+            let visible = list_area.height as usize;
+            let scroll = if sec.selected_section >= visible {
+                sec.selected_section - visible + 1
+            } else {
+                0
+            };
+            for (i, section) in sections.iter().enumerate().skip(scroll).take(visible) {
+                let y = list_area.y + (i - scroll) as u16;
+                let is_selected = i == sec.selected_section;
+                let is_focused = sec.focus == SectionsFocus::List;
+
+                let style = if is_selected && is_focused {
+                    self.theme.selection()
+                } else if is_selected {
+                    Style::default()
+                        .fg(self.theme.text_primary)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(self.theme.text_secondary)
+                };
+
+                let prefix = if is_selected { "▸ " } else { "  " };
+                let name = if is_selected {
+                    if let Some(SectionsEditing::RenamingSection { value }) = &sec.editing {
+                        format!("{prefix}{value}▏")
+                    } else {
+                        let n = truncate_str(&section.name, list_width as usize - 2);
+                        format!("{prefix}{n}")
+                    }
+                } else {
+                    let n = truncate_str(&section.name, list_width as usize - 2);
+                    format!("{prefix}{n}")
+                };
+
+                let row_style = if is_selected
+                    && matches!(sec.editing, Some(SectionsEditing::RenamingSection { .. }))
+                {
+                    style.add_modifier(Modifier::UNDERLINED)
+                } else {
+                    style
+                };
+
+                frame.render_widget(
+                    Paragraph::new(Span::styled(name, row_style)),
+                    Rect {
+                        y,
+                        height: 1,
+                        ..list_area
+                    },
+                );
+            }
+
+            if sections.is_empty() {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        "  (no sections)",
+                        Style::default().fg(self.theme.text_secondary),
+                    )),
+                    Rect {
+                        height: 1,
+                        ..list_area
+                    },
+                );
+            }
+        }
+
+        // --- Predicate editor (right side) ---
+        if !sections.is_empty() && sec.selected_section < sections.len() {
+            let section = &sections[sec.selected_section];
+            let pred_rows = predicate_rows(section);
+            let is_pred_focused = sec.focus == SectionsFocus::Predicates;
+
+            for (i, (label, value)) in pred_rows.iter().enumerate() {
+                if i as u16 >= pred_area.height {
+                    break;
+                }
+                let y = pred_area.y + i as u16;
+                let is_selected = is_pred_focused && i == sec.pred_selected;
+
+                let style = if is_selected {
+                    self.theme.selection()
+                } else {
+                    Style::default()
+                };
+
+                let label_w = 18_u16.min(pred_area.width);
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        format!("{:<w$}", label, w = label_w as usize),
+                        style,
+                    )),
+                    Rect {
+                        x: pred_area.x,
+                        y,
+                        width: label_w,
+                        height: 1,
+                    },
+                );
+
+                if pred_area.width > label_w + 1 {
+                    let val_x = pred_area.x + label_w + 1;
+                    let val_w = pred_area.width.saturating_sub(label_w + 1);
+
+                    let display_val = if is_selected {
+                        if let Some(SectionsEditing::EditingPredicate { value: v }) = &sec.editing {
+                            format!("{v}▏")
+                        } else {
+                            value.clone()
+                        }
+                    } else {
+                        value.clone()
+                    };
+
+                    let val_style = if is_selected && sec.editing.is_some() {
+                        style.add_modifier(Modifier::UNDERLINED)
+                    } else {
+                        style.fg(self.theme.text_accent)
+                    };
+
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(display_val, val_style)),
+                        Rect {
+                            x: val_x,
+                            y,
+                            width: val_w,
+                            height: 1,
+                        },
+                    );
+                }
+            }
+        }
+
+        // --- Footer ---
+        let footer_text = match &sec.editing {
+            Some(
+                SectionsEditing::RenamingSection { .. } | SectionsEditing::EditingPredicate { .. },
+            ) => "Enter: save  Esc: cancel",
+            Some(SectionsEditing::CreatingSection { .. }) => "Enter: create  Esc: cancel",
+            None if sec.focus == SectionsFocus::List => {
+                "n: new  r: rename  d: delete  J/K: reorder  →/Enter: predicates  Tab: switch tab"
+            }
+            None => "Enter: edit  ←: back to list  Tab: switch tab",
         };
         frame.render_widget(
             Paragraph::new(Span::styled(
@@ -456,6 +785,11 @@ impl App {
                 "show_session_program" => {
                     if let Ok(b) = value.parse::<bool>() {
                         self.config.show_session_program = b;
+                    }
+                }
+                "rounded_borders" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.rounded_borders = b;
                     }
                 }
                 "session_number_debounce_ms" => {
@@ -592,6 +926,10 @@ impl App {
 
                 self.config.keybindings.set_keys_for(action, parsed);
             }
+            SettingsTab::Sections => {
+                // Sections tab handles its own persistence via save_sections_config
+                return;
+            }
         }
 
         // Persist config via the store (updates mtime so hot-reload won't re-read our own write)
@@ -608,6 +946,11 @@ impl App {
         mut state: SettingsState,
     ) {
         use crossterm::event::KeyCode;
+
+        if state.tab == SettingsTab::Sections {
+            self.handle_sections_key(key, state).await;
+            return;
+        }
 
         if let Some(ref mut editing) = state.editing {
             // Currently editing a field
@@ -653,6 +996,41 @@ impl App {
                         }
                     }
                 }
+                SettingsEditing::OptionPicker { options, selected } => match key.code {
+                    KeyCode::Enter => {
+                        let chosen = options[*selected].clone();
+                        let field_key = state.rows[state.selected_row].field_key.clone();
+                        // Treat "(auto)" as empty string for apply_settings_edit
+                        let val = if chosen == "(auto)" {
+                            String::new()
+                        } else {
+                            chosen
+                        };
+                        state.editing = None;
+                        self.apply_settings_edit(state.tab, &field_key, &val);
+                        state.rows = self.build_settings_rows(state.tab);
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Esc => {
+                        state.editing = None;
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        *selected = (*selected + 1) % options.len();
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        *selected = if *selected == 0 {
+                            options.len() - 1
+                        } else {
+                            *selected - 1
+                        };
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    _ => {
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                },
             }
         } else {
             // Not editing — navigation mode: resolve via configurable keybindings
@@ -696,14 +1074,31 @@ impl App {
                     }
                     KeyCode::Enter => {
                         if !state.rows.is_empty() {
-                            let current_value = state.rows[state.selected_row].value.clone();
-                            let initial = if current_value == "(auto)" || current_value == "(none)"
-                            {
-                                String::new()
+                            let field_key = &state.rows[state.selected_row].field_key;
+                            if state.tab == SettingsTab::Theme && field_key == "preset" {
+                                // Open an inline option picker for theme presets
+                                use crate::tui::theme::PRESET_NAMES;
+                                let options: Vec<String> =
+                                    PRESET_NAMES.iter().map(|s| (*s).to_string()).collect();
+                                let current_value = &state.rows[state.selected_row].value;
+                                let selected = options
+                                    .iter()
+                                    .position(|o| o == current_value)
+                                    .unwrap_or(0);
+                                state.editing =
+                                    Some(SettingsEditing::OptionPicker { options, selected });
                             } else {
-                                current_value
-                            };
-                            state.editing = Some(SettingsEditing::TextInput { value: initial });
+                                let current_value =
+                                    state.rows[state.selected_row].value.clone();
+                                let initial =
+                                    if current_value == "(auto)" || current_value == "(none)" {
+                                        String::new()
+                                    } else {
+                                        current_value
+                                    };
+                                state.editing =
+                                    Some(SettingsEditing::TextInput { value: initial });
+                            }
                         }
                         self.ui_state.modal = Modal::Settings(state);
                     }
@@ -713,6 +1108,513 @@ impl App {
                 },
             }
         }
+    }
+
+    /// Handle a keypress while the Sections tab is active.
+    async fn handle_sections_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        mut state: SettingsState,
+    ) {
+        use crossterm::event::KeyCode;
+
+        let sec = &mut state.sections_state;
+
+        // --- Editing mode ---
+        if let Some(ref mut editing) = sec.editing {
+            match editing {
+                SectionsEditing::RenamingSection { value } => match key.code {
+                    KeyCode::Enter => {
+                        let new_name = value.trim().to_string();
+                        if !new_name.is_empty() && sec.selected_section < self.config.sections.len()
+                        {
+                            let has_dup = self
+                                .config
+                                .sections
+                                .iter()
+                                .enumerate()
+                                .any(|(i, s)| i != sec.selected_section && s.name == new_name);
+                            if !has_dup {
+                                self.config.sections[sec.selected_section].name = new_name;
+                                self.save_sections_config().await;
+                            }
+                        }
+                        sec.editing = None;
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Esc => {
+                        sec.editing = None;
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Backspace => {
+                        value.pop();
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Char(c) => {
+                        value.push(c);
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    _ => {
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                },
+                SectionsEditing::EditingPredicate { value } => match key.code {
+                    KeyCode::Enter => {
+                        let val = value.clone();
+                        let pred_idx = sec.pred_selected;
+                        if sec.selected_section < self.config.sections.len() {
+                            apply_predicate_edit(
+                                &mut self.config.sections[sec.selected_section],
+                                pred_idx,
+                                &val,
+                            );
+                            self.save_sections_config().await;
+                        }
+                        sec.editing = None;
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Esc => {
+                        sec.editing = None;
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Backspace => {
+                        value.pop();
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Char(c) => {
+                        value.push(c);
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    _ => {
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                },
+                SectionsEditing::CreatingSection { value } => match key.code {
+                    KeyCode::Enter => {
+                        let new_name = value.trim().to_string();
+                        if !new_name.is_empty() {
+                            let has_dup = self.config.sections.iter().any(|s| s.name == new_name);
+                            if !has_dup {
+                                self.config.sections.push(crate::session::SectionConfig {
+                                    name: new_name,
+                                    ..Default::default()
+                                });
+                                sec.selected_section = self.config.sections.len() - 1;
+                                self.save_sections_config().await;
+                            }
+                        }
+                        sec.editing = None;
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Esc => {
+                        sec.editing = None;
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Backspace => {
+                        value.pop();
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Char(c) => {
+                        value.push(c);
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    _ => {
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                },
+            }
+            return;
+        }
+
+        // --- Navigation mode ---
+        let sections_len = self.config.sections.len();
+
+        match sec.focus {
+            SectionsFocus::List => {
+                use crate::config::keybindings::BindableAction;
+
+                match self.config.keybindings.resolve(&key) {
+                    Some(BindableAction::NavigateDown) => {
+                        if sections_len > 0 {
+                            sec.selected_section = (sec.selected_section + 1) % sections_len;
+                            sec.pred_selected = 0;
+                        }
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    Some(BindableAction::NavigateUp) => {
+                        if sections_len > 0 {
+                            sec.selected_section = if sec.selected_section == 0 {
+                                sections_len - 1
+                            } else {
+                                sec.selected_section - 1
+                            };
+                            sec.pred_selected = 0;
+                        }
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    Some(BindableAction::Quit) => {
+                        self.ui_state.modal = Modal::None;
+                    }
+                    _ => match key.code {
+                        KeyCode::Esc => {
+                            self.ui_state.modal = Modal::None;
+                        }
+                        KeyCode::Tab => {
+                            state.tab = state.tab.next();
+                            state.selected_row = 0;
+                            state.rows = self.build_settings_rows(state.tab);
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        KeyCode::BackTab => {
+                            state.tab = state.tab.prev();
+                            state.selected_row = 0;
+                            state.rows = self.build_settings_rows(state.tab);
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        KeyCode::Right | KeyCode::Enter => {
+                            if sections_len > 0 {
+                                sec.focus = SectionsFocus::Predicates;
+                                sec.pred_selected = 0;
+                            }
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        KeyCode::Char('n') => {
+                            sec.editing = Some(SectionsEditing::CreatingSection {
+                                value: String::new(),
+                            });
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        KeyCode::Char('r') => {
+                            if sec.selected_section < sections_len {
+                                let current =
+                                    self.config.sections[sec.selected_section].name.clone();
+                                sec.editing =
+                                    Some(SectionsEditing::RenamingSection { value: current });
+                            }
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        KeyCode::Char('d') => {
+                            if sec.selected_section < sections_len {
+                                self.config.sections.remove(sec.selected_section);
+                                if sec.selected_section >= self.config.sections.len()
+                                    && sec.selected_section > 0
+                                {
+                                    sec.selected_section -= 1;
+                                }
+                                self.save_sections_config().await;
+                            }
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        KeyCode::Char('J') => {
+                            if sec.selected_section + 1 < sections_len {
+                                self.config
+                                    .sections
+                                    .swap(sec.selected_section, sec.selected_section + 1);
+                                sec.selected_section += 1;
+                                self.save_sections_config().await;
+                            }
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        KeyCode::Char('K') => {
+                            if sec.selected_section > 0 && sections_len > 0 {
+                                self.config
+                                    .sections
+                                    .swap(sec.selected_section, sec.selected_section - 1);
+                                sec.selected_section -= 1;
+                                self.save_sections_config().await;
+                            }
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        _ => {
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                    },
+                }
+            }
+            SectionsFocus::Predicates => {
+                use crate::config::keybindings::BindableAction;
+
+                let pred_count = if sec.selected_section < sections_len {
+                    predicate_rows(&self.config.sections[sec.selected_section]).len()
+                } else {
+                    0
+                };
+
+                match self.config.keybindings.resolve(&key) {
+                    Some(BindableAction::NavigateDown) => {
+                        if pred_count > 0 {
+                            sec.pred_selected = (sec.pred_selected + 1) % pred_count;
+                        }
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    Some(BindableAction::NavigateUp) => {
+                        if pred_count > 0 {
+                            sec.pred_selected = if sec.pred_selected == 0 {
+                                pred_count - 1
+                            } else {
+                                sec.pred_selected - 1
+                            };
+                        }
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    Some(BindableAction::Quit) => {
+                        self.ui_state.modal = Modal::None;
+                    }
+                    _ => match key.code {
+                        KeyCode::Esc | KeyCode::Left => {
+                            sec.focus = SectionsFocus::List;
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        KeyCode::Tab => {
+                            state.tab = state.tab.next();
+                            state.selected_row = 0;
+                            state.rows = self.build_settings_rows(state.tab);
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        KeyCode::BackTab => {
+                            state.tab = state.tab.prev();
+                            state.selected_row = 0;
+                            state.rows = self.build_settings_rows(state.tab);
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        KeyCode::Enter => {
+                            if sec.selected_section < sections_len && pred_count > 0 {
+                                let rows =
+                                    predicate_rows(&self.config.sections[sec.selected_section]);
+                                let (_, current_val) = &rows[sec.pred_selected];
+                                let initial = if current_val == "(not set)" {
+                                    String::new()
+                                } else {
+                                    current_val.clone()
+                                };
+                                sec.editing =
+                                    Some(SectionsEditing::EditingPredicate { value: initial });
+                            }
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        _ => {
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                    },
+                }
+            }
+        }
+    }
+
+    /// Persist the current sections config to disk and reconcile session assignments.
+    async fn save_sections_config(&mut self) {
+        let updated = self.config.clone();
+        if let Err(e) = self.config_store.mutate(|c| *c = updated) {
+            warn!("Failed to save sections config: {}", e);
+        }
+        self.reconcile_section_assignments().await;
+    }
+}
+
+/// Build displayable rows for a section's predicates.
+fn predicate_rows(section: &crate::session::SectionConfig) -> Vec<(String, String)> {
+    use crate::session::section::{
+        DecisionPredicate, LabelPredicate, ReviewerPredicate, StatePredicate,
+    };
+
+    let fmt_state = |p: &StatePredicate| match p {
+        crate::session::section::OneOrMany::One(v) => format!("{v:?}").to_lowercase(),
+        crate::session::section::OneOrMany::Any(vs) => vs
+            .iter()
+            .map(|v| format!("{v:?}").to_lowercase())
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+
+    let fmt_decision = |p: &DecisionPredicate| match p {
+        crate::session::section::OneOrMany::One(v) => format!("{v:?}").to_lowercase(),
+        crate::session::section::OneOrMany::Any(vs) => vs
+            .iter()
+            .map(|v| format!("{v:?}").to_lowercase())
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+
+    let fmt_label = |p: &LabelPredicate| match p {
+        LabelPredicate::One(s) => s.clone(),
+        LabelPredicate::Any(vs) => vs.join(", "),
+    };
+
+    let fmt_reviewer = |p: &ReviewerPredicate| match p {
+        ReviewerPredicate::Bool(b) => b.to_string(),
+        ReviewerPredicate::One(s) => s.clone(),
+        ReviewerPredicate::Any(vs) => vs.join(", "),
+    };
+
+    let not_set = "(not set)".to_string();
+    vec![
+        (
+            "pr_state".into(),
+            section
+                .pr_state
+                .as_ref()
+                .map_or_else(|| not_set.clone(), fmt_state),
+        ),
+        (
+            "is_draft".into(),
+            section
+                .is_draft
+                .map_or_else(|| not_set.clone(), |b| b.to_string()),
+        ),
+        (
+            "has_label".into(),
+            section
+                .has_label
+                .as_ref()
+                .map_or_else(|| not_set.clone(), fmt_label),
+        ),
+        (
+            "has_pr".into(),
+            section
+                .has_pr
+                .map_or_else(|| not_set.clone(), |b| b.to_string()),
+        ),
+        (
+            "review_decision".into(),
+            section
+                .review_decision
+                .as_ref()
+                .map_or_else(|| not_set.clone(), fmt_decision),
+        ),
+        (
+            "has_reviewer".into(),
+            section
+                .has_reviewer
+                .as_ref()
+                .map_or_else(|| not_set.clone(), fmt_reviewer),
+        ),
+    ]
+}
+
+/// Apply a user-edited predicate value string to a SectionConfig field.
+fn apply_predicate_edit(section: &mut crate::session::SectionConfig, pred_idx: usize, value: &str) {
+    use crate::git::{PrState, ReviewDecision};
+    use crate::session::section::{LabelPredicate, OneOrMany, ReviewerPredicate};
+
+    let trimmed = value.trim();
+
+    match pred_idx {
+        // pr_state
+        0 => {
+            if trimmed.is_empty() {
+                section.pr_state = None;
+            } else {
+                let parts: Vec<&str> = trimmed.split(',').map(str::trim).collect();
+                let parsed: Vec<PrState> = parts.iter().filter_map(|s| parse_pr_state(s)).collect();
+                section.pr_state = match parsed.len() {
+                    0 => None,
+                    1 => Some(OneOrMany::One(parsed[0])),
+                    _ => Some(OneOrMany::Any(parsed)),
+                };
+            }
+        }
+        // is_draft
+        1 => {
+            section.is_draft = match trimmed {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            };
+        }
+        // has_label
+        2 => {
+            if trimmed.is_empty() {
+                section.has_label = None;
+            } else {
+                let labels: Vec<String> = trimmed
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                section.has_label = match labels.len() {
+                    0 => None,
+                    1 => Some(LabelPredicate::One(labels.into_iter().next().unwrap())),
+                    _ => Some(LabelPredicate::Any(labels)),
+                };
+            }
+        }
+        // has_pr
+        3 => {
+            section.has_pr = match trimmed {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            };
+        }
+        // review_decision
+        4 => {
+            if trimmed.is_empty() {
+                section.review_decision = None;
+            } else {
+                let parts: Vec<&str> = trimmed.split(',').map(str::trim).collect();
+                let parsed: Vec<ReviewDecision> = parts
+                    .iter()
+                    .filter_map(|s| parse_review_decision(s))
+                    .collect();
+                section.review_decision = match parsed.len() {
+                    0 => None,
+                    1 => Some(OneOrMany::One(parsed[0])),
+                    _ => Some(OneOrMany::Any(parsed)),
+                };
+            }
+        }
+        // has_reviewer
+        5 => {
+            if trimmed.is_empty() {
+                section.has_reviewer = None;
+            } else {
+                match trimmed {
+                    "true" => section.has_reviewer = Some(ReviewerPredicate::Bool(true)),
+                    "false" => section.has_reviewer = Some(ReviewerPredicate::Bool(false)),
+                    _ => {
+                        let logins: Vec<String> = trimmed
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        section.has_reviewer = match logins.len() {
+                            0 => None,
+                            1 => Some(ReviewerPredicate::One(logins.into_iter().next().unwrap())),
+                            _ => Some(ReviewerPredicate::Any(logins)),
+                        };
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_pr_state(s: &str) -> Option<crate::git::PrState> {
+    match s.to_lowercase().as_str() {
+        "open" => Some(crate::git::PrState::Open),
+        "merged" => Some(crate::git::PrState::Merged),
+        "closed" => Some(crate::git::PrState::Closed),
+        _ => None,
+    }
+}
+
+fn parse_review_decision(s: &str) -> Option<crate::git::ReviewDecision> {
+    match s.to_lowercase().replace(['-', '_'], "").as_str() {
+        "approved" => Some(crate::git::ReviewDecision::Approved),
+        "changesrequested" => Some(crate::git::ReviewDecision::ChangesRequested),
+        "reviewrequired" => Some(crate::git::ReviewDecision::ReviewRequired),
+        _ => None,
+    }
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else if max > 1 {
+        format!("{}…", &s[..max - 1])
+    } else {
+        "…".to_string()
     }
 }
 

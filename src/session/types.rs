@@ -3,6 +3,7 @@
 //! Defines the hierarchical session model:
 //! - `Project` represents a git repository
 //! - `WorktreeSession` represents a worktree session within a project
+//! - `MultiRepoSession` represents a session spanning multiple projects
 
 use std::fmt;
 use std::path::PathBuf;
@@ -68,6 +69,40 @@ impl Default for SessionId {
 }
 
 impl fmt::Display for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Use first 8 chars for display
+        write!(f, "{}", &self.0.to_string()[..8])
+    }
+}
+
+/// Unique identifier for a multi-repo session
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MultiRepoSessionId(Uuid);
+
+impl MultiRepoSessionId {
+    /// Create a new random multi-repo session ID
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    /// Create from an existing UUID
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+
+    /// Get the inner UUID
+    pub fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
+}
+
+impl Default for MultiRepoSessionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for MultiRepoSessionId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Use first 8 chars for display
         write!(f, "{}", &self.0.to_string()[..8])
@@ -307,6 +342,11 @@ pub struct WorktreeSession {
     /// oldest-in-section-first sort order.
     #[serde(default = "chrono::Utc::now")]
     pub entered_section_at: DateTime<Utc>,
+    /// Most recent time the user attached to this session. Drives the
+    /// Alt+Tab-style MRU ordering in the in-tmux session picker.
+    /// `None` for sessions never attached since adopting the field.
+    #[serde(default)]
+    pub last_attached_at: Option<DateTime<Utc>>,
     /// Free-form user notes for this session. Edited inline in the Notes tab.
     #[serde(default)]
     pub notes: String,
@@ -355,6 +395,7 @@ impl WorktreeSession {
             section_override: None,
             current_section: None,
             entered_section_at: now,
+            last_attached_at: None,
             notes: String::new(),
         }
     }
@@ -401,6 +442,7 @@ impl WorktreeSession {
             section_override: None,
             current_section: None,
             entered_section_at: now,
+            last_attached_at: None,
             notes: String::new(),
         }
     }
@@ -416,6 +458,18 @@ impl WorktreeSession {
     /// Mark the session as active (update last_active_at)
     pub fn touch(&mut self) {
         self.last_active_at = Utc::now();
+    }
+
+    /// Record an attach event. Used by the in-tmux switcher to order
+    /// sessions Alt+Tab-style by most-recently viewed.
+    pub fn mark_attached(&mut self) {
+        self.last_attached_at = Some(Utc::now());
+    }
+
+    /// Whether `name` refers to this session — either the primary tmux
+    /// session or its paired shell session (toggled via Ctrl+\).
+    pub fn matches_tmux_name(&self, name: &str) -> bool {
+        self.tmux_session_name == name || self.shell_tmux_session_name.as_deref() == Some(name)
     }
 
     /// Check if this session matches a search query (fuzzy subsequence).
@@ -434,6 +488,15 @@ impl WorktreeSession {
         .iter()
         .filter_map(|s| crate::fuzzy::fuzzy_score(s, query))
         .max()
+    }
+
+    /// True when the session's PR is merged on GitHub. Honours the legacy
+    /// `pr_merged` flag for state.json files written before `pr_state` existed.
+    pub fn pr_is_merged(&self) -> bool {
+        matches!(
+            crate::git::effective_pr_state(self.pr_state, self.pr_merged),
+            crate::git::PrState::Merged,
+        )
     }
 }
 
@@ -526,6 +589,110 @@ pub fn stack_chain_from_base(
     chain
 }
 
+/// A per-repo entry within a multi-repo session, tracking the worktree
+/// and base commit for one specific project.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiRepoEntry {
+    /// Project this entry belongs to
+    pub project_id: ProjectId,
+    /// Path to the worktree directory inside the shared parent
+    pub worktree_path: PathBuf,
+    /// Base commit for diff computation (branch point)
+    pub base_commit: Option<String>,
+}
+
+/// A session that spans multiple git repositories.
+///
+/// Instead of a single worktree, this session creates one worktree per repo
+/// under a shared parent directory. A single tmux session (running Claude Code
+/// or another program) operates from the parent directory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiRepoSession {
+    /// Unique identifier
+    pub id: MultiRepoSessionId,
+    /// User-friendly title
+    pub title: String,
+    /// Per-repo entries (project ID → worktree info)
+    pub repos: Vec<MultiRepoEntry>,
+    /// Shared parent directory (Claude Code cwd)
+    pub parent_dir: PathBuf,
+    /// Branch name used across all repos
+    pub branch: String,
+    /// Current status
+    pub status: SessionStatus,
+    /// Program running in the session (e.g., "claude", "aider")
+    pub program: String,
+    /// When the session was created
+    pub created_at: DateTime<Utc>,
+    /// When the session was last active
+    pub last_active_at: DateTime<Utc>,
+    /// Tmux session name (for tmux commands)
+    pub tmux_session_name: String,
+    /// Shell tmux session name (for the cross-repo shell — lazily created)
+    #[serde(default)]
+    pub shell_tmux_session_name: Option<String>,
+    /// Whether the session has unread output
+    #[serde(default)]
+    pub unread: bool,
+}
+
+impl MultiRepoSession {
+    /// Create a new multi-repo session in the `Creating` state.
+    ///
+    /// The `repos` vec and `parent_dir` are placeholders; they are filled in
+    /// during `finalize_multi_repo_session`.
+    pub fn new_creating(
+        title: impl Into<String>,
+        branch: impl Into<String>,
+        program: impl Into<String>,
+    ) -> Self {
+        let id = MultiRepoSessionId::new();
+        let now = Utc::now();
+        let tmux_session_name = format!("cc-mr-{}", &id.0.to_string()[..8]);
+
+        Self {
+            id,
+            title: title.into(),
+            repos: Vec::new(),
+            parent_dir: PathBuf::new(),
+            branch: branch.into(),
+            status: SessionStatus::Creating,
+            program: program.into(),
+            created_at: now,
+            last_active_at: now,
+            tmux_session_name,
+            shell_tmux_session_name: None,
+            unread: false,
+        }
+    }
+
+    /// Update the session status
+    pub fn set_status(&mut self, status: SessionStatus) {
+        self.status = status;
+        if status == SessionStatus::Running {
+            self.last_active_at = Utc::now();
+        }
+    }
+
+    /// Mark the session as active (update last_active_at)
+    pub fn touch(&mut self) {
+        self.last_active_at = Utc::now();
+    }
+
+    /// Get all project IDs involved in this session
+    pub fn project_ids(&self) -> Vec<ProjectId> {
+        self.repos.iter().map(|r| r.project_id).collect()
+    }
+
+    /// Check if this session matches a search query
+    pub fn matches_query(&self, query: &str) -> bool {
+        let query = query.to_lowercase();
+        self.title.to_lowercase().contains(&query)
+            || self.branch.to_lowercase().contains(&query)
+            || self.program.to_lowercase().contains(&query)
+    }
+}
+
 /// Represents an item in the hierarchical session list
 /// Used for UI display and navigation
 #[derive(Debug, Clone)]
@@ -565,9 +732,25 @@ pub enum SessionListItem {
         /// set to `false`.
         stacked_child: bool,
     },
+    /// A multi-repo session header (in its own section)
+    MultiRepo {
+        id: MultiRepoSessionId,
+        title: String,
+        branch: String,
+        status: SessionStatus,
+        program: String,
+        project_count: usize,
+        project_names: Vec<String>,
+        created_at: chrono::DateTime<chrono::Utc>,
+        agent_state: Option<AgentState>,
+        unread: bool,
+    },
     /// A section header (used only when config.sections is non-empty).
-    /// Not selectable — navigation skips these rows.
-    SectionHeader { name: String, count: usize },
+    SectionHeader {
+        name: String,
+        count: usize,
+        collapsed: bool,
+    },
     /// A blank spacer row for visual separation between sections.
     /// Not selectable.
     Spacer,
@@ -579,6 +762,7 @@ impl SessionListItem {
         match self {
             Self::Project { id, .. } => format!("project:{}", id),
             Self::Worktree { id, .. } => format!("worktree:{}", id),
+            Self::MultiRepo { id, .. } => format!("multirepo:{}", id),
             Self::SectionHeader { name, .. } => format!("section:{}", name),
             Self::Spacer => "spacer".to_string(),
         }
@@ -594,9 +778,14 @@ impl SessionListItem {
         matches!(self, Self::Worktree { .. })
     }
 
+    /// Check if this is a multi-repo session item
+    pub fn is_multi_repo(&self) -> bool {
+        matches!(self, Self::MultiRepo { .. })
+    }
+
     /// Whether navigation/selection should land on this row.
     pub fn is_selectable(&self) -> bool {
-        !matches!(self, Self::SectionHeader { .. } | Self::Spacer)
+        !matches!(self, Self::Spacer)
     }
 }
 
@@ -657,6 +846,40 @@ mod tests {
         assert_eq!(session.program, "claude");
         assert!(session.tmux_session_name.starts_with("cc-"));
         assert_eq!(session.status, SessionStatus::Running);
+    }
+
+    #[test]
+    fn test_pr_is_merged() {
+        let mut session = WorktreeSession::new(
+            ProjectId::new(),
+            "x",
+            "b",
+            PathBuf::from("/tmp/x"),
+            "claude",
+        );
+
+        // Default (no PR info): not merged.
+        assert!(!session.pr_is_merged());
+
+        // Explicit pr_state == Merged → merged.
+        session.pr_state = Some(crate::git::PrState::Merged);
+        session.pr_merged = false;
+        assert!(session.pr_is_merged());
+
+        // Backward compat: pre-pr_state state.json with pr_merged=true.
+        session.pr_state = None;
+        session.pr_merged = true;
+        assert!(session.pr_is_merged());
+
+        // Explicit state wins over the legacy bool when they disagree.
+        session.pr_state = Some(crate::git::PrState::Open);
+        session.pr_merged = true;
+        assert!(!session.pr_is_merged());
+
+        // Explicit Open with bool false → not merged.
+        session.pr_state = Some(crate::git::PrState::Open);
+        session.pr_merged = false;
+        assert!(!session.pr_is_merged());
     }
 
     #[test]
@@ -925,6 +1148,108 @@ mod tests {
         assert_eq!(format!("{}", AgentState::WaitingForInput), "waiting");
         assert_eq!(format!("{}", AgentState::Unknown), "unknown");
     }
+
+    // --- MultiRepoSession tests ---
+
+    #[test]
+    fn test_multi_repo_session_id_display() {
+        let id = MultiRepoSessionId::new();
+        let display = id.to_string();
+        assert_eq!(display.len(), 8);
+    }
+
+    #[test]
+    fn test_multi_repo_session_new_creating() {
+        let session =
+            MultiRepoSession::new_creating("Update dependabot", "update-dependabot", "claude");
+
+        assert_eq!(session.title, "Update dependabot");
+        assert_eq!(session.branch, "update-dependabot");
+        assert_eq!(session.program, "claude");
+        assert_eq!(session.status, SessionStatus::Creating);
+        assert!(session.repos.is_empty());
+        assert_eq!(session.parent_dir, PathBuf::new());
+        assert!(session.tmux_session_name.starts_with("cc-mr-"));
+        assert_eq!(session.tmux_session_name.len(), 14); // "cc-mr-" (6) + 8 hex chars
+    }
+
+    #[test]
+    fn test_multi_repo_session_set_status() {
+        let mut session =
+            MultiRepoSession::new_creating("Test", "test-branch", "claude");
+        let before = session.last_active_at;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        session.set_status(SessionStatus::Running);
+        assert_eq!(session.status, SessionStatus::Running);
+        assert!(session.last_active_at > before);
+    }
+
+    #[test]
+    fn test_multi_repo_session_touch() {
+        let mut session =
+            MultiRepoSession::new_creating("Test", "test-branch", "claude");
+        let before = session.last_active_at;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        session.touch();
+        assert!(session.last_active_at > before);
+    }
+
+    #[test]
+    fn test_multi_repo_session_project_ids() {
+        let mut session =
+            MultiRepoSession::new_creating("Test", "test-branch", "claude");
+        let p1 = ProjectId::new();
+        let p2 = ProjectId::new();
+        session.repos.push(MultiRepoEntry {
+            project_id: p1,
+            worktree_path: PathBuf::from("/tmp/a"),
+            base_commit: None,
+        });
+        session.repos.push(MultiRepoEntry {
+            project_id: p2,
+            worktree_path: PathBuf::from("/tmp/b"),
+            base_commit: None,
+        });
+        let ids = session.project_ids();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&p1));
+        assert!(ids.contains(&p2));
+    }
+
+    #[test]
+    fn test_multi_repo_session_matches_query() {
+        let session =
+            MultiRepoSession::new_creating("Update Dependabot", "update-dependabot", "claude");
+        assert!(session.matches_query("dependabot"));
+        assert!(session.matches_query("DEPENDABOT"));
+        assert!(session.matches_query("update"));
+        assert!(session.matches_query("claude"));
+        assert!(!session.matches_query("unrelated"));
+        assert!(session.matches_query(""));
+    }
+
+    #[test]
+    fn test_multi_repo_session_list_item_key() {
+        let id = MultiRepoSessionId::new();
+        let item = SessionListItem::MultiRepo {
+            id,
+            title: "test".to_string(),
+            branch: "test".to_string(),
+            status: SessionStatus::Running,
+            program: "claude".to_string(),
+            project_count: 2,
+            project_names: vec!["a".to_string(), "b".to_string()],
+            created_at: chrono::Utc::now(),
+            agent_state: None,
+            unread: false,
+        };
+        assert!(item.key().starts_with("multirepo:"));
+        assert!(item.is_multi_repo());
+        assert!(!item.is_project());
+        assert!(!item.is_worktree());
+    }
+
+    // --- Stack helper tests ---
 
     use chrono::Duration as ChronoDuration;
 

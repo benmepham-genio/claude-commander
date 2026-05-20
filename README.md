@@ -187,6 +187,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `o` | Open PR in browser (when the session has a PR) |
 | `S` | Scan directory for git repos and add them as projects |
 | `s` | Open shell in worktree |
+| palette only | Collapse/expand section (press on any item in the section, or `Enter` on the section header) |
 | palette only | Move session to section (manual override; see [Session List Sections](#session-list-sections)) |
 | `Tab` / `Shift-Tab` | Cycle right-pane tabs (Preview → Info → Shell → Notes) |
 | `i` / `e` | Notes tab: enter inline edit mode |
@@ -263,7 +264,10 @@ ui_refresh_fps = 30
 # editor_gui = true
 
 # Interval in seconds between GitHub PR checks (0 = disabled)
-pr_check_interval_secs = 600
+pr_check_interval_secs = 120
+
+# Use rounded border corners (╭╮╰╯) instead of square (┌┐└┘)
+rounded_borders = false
 
 # Dim the right pane (preview/diff/shell) when the session list is focused
 dim_unfocused_preview = true
@@ -307,6 +311,30 @@ state_sync_interval_ms = 2000
 # quit = ["q", "Ctrl-c"]
 # toggle_pane = ["Tab"]
 ```
+
+### Theme Presets
+
+Set `preset` under `[theme]` in your config to switch the entire color palette:
+
+```toml
+[theme]
+preset = "rose-pine"
+```
+
+Available presets:
+
+| Preset | Description |
+|--------|-------------|
+| `basic` | 16-color ANSI (maximum compatibility) |
+| `indexed` | 256-color palette |
+| `truecolor` | 24-bit Catppuccin-inspired pastels (default on capable terminals) |
+| `monokai-dimmed` | Muted/desaturated Monokai — dark grays with soft gold, green, and blue accents |
+| `zedokai` | Vibrant Monokai variant inspired by the Zed editor — vivid pink, green, and orange |
+| `rose-pine` | Soft pink/rose aesthetic — deep navy-rose backgrounds with warm rose, iris, and foam accents |
+
+When `preset` is unset (or `"(auto)"`), the theme auto-detects your terminal's color capability.
+
+Individual color overrides (e.g. `border_focused = "#ff6600"`) still apply on top of the chosen preset.
 
 ### Session List Sections
 

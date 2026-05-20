@@ -12,7 +12,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
 use crate::git::DiffInfo;
@@ -456,7 +456,8 @@ fn test_preview_empty() {
                 .block(
                     Block::default()
                         .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 0))
-                        .borders(Borders::ALL),
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
                 )
                 .scroll(0);
             frame.render_widget(preview, frame.area());
@@ -480,7 +481,8 @@ fn test_preview_with_content() {
                 .block(
                     Block::default()
                         .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 0))
-                        .borders(Borders::ALL),
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
                 )
                 .scroll(0);
             frame.render_widget(preview, frame.area());
@@ -507,7 +509,8 @@ fn test_preview_scrolled() {
                 .block(
                     Block::default()
                         .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 0))
-                        .borders(Borders::ALL),
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
                 )
                 .scroll(20);
             frame.render_widget(preview, frame.area());
@@ -533,7 +536,8 @@ fn test_info_view_empty() {
                 .block(
                     Block::default()
                         .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 1))
-                        .borders(Borders::ALL),
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
                 )
                 .scroll(0);
             frame.render_widget(info_view, frame.area());
@@ -605,7 +609,8 @@ fn test_info_view_session_with_pr() {
                 .block(
                     Block::default()
                         .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 1))
-                        .borders(Borders::ALL),
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
                 )
                 .scroll(0);
             frame.render_widget(info_view, frame.area());
@@ -668,7 +673,8 @@ fn test_info_view_long_text_wraps() {
                 .block(
                     Block::default()
                         .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 1))
-                        .borders(Borders::ALL),
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
                 )
                 .scroll(0);
             frame.render_widget(info_view, frame.area());
@@ -708,7 +714,8 @@ fn test_info_view_summary_placeholder() {
                 .block(
                     Block::default()
                         .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 1))
-                        .borders(Borders::ALL),
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
                 )
                 .scroll(0);
             frame.render_widget(info_view, frame.area());
@@ -735,6 +742,7 @@ fn test_modal_input() {
             let block = Block::default()
                 .title(" New Session ")
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.modal_warning));
 
             let inner = block.inner(modal_area);
@@ -764,6 +772,7 @@ fn test_modal_confirm() {
             let block = Block::default()
                 .title(" Delete Session ")
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.modal_error));
 
             let inner = block.inner(modal_area);
@@ -793,6 +802,7 @@ fn test_modal_confirm_restart() {
             let block = Block::default()
                 .title(" Restart Session ")
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.modal_error));
 
             let inner = block.inner(modal_area);
@@ -822,6 +832,7 @@ fn test_modal_error() {
             let block = Block::default()
                 .title(" Error ")
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.modal_error));
 
             let inner = block.inner(modal_area);
@@ -852,6 +863,7 @@ fn test_modal_help() {
             let block = Block::default()
                 .title(" Help ")
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.modal_info));
 
             let inner = block.inner(modal_area);
@@ -899,6 +911,7 @@ fn test_modal_loading() {
             let block = Block::default()
                 .title(" New Session ")
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.modal_info));
 
             let inner = block.inner(modal_area);
@@ -964,7 +977,8 @@ fn test_preview_content_replacement_no_clear() {
                 .block(
                     Block::default()
                         .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 0))
-                        .borders(Borders::ALL),
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
                 )
                 .scroll(0);
             frame.render_widget(preview, frame.area());
@@ -978,7 +992,8 @@ fn test_preview_content_replacement_no_clear() {
                 .block(
                     Block::default()
                         .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 0))
-                        .borders(Borders::ALL),
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
                 )
                 .scroll(0);
             frame.render_widget(preview, frame.area());
@@ -1004,7 +1019,8 @@ fn test_preview_to_info_view_switch_no_clear() {
                 .block(
                     Block::default()
                         .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 0))
-                        .borders(Borders::ALL),
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
                 )
                 .scroll(0);
             frame.render_widget(preview, frame.area());
@@ -1034,7 +1050,8 @@ fn test_preview_to_info_view_switch_no_clear() {
                 .block(
                     Block::default()
                         .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 1))
-                        .borders(Borders::ALL),
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
                 )
                 .scroll(0);
             frame.render_widget(info_view, frame.area());
@@ -1058,7 +1075,8 @@ fn test_preview_to_shell_view_switch_no_clear() {
                 .block(
                     Block::default()
                         .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 0))
-                        .borders(Borders::ALL),
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
                 )
                 .scroll(0);
             frame.render_widget(preview, frame.area());
@@ -1072,7 +1090,8 @@ fn test_preview_to_shell_view_switch_no_clear() {
                 .block(
                     Block::default()
                         .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 2))
-                        .borders(Borders::ALL),
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
                 )
                 .scroll(0);
             frame.render_widget(shell, frame.area());
@@ -1106,6 +1125,7 @@ fn test_quick_switch_empty_query() {
             let block = Block::default()
                 .title(" Quick Switch ")
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.modal_info));
             let inner = block.inner(modal_area);
             frame.render_widget(block, modal_area);
@@ -1165,6 +1185,7 @@ fn test_quick_switch_with_matches() {
             let block = Block::default()
                 .title(" Quick Switch ")
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.modal_info));
             let inner = block.inner(modal_area);
             frame.render_widget(block, modal_area);

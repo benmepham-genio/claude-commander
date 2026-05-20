@@ -122,6 +122,17 @@ impl std::fmt::Display for PrState {
     }
 }
 
+/// Resolve a session's effective PR state, falling back to the legacy
+/// `pr_merged` bool when `pr_state` is `None`. Older `state.json` files
+/// (written before `pr_state` was added) carry only the bool.
+pub fn effective_pr_state(state: Option<PrState>, pr_merged: bool) -> PrState {
+    state.unwrap_or(if pr_merged {
+        PrState::Merged
+    } else {
+        PrState::Open
+    })
+}
+
 /// A PR label with name and hex color.
 #[derive(Debug, Clone)]
 pub struct PrLabel {
@@ -710,6 +721,23 @@ mod tests {
         assert_eq!(PrState::Open.to_string(), "Open");
         assert_eq!(PrState::Closed.to_string(), "Closed");
         assert_eq!(PrState::Merged.to_string(), "Merged");
+    }
+
+    #[test]
+    fn test_effective_pr_state() {
+        // Explicit state always wins, even when pr_merged disagrees.
+        assert_eq!(
+            effective_pr_state(Some(PrState::Merged), false),
+            PrState::Merged
+        );
+        assert_eq!(effective_pr_state(Some(PrState::Open), true), PrState::Open);
+        assert_eq!(
+            effective_pr_state(Some(PrState::Closed), true),
+            PrState::Closed
+        );
+        // Fallback to pr_merged bool when state is missing (legacy state.json).
+        assert_eq!(effective_pr_state(None, true), PrState::Merged);
+        assert_eq!(effective_pr_state(None, false), PrState::Open);
     }
 
     #[test]

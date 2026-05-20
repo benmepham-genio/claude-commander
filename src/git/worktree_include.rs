@@ -10,7 +10,6 @@
 //! forked from) still triggers the copy as long as the ref itself contains
 //! `.worktreeinclude`.
 
-use std::collections::HashSet;
 use std::path::Path;
 use std::process::Stdio;
 
@@ -21,74 +20,71 @@ use crate::error::{GitError, Result};
 
 /// Copy files matching `.worktreeinclude` patterns into a new worktree.
 ///
-/// Runs two `git ls-files` commands against the repo root:
-/// 1. All gitignored untracked files
-/// 2. All files matching `.worktreeinclude` patterns
-///
-/// The intersection (files that are both gitignored AND match `.worktreeinclude`)
-/// is copied into the worktree. Symlinks are skipped for security.
+/// Lists all gitignored untracked files in the source repo via
+/// `git ls-files --ignored --exclude-standard -o --directory` (which is fast
+/// because git skips descent into fully-ignored dirs like `node_modules/`),
+/// then filters that set down to entries matching `.worktreeinclude` using
+/// gix's gitignore matcher. Symlinks are skipped for security.
 pub(super) async fn copy_worktree_includes(repo_path: &Path, worktree_path: &Path) -> Result<()> {
     let include_file = worktree_path.join(".worktreeinclude");
-    if !tokio::fs::try_exists(&include_file).await.unwrap_or(false) {
-        return Ok(());
-    }
+    let include_bytes = match tokio::fs::read(&include_file).await {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            warn!("Failed to read {}: {}", include_file.display(), e);
+            return Ok(());
+        }
+    };
 
-    // Build --exclude-from=<abs path> without losing non-UTF-8 bytes.
-    let mut exclude_from_arg = std::ffi::OsString::from("--exclude-from=");
-    exclude_from_arg.push(include_file.as_os_str());
-
-    // Run both git ls-files commands concurrently
-    let (gitignored_result, included_result) = tokio::join!(
-        Command::new("git")
-            .current_dir(repo_path)
-            .args([
-                "ls-files",
-                "--ignored",
-                "--exclude-standard",
-                "-o",
-                "-z",
-                "--directory",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output(),
-        Command::new("git")
-            .current_dir(repo_path)
-            .args(["ls-files", "--ignored"])
-            .arg(&exclude_from_arg)
-            .args(["-o", "-z", "--directory"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output(),
-    );
-
-    let gitignored_output = gitignored_result
+    let gitignored_output = Command::new("git")
+        .current_dir(repo_path)
+        .args([
+            "ls-files",
+            "--ignored",
+            "--exclude-standard",
+            "-o",
+            "-z",
+            "--directory",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
         .map_err(|e| GitError::WorktreeError(format!("Failed to list gitignored files: {}", e)))?;
-    let included_output = included_result.map_err(|e| {
-        GitError::WorktreeError(format!("Failed to list worktreeinclude files: {}", e))
-    })?;
 
     if !gitignored_output.status.success() {
         let stderr = String::from_utf8_lossy(&gitignored_output.stderr);
         warn!("git ls-files --exclude-standard failed: {}", stderr);
         return Ok(());
     }
-    if !included_output.status.success() {
-        let stderr = String::from_utf8_lossy(&included_output.stderr);
-        warn!(
-            "git ls-files --exclude-from={} failed: {}",
-            include_file.display(),
-            stderr
-        );
-        return Ok(());
-    }
 
-    let gitignored: HashSet<&str> = parse_nul_separated(&gitignored_output.stdout);
-    let included: HashSet<&str> = parse_nul_separated(&included_output.stdout);
+    // Match `.worktreeinclude` patterns in-process. A second `git ls-files`
+    // pass with `--exclude-from=.worktreeinclude` would have to drop
+    // `--exclude-standard` to remain semantically distinct, which causes git
+    // to descend into every standard-ignored directory testing each file —
+    // multiple seconds on a large monorepo.
+    let mut search = gix::ignore::Search::default();
+    search.add_patterns_buffer(&include_bytes, include_file.clone(), None);
 
-    let intersection: Vec<&str> = gitignored.intersection(&included).copied().collect();
+    // Preserve trailing-slash dir markers from git's output: gitignore
+    // semantics for `dir/` patterns are dir-only, so the matcher needs
+    // is_dir=Some(true) to fire on those.
+    let entries = parse_nul_separated_with_dir_flag(&gitignored_output.stdout);
+    let intersection: Vec<&str> = entries
+        .iter()
+        .filter(|(path, is_dir)| {
+            let bs = gix::bstr::BStr::new(path.as_bytes());
+            search
+                .pattern_matching_relative_path(
+                    bs,
+                    Some(*is_dir),
+                    gix::glob::pattern::Case::Sensitive,
+                )
+                .is_some()
+        })
+        .map(|(p, _)| *p)
+        .collect();
 
     if intersection.is_empty() {
         return Ok(());
@@ -144,19 +140,22 @@ pub(super) async fn copy_worktree_includes(repo_path: &Path, worktree_path: &Pat
     Ok(())
 }
 
-/// Parse NUL-separated output from `git ls-files -z`, stripping trailing slashes
-/// from directory entries produced by `--directory`.
-fn parse_nul_separated(bytes: &[u8]) -> HashSet<&str> {
+/// Parse NUL-separated output from `git ls-files -z --directory`, preserving
+/// whether each entry was a directory (i.e. emitted with a trailing slash).
+fn parse_nul_separated_with_dir_flag(bytes: &[u8]) -> Vec<(&str, bool)> {
     let text = match std::str::from_utf8(bytes) {
         Ok(t) => t,
         Err(e) => {
             warn!("git ls-files output contains non-UTF-8 filenames: {}", e);
-            return HashSet::new();
+            return Vec::new();
         }
     };
     text.split('\0')
         .filter(|s| !s.is_empty())
-        .map(|s| s.strip_suffix('/').unwrap_or(s))
+        .map(|s| match s.strip_suffix('/') {
+            Some(stripped) => (stripped, true),
+            None => (s, false),
+        })
         .collect()
 }
 
@@ -205,7 +204,6 @@ async fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<usize> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
     use std::path::Path;
     use std::process::Stdio;
 
@@ -214,15 +212,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_nul_separated() {
+    fn test_parse_nul_separated_with_dir_flag() {
         let input = b"foo\0bar/baz\0node_modules/\0";
-        let result = parse_nul_separated(input);
-        assert_eq!(result, HashSet::from(["foo", "bar/baz", "node_modules"]));
+        let result = parse_nul_separated_with_dir_flag(input);
+        assert_eq!(
+            result,
+            vec![("foo", false), ("bar/baz", false), ("node_modules", true)]
+        );
     }
 
     #[test]
-    fn test_parse_nul_separated_empty() {
-        let result = parse_nul_separated(b"");
+    fn test_parse_nul_separated_with_dir_flag_empty() {
+        let result = parse_nul_separated_with_dir_flag(b"");
         assert!(result.is_empty());
     }
 

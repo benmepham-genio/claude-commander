@@ -2,7 +2,7 @@
 source: src/tui/render_tests.rs
 expression: terminal.backend()
 ---
-"┌ Preview · Info · Shell ──────────────────────────────────┐"
+"╭ Preview · Info · Shell ──────────────────────────────────╮"
 "│$ ls -la                                                  │"
 "│total 42                                                  │"
 "│drwxr-xr-x 5 user user 4096                               │"
@@ -11,4 +11,4 @@ expression: terminal.backend()
 "│                                                          │"
 "│                                                          │"
 "│                                                          │"
-"└──────────────────────────────────────────────────────────┘"
+"╰──────────────────────────────────────────────────────────╯"

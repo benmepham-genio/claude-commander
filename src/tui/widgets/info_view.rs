@@ -52,6 +52,8 @@ pub struct InfoView<'a> {
     theme: &'a Theme,
     block: Option<Block<'a>>,
     scroll: u16,
+    /// Pre-built lines to render, bypassing `build_lines()` during `Widget::render`.
+    prebuilt_lines: Option<Vec<Line<'static>>>,
 }
 
 impl<'a> InfoView<'a> {
@@ -61,6 +63,7 @@ impl<'a> InfoView<'a> {
             theme,
             block: None,
             scroll: 0,
+            prebuilt_lines: None,
         }
     }
 
@@ -71,6 +74,12 @@ impl<'a> InfoView<'a> {
 
     pub fn scroll(mut self, scroll: u16) -> Self {
         self.scroll = scroll;
+        self
+    }
+
+    /// Supply pre-built lines so that `Widget::render` skips `build_lines()`.
+    pub fn with_prebuilt_lines(mut self, lines: Vec<Line<'static>>) -> Self {
+        self.prebuilt_lines = Some(lines);
         self
     }
 
@@ -356,7 +365,10 @@ impl<'a> Widget for InfoView<'a> {
             area.height as usize
         };
 
-        let all_lines = self.build_lines();
+        let all_lines = match self.prebuilt_lines {
+            Some(lines) => lines,
+            None => self.build_lines(),
+        };
 
         let visible: Vec<Line<'static>> = all_lines
             .into_iter()

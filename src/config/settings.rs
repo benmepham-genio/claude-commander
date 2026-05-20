@@ -124,6 +124,10 @@ pub struct Config {
     #[serde(default)]
     pub theme: ThemeOverrides,
 
+    /// Use rounded border corners (╭╮╰╯) instead of square (┌┐└┘). Default false.
+    #[serde(default)]
+    pub rounded_borders: bool,
+
     /// Section definitions for grouping sessions in the TUI list.
     /// First-match-wins in declared order; unmatched sessions fall into a
     /// built-in "Other" catch-all.
@@ -145,7 +149,7 @@ impl Default for Config {
             editor: None,
             editor_gui: None,
             shell_program: std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string()),
-            pr_check_interval_secs: 600,
+            pr_check_interval_secs: 120,
             pr_review_labels: default_pr_review_labels(),
             fetch_before_create: true,
             resume_session: true,
@@ -163,6 +167,7 @@ impl Default for Config {
             log_file: None,
             keybindings: KeyBindings::default(),
             theme: ThemeOverrides::default(),
+            rounded_borders: false,
             sections: Vec::new(),
         }
     }
@@ -551,7 +556,7 @@ has_label = ["blocked", "waiting-on-author"]
     fn test_default_config_additional_values() {
         let config = Config::default();
         assert_eq!(config.diff_cache_ttl_ms, 500);
-        assert_eq!(config.pr_check_interval_secs, 600);
+        assert_eq!(config.pr_check_interval_secs, 120);
         assert!(config.fetch_before_create);
         assert!(config.resume_session);
         assert_eq!(config.state_sync_interval_ms, 2000);

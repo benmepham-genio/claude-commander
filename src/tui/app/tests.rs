@@ -57,6 +57,21 @@ fn make_worktree() -> SessionListItem {
     }
 }
 
+fn make_multi_repo() -> SessionListItem {
+    SessionListItem::MultiRepo {
+        id: crate::session::MultiRepoSessionId::new(),
+        title: "multi".to_string(),
+        branch: "cross-repo".to_string(),
+        status: SessionStatus::Running,
+        program: "claude".to_string(),
+        project_count: 2,
+        project_names: vec!["a".to_string(), "b".to_string()],
+        created_at: chrono::Utc::now(),
+        agent_state: None,
+        unread: false,
+    }
+}
+
 #[test]
 fn test_session_number_to_list_index_basic() {
     let items = vec![
@@ -88,6 +103,29 @@ fn test_session_number_to_list_index_empty() {
 fn test_session_number_to_list_index_projects_only() {
     let items = vec![make_project(), make_project()];
     assert_eq!(session_number_to_list_index(&items, 1), None);
+}
+
+#[test]
+fn test_session_number_to_list_index_counts_multi_repo_before_worktrees() {
+    // Multi-repo rows render at the top, so they take the first numbers.
+    let items = vec![
+        make_multi_repo(), // index 0, session #1
+        make_project(),
+        make_worktree(), // index 2, session #2
+        make_worktree(), // index 3, session #3
+    ];
+    assert_eq!(session_number_to_list_index(&items, 1), Some(0));
+    assert_eq!(session_number_to_list_index(&items, 2), Some(2));
+    assert_eq!(session_number_to_list_index(&items, 3), Some(3));
+    assert_eq!(session_number_to_list_index(&items, 4), None);
+}
+
+#[test]
+fn test_session_number_to_list_index_multi_repo_only() {
+    let items = vec![make_multi_repo(), make_multi_repo()];
+    assert_eq!(session_number_to_list_index(&items, 1), Some(0));
+    assert_eq!(session_number_to_list_index(&items, 2), Some(1));
+    assert_eq!(session_number_to_list_index(&items, 3), None);
 }
 
 // ---------------------------------------------------------------------------

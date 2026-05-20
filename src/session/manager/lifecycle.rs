@@ -87,6 +87,7 @@ impl SessionManager {
             "Finalizing session '{}' with branch '{}' in project {}",
             title, branch_name, project_id
         );
+        let finalize_start = std::time::Instant::now();
 
         // Fetch latest changes from origin
         if self.config_store.read().fetch_before_create {
@@ -94,6 +95,7 @@ impl SessionManager {
                 "Fetching latest changes from origin in {}",
                 repo_path.display()
             );
+            let fetch_start = std::time::Instant::now();
             let output = tokio::process::Command::new("git")
                 .current_dir(&repo_path)
                 .args(["fetch", "origin"])
@@ -102,6 +104,10 @@ impl SessionManager {
                 .stderr(std::process::Stdio::piped())
                 .output()
                 .await?;
+            info!(
+                "[timing] git fetch origin took {}ms",
+                fetch_start.elapsed().as_millis()
+            );
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 warn!("git fetch failed (continuing anyway): {}", stderr);
@@ -160,6 +166,7 @@ impl SessionManager {
             (exists, sp)
         };
         let worktree_path = worktrees_dir.join(&worktree_name);
+        let worktree_create_start = std::time::Instant::now();
         let worktree_info = WorktreeManager::run_create_worktree(
             worktrees_dir,
             repo_path.clone(),
@@ -169,6 +176,10 @@ impl SessionManager {
             start_point,
         )
         .await?;
+        info!(
+            "[timing] run_create_worktree (git worktree add + worktree includes) took {}ms",
+            worktree_create_start.elapsed().as_millis()
+        );
 
         // Read tmux_session_name from the placeholder session
         let tmux_session_name = {
@@ -186,11 +197,17 @@ impl SessionManager {
             Some(pb) if program_is_claude(&program) => program_with_stack_context(&program, pb),
             _ => program.clone(),
         };
+        let launch_cmd = program_with_session_name(&launch_cmd, &title);
 
         // Create tmux session in the worktree directory
+        let tmux_start = std::time::Instant::now();
         self.tmux
             .create_session(&tmux_session_name, &worktree_info.path, Some(&launch_cmd))
             .await?;
+        info!(
+            "[timing] tmux create_session took {}ms",
+            tmux_start.elapsed().as_millis()
+        );
 
         // Update session to Running with the real worktree info
         let sid = *session_id;
@@ -222,6 +239,10 @@ impl SessionManager {
             "Finalized session {} with tmux session {}",
             session_id, tmux_session_name
         );
+        info!(
+            "[timing] finalize_session total took {}ms",
+            finalize_start.elapsed().as_millis()
+        );
         Ok(*session_id)
     }
 
@@ -251,7 +272,7 @@ impl SessionManager {
     /// Restart a session (kill tmux and recreate, optionally with --resume)
     #[instrument(skip(self))]
     pub async fn restart_session(&self, session_id: &SessionId) -> Result<()> {
-        let (tmux_session_name, shell_tmux_name, worktree_path, program, status_bar) = {
+        let (tmux_session_name, shell_tmux_name, worktree_path, title, program, status_bar) = {
             let state = self.store.read().await;
             let session = state
                 .get_session(session_id)
@@ -260,6 +281,7 @@ impl SessionManager {
                 session.tmux_session_name.clone(),
                 session.shell_tmux_session_name.clone(),
                 session.worktree_path.clone(),
+                session.title.clone(),
                 session.program.clone(),
                 self.status_bar_info(session, &state),
             )
@@ -274,6 +296,7 @@ impl SessionManager {
         } else {
             program.clone()
         };
+        let resume_program = program_with_session_name(&resume_program, &title);
         let create_result = self
             .tmux
             .create_session(&tmux_session_name, &worktree_path, Some(&resume_program))
@@ -400,6 +423,27 @@ fn program_is_claude(program: &str) -> bool {
     program.split_whitespace().next() == Some("claude")
 }
 
+/// Inject `-n <session_title>` into a Claude command so the Claude Code
+/// session is named to match the Claude Commander session.
+///
+/// For non-claude programs the command is returned unchanged.
+pub(super) fn program_with_session_name(program: &str, session_title: &str) -> String {
+    if !program_is_claude(program) || session_title.is_empty() {
+        return program.to_string();
+    }
+    let escaped = shell_escape_single_quote(session_title);
+    let mut parts = program.splitn(2, char::is_whitespace);
+    let cmd = parts.next().unwrap();
+    match parts.next() {
+        Some(rest) => format!("{cmd} -n '{escaped}' {rest}"),
+        None => format!("{cmd} -n '{escaped}'"),
+    }
+}
+
+fn shell_escape_single_quote(s: &str) -> String {
+    s.replace('\'', "'\\''")
+}
+
 /// Build the launch command for a stacked session running Claude Code.
 ///
 /// Appends a single-quoted initial prompt telling Claude the stack parent's
@@ -449,5 +493,43 @@ mod lifecycle_tests {
     fn stack_context_preserves_program_flags() {
         let cmd = program_with_stack_context("claude --resume", "base-branch");
         assert!(cmd.starts_with("claude --resume '"));
+    }
+
+    #[test]
+    fn session_name_injected_for_bare_claude() {
+        let cmd = program_with_session_name("claude", "my session");
+        assert_eq!(cmd, "claude -n 'my session'");
+    }
+
+    #[test]
+    fn session_name_injected_with_existing_args() {
+        let cmd = program_with_session_name("claude --resume", "fix auth");
+        assert_eq!(cmd, "claude -n 'fix auth' --resume");
+    }
+
+    #[test]
+    fn session_name_skipped_for_non_claude() {
+        let cmd = program_with_session_name("bash", "my session");
+        assert_eq!(cmd, "bash");
+    }
+
+    #[test]
+    fn session_name_skipped_for_empty_title() {
+        let cmd = program_with_session_name("claude", "");
+        assert_eq!(cmd, "claude");
+    }
+
+    #[test]
+    fn session_name_escapes_single_quotes() {
+        let cmd = program_with_session_name("claude", "it's a test");
+        assert_eq!(cmd, "claude -n 'it'\\''s a test'");
+    }
+
+    #[test]
+    fn session_name_with_stack_context() {
+        let stacked = program_with_stack_context("claude", "parent-branch");
+        let cmd = program_with_session_name(&stacked, "my session");
+        assert!(cmd.starts_with("claude -n 'my session' '"));
+        assert!(cmd.contains("parent-branch"));
     }
 }

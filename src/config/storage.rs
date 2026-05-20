@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ConfigError, Result};
-use crate::session::{Project, ProjectId, SessionId, WorktreeSession};
+use crate::session::{
+    MultiRepoSession, MultiRepoSessionId, Project, ProjectId, SessionId, WorktreeSession,
+};
 
 use super::Config;
 
@@ -22,6 +24,10 @@ pub struct AppState {
     /// All worktree sessions
     #[serde(default)]
     pub sessions: HashMap<SessionId, WorktreeSession>,
+
+    /// All multi-repo sessions
+    #[serde(default)]
+    pub multi_repo_sessions: HashMap<MultiRepoSessionId, MultiRepoSession>,
 
     /// Whether the user has seen the help screen
     #[serde(default)]
@@ -205,6 +211,37 @@ impl AppState {
     /// Count total projects
     pub fn project_count(&self) -> usize {
         self.projects.len()
+    }
+
+    /// Add a multi-repo session
+    pub fn add_multi_repo_session(&mut self, session: MultiRepoSession) {
+        self.multi_repo_sessions.insert(session.id, session);
+    }
+
+    /// Remove a multi-repo session
+    pub fn remove_multi_repo_session(
+        &mut self,
+        id: &MultiRepoSessionId,
+    ) -> Option<MultiRepoSession> {
+        self.multi_repo_sessions.remove(id)
+    }
+
+    /// Get a multi-repo session by ID
+    pub fn get_multi_repo_session(&self, id: &MultiRepoSessionId) -> Option<&MultiRepoSession> {
+        self.multi_repo_sessions.get(id)
+    }
+
+    /// Get a mutable reference to a multi-repo session
+    pub fn get_multi_repo_session_mut(
+        &mut self,
+        id: &MultiRepoSessionId,
+    ) -> Option<&mut MultiRepoSession> {
+        self.multi_repo_sessions.get_mut(id)
+    }
+
+    /// Count total multi-repo sessions
+    pub fn multi_repo_session_count(&self) -> usize {
+        self.multi_repo_sessions.len()
     }
 }
 
@@ -541,6 +578,82 @@ mod tests {
         assert_eq!(loaded.left_pane_pct, None);
         assert!(loaded.seen_help);
     }
+
+    // --- Multi-repo session tests ---
+
+    #[test]
+    fn test_add_remove_multi_repo_session() {
+        let mut state = AppState::new();
+        let session = crate::session::MultiRepoSession::new_creating(
+            "Update deps",
+            "update-deps",
+            "claude",
+        );
+        let id = session.id;
+
+        state.add_multi_repo_session(session);
+        assert_eq!(state.multi_repo_session_count(), 1);
+        assert!(state.get_multi_repo_session(&id).is_some());
+
+        let removed = state.remove_multi_repo_session(&id);
+        assert!(removed.is_some());
+        assert_eq!(state.multi_repo_session_count(), 0);
+    }
+
+    #[test]
+    fn test_multi_repo_session_roundtrip() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+
+        let mut state = AppState::new();
+        let mut session = crate::session::MultiRepoSession::new_creating(
+            "Cross-repo fix",
+            "cross-repo-fix",
+            "claude",
+        );
+        session.repos.push(crate::session::MultiRepoEntry {
+            project_id: ProjectId::new(),
+            worktree_path: PathBuf::from("/tmp/repo-a"),
+            base_commit: Some("abc123".to_string()),
+        });
+        let id = session.id;
+        state.add_multi_repo_session(session);
+
+        state.save_to(&state_path).unwrap();
+        let loaded = AppState::load_from(&state_path).unwrap();
+        assert_eq!(loaded.multi_repo_session_count(), 1);
+        let loaded_session = loaded.get_multi_repo_session(&id).unwrap();
+        assert_eq!(loaded_session.title, "Cross-repo fix");
+        assert_eq!(loaded_session.repos.len(), 1);
+        assert_eq!(
+            loaded_session.repos[0].base_commit,
+            Some("abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_multi_repo_sessions_missing_from_json_defaults_to_empty() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+
+        // Write JSON without multi_repo_sessions field
+        std::fs::write(&state_path, r#"{"version": "0.1.0"}"#).unwrap();
+
+        let loaded = AppState::load_from(&state_path).unwrap();
+        assert_eq!(loaded.multi_repo_session_count(), 0);
+    }
+
+    #[test]
+    fn test_remove_nonexistent_multi_repo_session_returns_none() {
+        let mut state = AppState::new();
+        assert!(
+            state
+                .remove_multi_repo_session(&crate::session::MultiRepoSessionId::new())
+                .is_none()
+        );
+    }
+
+    // --- Cascade-paused-at tests ---
 
     #[test]
     fn test_cascade_paused_at_defaults_to_none() {

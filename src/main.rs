@@ -70,6 +70,21 @@ enum Commands {
         #[arg(long)]
         init: bool,
     },
+
+    /// Show the in-session session picker (used by Ctrl+O inside an attached
+    /// session via `tmux display-popup`). Writes the chosen tmux session name
+    /// to `--out` on selection; writes nothing on cancel.
+    #[command(hide = true)]
+    PickSession {
+        /// Path to write the chosen tmux session name to
+        #[arg(long)]
+        out: std::path::PathBuf,
+        /// tmux name of the currently-attached session — excluded from the
+        /// picker list (Alt+Tab style; switching to where you already are
+        /// is a no-op).
+        #[arg(long)]
+        current: Option<String>,
+    },
 }
 
 fn setup_logging(debug: bool, to_file: bool) -> Result<()> {
@@ -103,19 +118,74 @@ fn setup_logging(debug: bool, to_file: bool) -> Result<()> {
     Ok(())
 }
 
+/// Raise the soft limit on open file descriptors toward the hard cap, so
+/// fan-out subprocess work (gh, git diff, tmux) doesn't EMFILE on the
+/// stingy macOS launchd default of 256.
+///
+/// Best-effort: failures are logged to stderr and do not abort startup.
+#[cfg(unix)]
+fn raise_fd_limit() {
+    // Target soft limit. macOS's hard cap is typically kern.maxfilesperproc
+    // (~184k); Linux varies. We cap our request to keep things reasonable.
+    const TARGET_SOFT: nix::libc::rlim_t = 8192;
+
+    let mut rlim = nix::libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+
+    // SAFETY: rlim is a valid stack pointer to a properly-sized rlimit.
+    let rc = unsafe { nix::libc::getrlimit(nix::libc::RLIMIT_NOFILE, &mut rlim) };
+    if rc != 0 {
+        eprintln!(
+            "Warning: getrlimit(RLIMIT_NOFILE) failed: {}",
+            std::io::Error::last_os_error()
+        );
+        return;
+    }
+
+    if rlim.rlim_cur >= TARGET_SOFT {
+        return;
+    }
+
+    let new_soft = TARGET_SOFT.min(rlim.rlim_max);
+    if new_soft <= rlim.rlim_cur {
+        return;
+    }
+
+    let new_rlim = nix::libc::rlimit {
+        rlim_cur: new_soft,
+        rlim_max: rlim.rlim_max,
+    };
+    // SAFETY: new_rlim is a valid stack pointer to a properly-sized rlimit.
+    let rc = unsafe { nix::libc::setrlimit(nix::libc::RLIMIT_NOFILE, &new_rlim) };
+    if rc != 0 {
+        eprintln!(
+            "Warning: setrlimit(RLIMIT_NOFILE, {}) failed: {}",
+            new_soft,
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn raise_fd_limit() {}
+
 /// Execute async PTY-based attach to a tmux session
 async fn execute_attach(session_name: &str, editor_triggers: Vec<Vec<u8>>) {
     // CLI `attach` resolves a Claude session by title/ID, never a shell.
     match attach_to_session(session_name, editor_triggers, true).await {
-        Ok(AttachResult::Detached | AttachResult::SwitchToShell | AttachResult::OpenEditor) => {
-            info!("Detached from session");
-        }
-        Ok(AttachResult::SessionEnded) => {
-            info!("Session ended");
-        }
-        Ok(AttachResult::Error(e)) => {
-            eprintln!("Attach error: {}", e);
-        }
+        Ok(outcome) => match outcome.result {
+            AttachResult::Detached | AttachResult::SwitchToShell | AttachResult::OpenEditor => {
+                info!("Detached from session");
+            }
+            AttachResult::SessionEnded => {
+                info!("Session ended");
+            }
+            AttachResult::Error(e) => {
+                eprintln!("Attach error: {}", e);
+            }
+        },
         Err(e) => {
             eprintln!("Failed to attach: {}", e);
         }
@@ -126,6 +196,12 @@ async fn execute_attach(session_name: &str, editor_triggers: Vec<Vec<u8>>) {
 async fn main() -> Result<()> {
     // Install color-eyre error hooks
     color_eyre::install()?;
+
+    // macOS launchd hands processes a soft RLIMIT_NOFILE of 256, which is
+    // easily exhausted once we fan out subprocesses across many sessions
+    // (gh pr list, git diff, tmux commands). Raise our own soft limit
+    // toward the hard cap before anything else runs.
+    raise_fd_limit();
 
     let cli = Cli::parse();
 
@@ -285,6 +361,11 @@ async fn main() -> Result<()> {
                     eprintln!("Use 'claude-commander list' to see available sessions.");
                 }
             }
+        }
+
+        Some(Commands::PickSession { out, current }) => {
+            // No logging — the popup terminal is the picker's UI.
+            claude_commander::picker::run_session_picker(&out, current.as_deref())?;
         }
 
         Some(Commands::Config { init }) => {

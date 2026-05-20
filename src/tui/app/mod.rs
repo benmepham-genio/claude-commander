@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use crossterm::{
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+        KeyboardEnhancementFlags, MouseButton, MouseEventKind, PopKeyboardEnhancementFlags,
         PushKeyboardEnhancementFlags,
     },
     execute,
@@ -23,11 +23,12 @@ use crossterm::{
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Margin, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+        Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Wrap,
     },
 };
 use tracing::{debug, info, warn};
@@ -46,8 +47,8 @@ use crate::git::{
     fetch_branch_summary, fetch_enriched_pr, is_gh_available,
 };
 use crate::session::{
-    AgentState, ProjectId, SessionId, SessionListItem, SessionManager, SessionStatus,
-    WorktreeSession,
+    AgentState, MultiRepoSessionId, ProjectId, SessionId, SessionListItem, SessionManager,
+    SessionStatus, WorktreeSession,
 };
 use crate::tmux::AgentStateDetector;
 
@@ -107,6 +108,16 @@ pub enum Modal {
         prompt: String,
         value: String,
         on_submit: InputAction,
+        /// When `Some`, the dialog renders a dynamic hint indicating whether
+        /// the sanitized session name corresponds to an already-existing
+        /// branch (local or remote). Populated by `handle_new_session` /
+        /// `handle_new_stacked_session`; other Input flows (Rename) leave
+        /// this as `None`.
+        ///
+        /// Entries are the local-name form returned by `load_branch_entries`
+        /// (i.e. remote-only `origin/<x>` is stored as just `<x>` to match
+        /// `finalize_session`'s resolution logic).
+        existing_branches: Option<Vec<String>>,
     },
     /// Confirmation modal
     Confirm {
@@ -152,6 +163,23 @@ pub enum Modal {
         /// Index of the first visible row — keeps `selected_idx` inside
         /// the visible window when the list is longer than can fit.
         scroll: usize,
+    },
+    /// Multi-repo session project picker. Shows checkboxes for each
+    /// registered project; on confirm, transitions to title input.
+    MultiRepoProjectPicker {
+        /// All projects with their checked state
+        projects: Vec<(ProjectId, String, bool)>,
+        /// Currently highlighted row
+        selected_idx: usize,
+        /// Scroll offset
+        scroll: usize,
+    },
+    /// Title input for a new multi-repo session (after projects are picked)
+    MultiRepoTitle {
+        /// Selected project IDs
+        project_ids: Vec<ProjectId>,
+        /// Title text
+        value: String,
     },
     /// Checkout-existing-branch modal. Shows an input field plus a
     /// filterable/scrollable list of branches (local + remote) and
@@ -253,16 +281,23 @@ pub enum SettingsTab {
     General,
     Keybindings,
     Theme,
+    Sections,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 3] = [Self::General, Self::Keybindings, Self::Theme];
+    const ALL: [SettingsTab; 4] = [
+        Self::General,
+        Self::Keybindings,
+        Self::Theme,
+        Self::Sections,
+    ];
 
     fn label(self) -> &'static str {
         match self {
             Self::General => "General",
             Self::Keybindings => "Keybindings",
             Self::Theme => "Theme",
+            Self::Sections => "Sections",
         }
     }
 
@@ -270,15 +305,53 @@ impl SettingsTab {
         match self {
             Self::General => Self::Keybindings,
             Self::Keybindings => Self::Theme,
-            Self::Theme => Self::General,
+            Self::Theme => Self::Sections,
+            Self::Sections => Self::General,
         }
     }
 
     fn prev(self) -> Self {
         match self {
-            Self::General => Self::Theme,
+            Self::General => Self::Sections,
             Self::Keybindings => Self::General,
             Self::Theme => Self::Keybindings,
+            Self::Sections => Self::Theme,
+        }
+    }
+}
+
+/// Which pane is focused in the Sections tab
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SectionsFocus {
+    #[default]
+    List,
+    Predicates,
+}
+
+/// State for the Sections tab within the settings modal
+#[derive(Debug, Clone)]
+pub struct SectionsState {
+    pub selected_section: usize,
+    pub focus: SectionsFocus,
+    pub pred_selected: usize,
+    pub editing: Option<SectionsEditing>,
+}
+
+/// Editing state for the Sections tab
+#[derive(Debug, Clone)]
+pub enum SectionsEditing {
+    RenamingSection { value: String },
+    EditingPredicate { value: String },
+    CreatingSection { value: String },
+}
+
+impl Default for SectionsState {
+    fn default() -> Self {
+        Self {
+            selected_section: 0,
+            focus: SectionsFocus::List,
+            pred_selected: 0,
+            editing: None,
         }
     }
 }
@@ -291,6 +364,8 @@ pub struct SettingsState {
     pub editing: Option<SettingsEditing>,
     /// Cached row data for the current tab
     pub rows: Vec<SettingsRow>,
+    /// State for the Sections tab (lazily initialised on first tab switch)
+    pub sections_state: SectionsState,
 }
 
 /// A single row in the settings list
@@ -312,6 +387,11 @@ pub enum SettingsEditing {
     KeyCapture {
         action_name: String,
         keys: Vec<String>,
+    },
+    /// Picking from a list of options (used for theme presets)
+    OptionPicker {
+        options: Vec<String>,
+        selected: usize,
     },
 }
 
@@ -337,8 +417,10 @@ pub enum InputAction {
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
     DeleteSession { session_id: SessionId },
+    DeleteMergedPrSessions { session_ids: Vec<SessionId> },
     RestartSession { session_id: SessionId },
     RemoveProject { project_id: ProjectId },
+    DeleteMultiRepoSession { session_id: MultiRepoSessionId },
 }
 
 /// Application UI state
@@ -385,6 +467,8 @@ pub struct AppUiState {
     pub selected_session_id: Option<SessionId>,
     /// Currently selected project
     pub selected_project_id: Option<ProjectId>,
+    /// Currently selected multi-repo session
+    pub selected_multi_repo_id: Option<MultiRepoSessionId>,
     /// Attach command to run after exiting TUI
     pub attach_command: Option<String>,
     /// Editor command + path to open after exiting TUI
@@ -413,6 +497,11 @@ pub struct AppUiState {
     /// palette entries without an async read on every keystroke. Refreshed
     /// alongside `list_items`.
     pub cascade_paused: bool,
+    /// Section names that are currently collapsed in the list view.
+    pub collapsed_sections: std::collections::HashSet<String>,
+    /// Last left-mouse click on a session-list row: (list index, timestamp).
+    /// Used to detect double-click on the same row within `DOUBLE_CLICK_WINDOW`.
+    pub last_left_click: Option<(usize, Instant)>,
 }
 
 impl Default for AppUiState {
@@ -439,6 +528,7 @@ impl Default for AppUiState {
             should_quit: false,
             selected_session_id: None,
             selected_project_id: None,
+            selected_multi_repo_id: None,
             attach_command: None,
             editor_command: None,
             shell_toggle_pair: None,
@@ -452,6 +542,8 @@ impl Default for AppUiState {
             throbber_state: throbber_widgets_tui::ThrobberState::default(),
             agent_states: HashMap::new(),
             cascade_paused: false,
+            collapsed_sections: std::collections::HashSet::new(),
+            last_left_click: None,
         }
     }
 }
@@ -741,14 +833,58 @@ impl App {
                                 // sessions, where SIGTSTP would freeze the
                                 // pane with no shell to recover from.
                                 let intercept_ctrl_z = !current_session.ends_with("-sh");
-                                match crate::tmux::attach_to_session(
+
+                                // Stamp last_attached_at so the in-tmux
+                                // switcher can sort Alt+Tab-style by MRU.
+                                let to_stamp = current_session.clone();
+                                if let Err(e) = self
+                                    .store
+                                    .mutate(move |state| {
+                                        if let Some(session) = state
+                                            .sessions
+                                            .values_mut()
+                                            .find(|s| s.matches_tmux_name(&to_stamp))
+                                        {
+                                            session.mark_attached();
+                                        }
+                                    })
+                                    .await
+                                {
+                                    warn!("Failed to stamp last_attached_at: {}", e);
+                                }
+
+                                let outcome = match crate::tmux::attach_to_session(
                                     &current_session,
                                     editor_triggers,
                                     intercept_ctrl_z,
                                 )
                                 .await
                                 {
-                                    Ok(crate::tmux::AttachResult::SwitchToShell) => {
+                                    Ok(o) => o,
+                                    Err(e) => {
+                                        warn!("Failed to attach to session: {}", e);
+                                        self.ui_state.modal = Modal::Error {
+                                            message: format!("Failed to attach: {}", e),
+                                        };
+                                        self.ui_state.shell_toggle_pair = None;
+                                        break;
+                                    }
+                                };
+
+                                // The in-session switcher may have run `tmux switch-client`
+                                // mid-attach, so the session we exited from isn't
+                                // necessarily the one we entered with. Trust the outcome.
+                                let switched_via_popup = outcome.final_session != current_session;
+                                current_session = outcome.final_session;
+                                if switched_via_popup {
+                                    // Picking a new session in the popup invalidates the
+                                    // shell-toggle pair (which is tied to a specific
+                                    // Claude/shell duo).
+                                    self.ui_state.shell_toggle_pair = None;
+                                }
+
+                                match outcome.result {
+                                    crate::tmux::AttachResult::SwitchToShell => {
                                         info!(
                                             "Shell toggle requested from session: {}",
                                             current_session
@@ -791,7 +927,7 @@ impl App {
                                         info!("Switching to session: {}", current_session);
                                         continue;
                                     }
-                                    Ok(crate::tmux::AttachResult::OpenEditor) => {
+                                    crate::tmux::AttachResult::OpenEditor => {
                                         info!(
                                             "OpenEditor requested from session: {}",
                                             current_session
@@ -802,17 +938,9 @@ impl App {
                                         crate::tmux::flush_stdin();
                                         continue;
                                     }
-                                    Ok(result) => {
+                                    result => {
                                         info!("Attach ended: {:?}", result);
                                         // Clear toggle state on normal detach
-                                        self.ui_state.shell_toggle_pair = None;
-                                        break;
-                                    }
-                                    Err(e) => {
-                                        warn!("Failed to attach to session: {}", e);
-                                        self.ui_state.modal = Modal::Error {
-                                            message: format!("Failed to attach: {}", e),
-                                        };
                                         self.ui_state.shell_toggle_pair = None;
                                         break;
                                     }

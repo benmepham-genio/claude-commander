@@ -78,6 +78,15 @@ pub enum StateUpdate {
         session_id: SessionId,
         message: String,
     },
+    /// Multi-repo session creation completed successfully
+    MultiRepoSessionCreated {
+        session_id: crate::session::MultiRepoSessionId,
+    },
+    /// Multi-repo session creation failed
+    MultiRepoSessionCreateFailed {
+        session_id: crate::session::MultiRepoSessionId,
+        message: String,
+    },
     /// State file was modified by another instance
     ExternalChange,
     /// Enriched PR info ready from background fetch
@@ -158,6 +167,8 @@ pub enum UserCommand {
     CheckoutBranch,
     /// Delete/kill current session
     DeleteSession,
+    /// Delete every session whose PR has merged on GitHub (palette-only)
+    DeleteMergedPrSessions,
     /// Rename the currently selected session (UI title only)
     RenameSession,
     /// Restart current session (kill tmux and recreate)
@@ -204,8 +215,12 @@ pub enum UserCommand {
     GenerateSummary,
     /// Scan a directory for git repos and add them as projects
     ScanDirectory,
+    /// Create a new multi-repo session
+    NewMultiRepoSession,
     /// Open the "Move to section" modal for the selected session.
     MoveToSection,
+    /// Collapse or expand the section containing the selected item.
+    ToggleSection,
 }
 
 impl UserCommand {
@@ -254,6 +269,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::NewProject => Self::NewProject,
             BindableAction::CheckoutBranch => Self::CheckoutBranch,
             BindableAction::DeleteSession => Self::DeleteSession,
+            BindableAction::DeleteMergedPrSessions => Self::DeleteMergedPrSessions,
             BindableAction::RenameSession => Self::RenameSession,
             BindableAction::RestartSession => Self::RestartSession,
             BindableAction::RemoveProject => Self::RemoveProject,
@@ -272,7 +288,9 @@ impl From<BindableAction> for UserCommand {
             BindableAction::PageDown => Self::PageDown,
             BindableAction::GenerateSummary => Self::GenerateSummary,
             BindableAction::ScanDirectory => Self::ScanDirectory,
+            BindableAction::NewMultiRepoSession => Self::NewMultiRepoSession,
             BindableAction::MoveToSection => Self::MoveToSection,
+            BindableAction::ToggleSection => Self::ToggleSection,
         }
     }
 }
@@ -750,6 +768,17 @@ mod tests {
             state: KeyEventState::empty(),
         };
         assert!(UserCommand::from_key(key, &b).is_none());
+    }
+
+    #[test]
+    fn test_toggle_section_not_bound_by_default() {
+        let b = kb();
+        // z is unbound by default, falls through to TextInput
+        let key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::TextInput('z'))
+        ));
     }
 
     #[test]

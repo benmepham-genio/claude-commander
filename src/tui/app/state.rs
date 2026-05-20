@@ -257,6 +257,35 @@ impl App {
                     self.refilter_checkout_branches();
                 }
             }
+            StateUpdate::MultiRepoSessionCreated { session_id } => {
+                debug!("Multi-repo session created: {}", session_id);
+                self.ui_state.modal = Modal::None;
+                self.ui_state.status_message = Some((
+                    format!("Created multi-repo session {}", session_id),
+                    Instant::now() + Duration::from_secs(3),
+                ));
+                self.refresh_list_items().await;
+                // Select the newly created multi-repo session
+                if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
+                    matches!(item, SessionListItem::MultiRepo { id, .. } if *id == session_id)
+                }) {
+                    self.ui_state.list_state.select(Some(idx));
+                }
+                self.update_selection();
+                self.spawn_preview_update();
+            }
+            StateUpdate::MultiRepoSessionCreateFailed {
+                session_id,
+                message,
+            } => {
+                debug!("Multi-repo session creation failed: {}", message);
+                let _ = self
+                    .session_manager
+                    .remove_creating_multi_repo_session(&session_id)
+                    .await;
+                self.refresh_list_items().await;
+                self.ui_state.modal = Modal::Error { message };
+            }
             StateUpdate::ExternalChange => {
                 debug!("External state change detected, refreshing UI");
                 self.refresh_list_items().await;
@@ -440,11 +469,20 @@ impl App {
     pub(super) async fn refresh_list_items(&mut self) {
         let state = self.store.read().await;
 
-        let items = if self.config.sections.is_empty() {
+        // Multi-repo sessions section (shown first if any exist)
+        let mut items = build_multi_repo_items(&state);
+
+        let grouped = if self.config.sections.is_empty() {
             build_project_grouped_items(&state, &self.ui_state.agent_states)
         } else {
-            build_section_grouped_items(&state, &self.config.sections, &self.ui_state.agent_states)
+            build_section_grouped_items(
+                &state,
+                &self.config.sections,
+                &self.ui_state.agent_states,
+                &self.ui_state.collapsed_sections,
+            )
         };
+        items.extend(grouped);
 
         let selectable: Vec<bool> = items.iter().map(|i| i.is_selectable()).collect();
         self.ui_state.list_items = items;
@@ -503,6 +541,7 @@ impl App {
             SessionListItem::Project { id, .. } => {
                 last_session.is_none() && last_project.is_some_and(|p| p == *id)
             }
+            SessionListItem::MultiRepo { .. } => false,
             SessionListItem::SectionHeader { .. } | SessionListItem::Spacer => false,
         });
 
@@ -594,6 +633,40 @@ fn worktree_item(
     }
 }
 
+/// Build the multi-repo session rows (shown above the per-project tree).
+fn build_multi_repo_items(state: &crate::config::AppState) -> Vec<SessionListItem> {
+    let mut items = Vec::new();
+    let mut mr_sessions: Vec<_> = state.multi_repo_sessions.values().collect();
+    if mr_sessions.is_empty() {
+        return items;
+    }
+    mr_sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    for mr in mr_sessions {
+        let project_names: Vec<String> = mr
+            .repos
+            .iter()
+            .filter_map(|entry| {
+                state
+                    .get_project(&entry.project_id)
+                    .map(|p| p.name.clone())
+            })
+            .collect();
+        items.push(SessionListItem::MultiRepo {
+            id: mr.id,
+            title: mr.title.clone(),
+            branch: mr.branch.clone(),
+            status: mr.status,
+            program: mr.program.clone(),
+            project_count: mr.repos.len(),
+            project_names,
+            created_at: mr.created_at,
+            agent_state: None,
+            unread: mr.unread,
+        });
+    }
+    items
+}
+
 fn build_project_grouped_items(
     state: &crate::config::AppState,
     agent_states: &HashMap<SessionId, AgentState>,
@@ -632,6 +705,7 @@ fn build_section_grouped_items(
     state: &crate::config::AppState,
     sections: &[crate::session::SectionConfig],
     agent_states: &HashMap<SessionId, AgentState>,
+    collapsed_sections: &std::collections::HashSet<String>,
 ) -> Vec<SessionListItem> {
     let sessions: Vec<crate::session::WorktreeSession> = state.sessions.values().cloned().collect();
     let groups = crate::session::build_sections(&sessions, sections);
@@ -644,10 +718,16 @@ fn build_section_grouped_items(
         if group_idx > 0 {
             items.push(SessionListItem::Spacer);
         }
+        let collapsed = collapsed_sections.contains(&group.name);
         items.push(SessionListItem::SectionHeader {
             name: group.name.clone(),
             count: group.sessions.len(),
+            collapsed,
         });
+
+        if collapsed {
+            continue;
+        }
 
         let is_in_progress = group.name == crate::session::IN_PROGRESS;
         // Preserve group sort order (oldest-first) while partitioning by project.

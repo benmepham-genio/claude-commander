@@ -616,6 +616,85 @@ fn test_stacked_child_row_has_extra_indent() {
     );
 }
 
+// -- section header collapsible rendering --
+
+fn make_section_header(name: &str, count: usize, collapsed: bool) -> SessionListItem {
+    SessionListItem::SectionHeader {
+        name: name.to_string(),
+        count,
+        collapsed,
+    }
+}
+
+#[test]
+fn test_section_header_expanded_shows_down_twistie() {
+    let items = vec![
+        make_section_header("In Progress", 2, false),
+        make_project("proj", 2),
+        make_worktree("sess-a"),
+    ];
+    let lines = render_tree(&items, 60, 4);
+    assert!(
+        lines[0].contains("▾"),
+        "Expected down-twistie for expanded section: {:?}",
+        lines[0]
+    );
+    assert!(
+        !lines[0].contains("▸"),
+        "Should not have right-twistie when expanded: {:?}",
+        lines[0]
+    );
+}
+
+#[test]
+fn test_section_header_collapsed_shows_right_twistie() {
+    let items = vec![make_section_header("Done", 3, true)];
+    let lines = render_tree(&items, 60, 2);
+    assert!(
+        lines[0].contains("▸"),
+        "Expected right-twistie for collapsed section: {:?}",
+        lines[0]
+    );
+    assert!(
+        !lines[0].contains("▾"),
+        "Should not have down-twistie when collapsed: {:?}",
+        lines[0]
+    );
+}
+
+#[test]
+fn test_section_header_shows_count() {
+    let items = vec![make_section_header("Review", 5, false)];
+    let lines = render_tree(&items, 60, 2);
+    assert!(
+        lines[0].contains("(5)"),
+        "Expected count in section header: {:?}",
+        lines[0]
+    );
+}
+
+#[test]
+fn test_section_header_is_selectable() {
+    let header = make_section_header("In Progress", 2, false);
+    assert!(header.is_selectable());
+}
+
+#[test]
+fn test_navigation_lands_on_section_headers() {
+    let mut state = TreeListState::new();
+    // Section header, spacer, section header — headers selectable, spacers not.
+    state.set_selectable(vec![true, false, true]);
+
+    state.next();
+    assert_eq!(state.selected(), Some(0));
+
+    state.next();
+    assert_eq!(state.selected(), Some(2));
+
+    state.previous();
+    assert_eq!(state.selected(), Some(0));
+}
+
 // -- show_session_program toggle --
 
 #[test]

@@ -48,6 +48,20 @@ fn classify_help_key(key: &crossterm::event::KeyEvent, kb: &crate::config::KeyBi
     }
 }
 
+/// Plain printable characters (no modifier, or Shift only) belong in a
+/// fuzzy-search query box and must not be intercepted by global j/k →
+/// NavigateUp/Down bindings. Other key combos (Ctrl/Alt, arrows, Tab, …)
+/// return `None` and fall through to the configurable resolver.
+fn palette_text_char(key: &crossterm::event::KeyEvent) -> Option<char> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    if let KeyCode::Char(c) = key.code
+        && (key.modifiers - KeyModifiers::SHIFT).is_empty()
+    {
+        return Some(c);
+    }
+    None
+}
+
 impl App {
     pub(super) async fn handle_input(&mut self, input: InputEvent) {
         match input {
@@ -137,6 +151,15 @@ impl App {
                 MouseEventKind::ScrollDown => {
                     self.scroll_pane_at(mouse.column, ScrollDirection::Down);
                 }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    // Ignore clicks while a modal is open — modal input is
+                    // keyboard-only and an underlying row select would be
+                    // confusing.
+                    if !matches!(self.ui_state.modal, Modal::None) {
+                        return;
+                    }
+                    self.handle_left_click(mouse.column, mouse.row).await;
+                }
                 _ => {}
             },
             InputEvent::Paste(text) => {
@@ -202,8 +225,17 @@ impl App {
             } => {
                 use crate::config::keybindings::BindableAction;
 
-                // Resolve configurable bindings first so arrow keys (and
-                // their j/k/Ctrl-n/p aliases) navigate the completion list.
+                // Plain printable chars are text input — keep them out of
+                // the j/k navigation bindings.
+                if let Some(c) = palette_text_char(&key) {
+                    value.push(c);
+                    completer.refilter(value);
+                    *scroll = 0;
+                    return;
+                }
+
+                // Arrow keys (and Ctrl-n/p aliases) navigate the completion
+                // list via the configurable resolver.
                 match self.config.keybindings.resolve(&key) {
                     Some(BindableAction::NavigateUp) => {
                         completer.move_selection_up();
@@ -255,11 +287,6 @@ impl App {
                         }
                         KeyCode::Backspace => {
                             value.pop();
-                            completer.refilter(value);
-                            *scroll = 0;
-                        }
-                        KeyCode::Char(c) => {
-                            value.push(c);
                             completer.refilter(value);
                             *scroll = 0;
                         }
@@ -323,7 +350,15 @@ impl App {
             } => {
                 use crate::config::keybindings::BindableAction;
 
-                // Resolve configurable bindings first for navigation
+                // Plain printable chars are text input — keep them out of
+                // the j/k navigation bindings.
+                if let Some(c) = palette_text_char(&key) {
+                    query.push(c);
+                    self.refilter_quick_switch();
+                    return;
+                }
+
+                // Arrow keys (and Ctrl-n/p aliases) navigate the match list.
                 match self.config.keybindings.resolve(&key) {
                     Some(BindableAction::NavigateUp) => {
                         if !matches.is_empty() {
@@ -401,10 +436,6 @@ impl App {
                             query.pop();
                             self.refilter_quick_switch();
                         }
-                        KeyCode::Char(c) => {
-                            query.push(c);
-                            self.refilter_quick_switch();
-                        }
                         _ => {}
                     },
                 }
@@ -420,7 +451,15 @@ impl App {
             } => {
                 use crate::config::keybindings::BindableAction;
 
-                // Resolve configurable bindings first for navigation
+                // Plain printable chars are text input — keep them out of
+                // the j/k navigation bindings.
+                if let Some(c) = palette_text_char(&key) {
+                    query.push(c);
+                    self.refilter_checkout_branches();
+                    return;
+                }
+
+                // Arrow keys (and Ctrl-n/p aliases) navigate the branch list.
                 match self.config.keybindings.resolve(&key) {
                     Some(BindableAction::NavigateUp) => {
                         if !filtered.is_empty() {
@@ -485,16 +524,168 @@ impl App {
                             query.pop();
                             self.refilter_checkout_branches();
                         }
-                        KeyCode::Char(c) => {
-                            query.push(c);
-                            self.refilter_checkout_branches();
+                        _ => {}
+                    },
+                }
+            }
+
+            Modal::MultiRepoProjectPicker {
+                projects,
+                selected_idx,
+                scroll,
+            } => {
+                use crate::config::keybindings::BindableAction;
+
+                // The picker has `projects.len() + 1` visible rows: row 0 is
+                // the "select all / deselect all" toggle, rows 1..=N are the
+                // real projects (mapped to `projects[i - 1]`).
+                let total_rows = projects.len() + 1;
+
+                match self.config.keybindings.resolve(&key) {
+                    Some(BindableAction::NavigateUp) => {
+                        *selected_idx = if *selected_idx == 0 {
+                            total_rows - 1
+                        } else {
+                            *selected_idx - 1
+                        };
+                        *scroll = super::actions::adjust_list_scroll(
+                            *selected_idx,
+                            *scroll,
+                            super::actions::LIST_MAX_VISIBLE,
+                        );
+                    }
+                    Some(BindableAction::NavigateDown) => {
+                        *selected_idx = (*selected_idx + 1) % total_rows;
+                        *scroll = super::actions::adjust_list_scroll(
+                            *selected_idx,
+                            *scroll,
+                            super::actions::LIST_MAX_VISIBLE,
+                        );
+                    }
+                    _ => match key.code {
+                        KeyCode::Esc => {
+                            self.ui_state.modal = Modal::None;
+                        }
+                        // Space toggles the row under the cursor. On row 0
+                        // (Select all): if any project is unchecked, check
+                        // them all; otherwise uncheck them all.
+                        KeyCode::Char(' ') => {
+                            if *selected_idx == 0 {
+                                let any_unchecked =
+                                    projects.iter().any(|(_, _, checked)| !checked);
+                                for entry in projects.iter_mut() {
+                                    entry.2 = any_unchecked;
+                                }
+                            } else {
+                                let idx = *selected_idx - 1;
+                                if let Some(entry) = projects.get_mut(idx) {
+                                    entry.2 = !entry.2;
+                                }
+                            }
+                        }
+                        // Enter confirms selection — move to title input
+                        KeyCode::Enter => {
+                            let selected: Vec<ProjectId> = projects
+                                .iter()
+                                .filter(|(_, _, checked)| *checked)
+                                .map(|(id, _, _)| *id)
+                                .collect();
+                            if selected.len() < 2 {
+                                self.ui_state.status_message = Some((
+                                    "Select at least 2 projects".to_string(),
+                                    Instant::now() + Duration::from_secs(3),
+                                ));
+                            } else {
+                                self.ui_state.modal = Modal::MultiRepoTitle {
+                                    project_ids: selected,
+                                    value: String::new(),
+                                };
+                            }
                         }
                         _ => {}
                     },
                 }
             }
 
+            Modal::MultiRepoTitle {
+                project_ids,
+                value,
+            } => match key.code {
+                KeyCode::Enter => {
+                    if value.trim().is_empty() {
+                        return;
+                    }
+                    let project_ids = project_ids.clone();
+                    let title = value.clone();
+                    self.ui_state.modal = Modal::Loading {
+                        title: "Creating Multi-Repo Session".to_string(),
+                        message: format!("Setting up worktrees across {} repos...", project_ids.len()),
+                    };
+                    self.start_multi_repo_session(project_ids, title).await;
+                }
+                KeyCode::Esc => {
+                    self.ui_state.modal = Modal::None;
+                }
+                KeyCode::Backspace => {
+                    value.pop();
+                }
+                KeyCode::Char(c) => {
+                    value.push(c);
+                }
+                _ => {}
+            },
+
             Modal::None => {}
+        }
+    }
+
+    /// Handle a left-mouse click at the given absolute terminal position.
+    ///
+    /// Clicks outside the session list area are ignored. Clicks on a selectable
+    /// row move the highlight there and refresh the preview; two clicks on the
+    /// same row within [`DOUBLE_CLICK_WINDOW`] act as `UserCommand::Select`
+    /// (attach for sessions, toggle for section headers).
+    async fn handle_left_click(&mut self, col: u16, row: u16) {
+        use super::selection::DOUBLE_CLICK_WINDOW;
+
+        let Some(idx) = self.list_index_at(col, row) else {
+            self.ui_state.last_left_click = None;
+            return;
+        };
+        // Skip rows that aren't selectable (e.g. Spacer).
+        match self.ui_state.list_items.get(idx) {
+            Some(item) if !item.is_selectable() => {
+                self.ui_state.last_left_click = None;
+                return;
+            }
+            None => {
+                self.ui_state.last_left_click = None;
+                return;
+            }
+            _ => {}
+        }
+
+        let now = Instant::now();
+        let is_double_click = matches!(
+            self.ui_state.last_left_click,
+            Some((prev_idx, prev_at))
+                if prev_idx == idx && now.duration_since(prev_at) <= DOUBLE_CLICK_WINDOW
+        );
+
+        if self.ui_state.list_state.selected() != Some(idx) {
+            self.ui_state.list_state.select(Some(idx));
+            self.update_selection();
+            self.ui_state.preview_update_spawned_at = None;
+            self.spawn_preview_update();
+        }
+
+        if is_double_click {
+            // Consume the click pair so a third click within the window
+            // doesn't fire again.
+            self.ui_state.last_left_click = None;
+            self.handle_command(UserCommand::Select).await;
+        } else {
+            self.ui_state.last_left_click = Some((idx, now));
         }
     }
 
@@ -508,13 +699,20 @@ impl App {
                 self.ui_state.list_state.next();
             }
             UserCommand::Select => {
-                self.handle_select().await;
+                if self.selected_item_is_section_header() {
+                    self.handle_toggle_section().await;
+                } else {
+                    self.handle_select().await;
+                }
             }
             UserCommand::SelectShell => {
                 self.handle_select_shell().await;
             }
             UserCommand::NewSession => {
-                self.handle_new_session();
+                self.handle_new_session().await;
+            }
+            UserCommand::NewMultiRepoSession => {
+                self.handle_new_multi_repo_session().await;
             }
             UserCommand::NewStackedSession => {
                 self.handle_new_stacked_session().await;
@@ -550,6 +748,9 @@ impl App {
             }
             UserCommand::DeleteSession => {
                 self.handle_delete_session();
+            }
+            UserCommand::DeleteMergedPrSessions => {
+                self.handle_delete_merged_pr_sessions().await;
             }
             UserCommand::RenameSession => {
                 self.handle_rename_session().await;
@@ -610,6 +811,7 @@ impl App {
                     selected_row: 0,
                     editing: None,
                     rows,
+                    sections_state: SectionsState::default(),
                 });
             }
             UserCommand::Quit => {
@@ -626,6 +828,9 @@ impl App {
                 {
                     self.spawn_ai_summary_if_needed(session_id);
                 }
+            }
+            UserCommand::ToggleSection => {
+                self.handle_toggle_section().await;
             }
             _ => {}
         }
@@ -730,5 +935,51 @@ mod tests {
             classify_help_key(&key(KeyCode::Char('x')), &kb),
             HelpKey::Ignore
         );
+    }
+
+    #[test]
+    fn palette_text_char_accepts_plain_letters_including_jk() {
+        for c in ['j', 'k', 'a', 'z', ' ', '1', '?'] {
+            assert_eq!(
+                palette_text_char(&key(KeyCode::Char(c))),
+                Some(c),
+                "plain {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn palette_text_char_accepts_shifted_letters() {
+        // Kitty-style: Char('K') with SHIFT.
+        assert_eq!(
+            palette_text_char(&KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT)),
+            Some('K')
+        );
+        // Non-kitty: Char('J') with no modifier.
+        assert_eq!(palette_text_char(&key(KeyCode::Char('J'))), Some('J'));
+    }
+
+    #[test]
+    fn palette_text_char_rejects_modifier_combos() {
+        assert_eq!(palette_text_char(&ctrl(KeyCode::Char('p'))), None);
+        assert_eq!(palette_text_char(&ctrl(KeyCode::Char('n'))), None);
+        assert_eq!(
+            palette_text_char(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT)),
+            None
+        );
+    }
+
+    #[test]
+    fn palette_text_char_rejects_non_char_keys() {
+        for code in [
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Tab,
+            KeyCode::Enter,
+            KeyCode::Esc,
+            KeyCode::Backspace,
+        ] {
+            assert_eq!(palette_text_char(&key(code)), None, "{code:?}");
+        }
     }
 }

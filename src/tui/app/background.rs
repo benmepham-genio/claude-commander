@@ -1,6 +1,13 @@
 //! Background tasks: preview updates, PR status checks, info fetching, AI summaries.
 
+use futures::StreamExt;
+
 use super::*;
+
+/// Cap concurrent subprocess fan-outs (e.g. `gh pr list` across all
+/// sessions). Each call holds 3+ pipe FDs, so unbounded fan-out can
+/// EMFILE under the macOS launchd 256-FD default.
+const PR_FANOUT_CONCURRENCY: usize = 8;
 
 impl App {
     /// Spawn a background task to fetch preview/diff/shell data.
@@ -19,10 +26,34 @@ impl App {
 
         let session_id = self.ui_state.selected_session_id;
         let project_id = self.ui_state.selected_project_id;
+        let multi_repo_id = self.ui_state.selected_multi_repo_id;
         let mgr = self.session_manager.clone();
         let tx = self.event_loop.sender();
 
         self.ui_state.preview_update_spawned_at = Some(Instant::now());
+
+        // Multi-repo sessions: just fetch tmux content, no diff
+        if let Some(mr_id) = multi_repo_id {
+            debug!("Spawning preview update for multi-repo session={}", mr_id);
+            tokio::spawn(async move {
+                let preview_content =
+                    if let Ok(content) = mgr.get_multi_repo_content(&mr_id).await {
+                        content.content
+                    } else {
+                        String::new()
+                    };
+                let _ = tx
+                    .send(AppEvent::StateUpdate(StateUpdate::PreviewReady {
+                        session_id: None,
+                        project_id: None,
+                        preview_content,
+                        diff_info: Arc::new(DiffInfo::empty()),
+                        shell_content: String::new(),
+                    }))
+                    .await;
+            });
+            return;
+        }
 
         debug!(
             "Spawning preview update for session={:?} project={:?}",
@@ -73,12 +104,14 @@ impl App {
                     .collect()
             };
 
-            let results = futures::future::join_all(sessions_to_check.into_iter().map(
+            let results: Vec<_> = futures::stream::iter(sessions_to_check.into_iter().map(
                 |(session_id, branch, repo_path)| async move {
                     let pr_result = check_pr_for_branch(&repo_path, &branch).await;
                     (session_id, pr_result)
                 },
             ))
+            .buffer_unordered(PR_FANOUT_CONCURRENCY)
+            .collect()
             .await;
 
             let _ = tx
