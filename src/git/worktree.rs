@@ -134,10 +134,15 @@ impl WorktreeManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        let git_add_start = std::time::Instant::now();
         let output = cmd
             .output()
             .await
             .map_err(|e| GitError::WorktreeError(format!("Failed to run git worktree: {}", e)))?;
+        info!(
+            "[timing] git worktree add took {}ms",
+            git_add_start.elapsed().as_millis()
+        );
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -152,9 +157,14 @@ impl WorktreeManager {
         );
 
         // Copy .worktreeinclude files (best-effort)
+        let includes_start = std::time::Instant::now();
         if let Err(e) = copy_worktree_includes(&repo_path, &worktree_path).await {
             warn!("Failed to copy worktree includes: {}", e);
         }
+        info!(
+            "[timing] copy_worktree_includes took {}ms",
+            includes_start.elapsed().as_millis()
+        );
 
         // Get the HEAD of the new worktree
         let head = Self::get_worktree_head_static(&worktree_path).await?;

@@ -36,6 +36,7 @@ pub enum BindableAction {
     NewProject,
     CheckoutBranch,
     DeleteSession,
+    DeleteMergedPrSessions,
     RenameSession,
     RestartSession,
     RemoveProject,
@@ -56,6 +57,7 @@ pub enum BindableAction {
     ScanDirectory,
     NewMultiRepoSession,
     MoveToSection,
+    ToggleSection,
 }
 
 impl BindableAction {
@@ -74,6 +76,7 @@ impl BindableAction {
         Self::NewProject,
         Self::CheckoutBranch,
         Self::DeleteSession,
+        Self::DeleteMergedPrSessions,
         Self::RenameSession,
         Self::RestartSession,
         Self::RemoveProject,
@@ -82,6 +85,7 @@ impl BindableAction {
         Self::ScanDirectory,
         Self::NewMultiRepoSession,
         Self::MoveToSection,
+        Self::ToggleSection,
         Self::TogglePane,
         Self::TogglePaneReverse,
         Self::ShrinkLeftPane,
@@ -112,6 +116,7 @@ impl BindableAction {
             Self::NewProject => "new_project",
             Self::CheckoutBranch => "checkout_branch",
             Self::DeleteSession => "delete_session",
+            Self::DeleteMergedPrSessions => "delete_merged_pr_sessions",
             Self::RenameSession => "rename_session",
             Self::RestartSession => "restart_session",
             Self::RemoveProject => "remove_project",
@@ -132,6 +137,7 @@ impl BindableAction {
             Self::ScanDirectory => "scan_directory",
             Self::NewMultiRepoSession => "new_multi_repo_session",
             Self::MoveToSection => "move_to_section",
+            Self::ToggleSection => "toggle_section",
         }
     }
 
@@ -151,6 +157,7 @@ impl BindableAction {
             Self::NewProject => "New project (add git repo)",
             Self::CheckoutBranch => "Checkout existing branch",
             Self::DeleteSession => "Delete/kill session",
+            Self::DeleteMergedPrSessions => "Delete sessions with merged PRs",
             Self::RenameSession => "Rename session",
             Self::RestartSession => "Restart session",
             Self::RemoveProject => "Remove project",
@@ -171,6 +178,7 @@ impl BindableAction {
             Self::ScanDirectory => "Scan directory for repos",
             Self::NewMultiRepoSession => "New multi-repo session",
             Self::MoveToSection => "Move session to section…",
+            Self::ToggleSection => "Collapse/expand section",
         }
     }
 
@@ -188,6 +196,7 @@ impl BindableAction {
             | Self::NewProject
             | Self::CheckoutBranch
             | Self::DeleteSession
+            | Self::DeleteMergedPrSessions
             | Self::RenameSession
             | Self::RestartSession
             | Self::RemoveProject
@@ -195,7 +204,8 @@ impl BindableAction {
             | Self::OpenPullRequest
             | Self::ScanDirectory
             | Self::NewMultiRepoSession
-            | Self::MoveToSection => "Session Management",
+            | Self::MoveToSection
+            | Self::ToggleSection => "Session Management",
             Self::TogglePane
             | Self::TogglePaneReverse
             | Self::ShrinkLeftPane
@@ -225,6 +235,7 @@ impl FromStr for BindableAction {
             "new_project" => Ok(Self::NewProject),
             "checkout_branch" => Ok(Self::CheckoutBranch),
             "delete_session" => Ok(Self::DeleteSession),
+            "delete_merged_pr_sessions" => Ok(Self::DeleteMergedPrSessions),
             "rename_session" => Ok(Self::RenameSession),
             "restart_session" => Ok(Self::RestartSession),
             "remove_project" => Ok(Self::RemoveProject),
@@ -245,6 +256,7 @@ impl FromStr for BindableAction {
             "scan_directory" => Ok(Self::ScanDirectory),
             "new_multi_repo_session" => Ok(Self::NewMultiRepoSession),
             "move_to_section" => Ok(Self::MoveToSection),
+            "toggle_section" => Ok(Self::ToggleSection),
             _ => Err(format!("unknown action: {s}")),
         }
     }
@@ -592,6 +604,7 @@ impl Default for KeyBindings {
             BindableAction::ScanDirectory,
             vec![kb(KeyCode::Char('S'), shift)],
         );
+        bindings.insert(BindableAction::ToggleSection, vec![]);
 
         // Info Pane
         bindings.insert(
@@ -886,6 +899,12 @@ mod tests {
         let kb = KeyBindings::default();
         let key = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE);
         assert_eq!(kb.resolve(&key), Some(BindableAction::NewStackedSession));
+    }
+
+    #[test]
+    fn test_toggle_section_default_unbound() {
+        let kb = KeyBindings::default();
+        assert!(kb.keys_for(BindableAction::ToggleSection).is_empty());
     }
 
     #[test]

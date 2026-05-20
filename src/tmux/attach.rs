@@ -5,10 +5,12 @@
 
 use std::io::Write;
 use std::os::unix::io::AsRawFd;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::terminal::{self, disable_raw_mode, enable_raw_mode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, info, warn};
 
 use crate::error::Result;
@@ -26,6 +28,17 @@ pub enum AttachResult {
     SessionEnded,
     /// An error occurred during attachment
     Error(String),
+}
+
+/// Outcome of an attach. `final_session` is the tmux session the client
+/// was attached to when the attach loop exited — usually the same as the
+/// session passed in, but updated when the user picks a different
+/// session via the in-session switcher (Ctrl+O), which runs `tmux
+/// switch-client` mid-attach.
+#[derive(Debug)]
+pub struct AttachOutcome {
+    pub result: AttachResult,
+    pub final_session: String,
 }
 
 /// Async PTY attachment - runs entirely within tokio
@@ -48,7 +61,7 @@ pub async fn attach_to_session(
     session_name: &str,
     editor_triggers: Vec<Vec<u8>>,
     intercept_ctrl_z: bool,
-) -> Result<AttachResult> {
+) -> Result<AttachOutcome> {
     // Get terminal size
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
 
@@ -69,9 +82,25 @@ pub async fn attach_to_session(
     info!("Enabling raw mode for PTY session");
     enable_raw_mode()?;
 
+    // Shared state for the in-session switcher: the popup task updates
+    // `current_session` after a successful `tmux switch-client`, and the
+    // attach outcome reports it back to the caller so subsequent state
+    // (shell-toggle pair, editor open) uses the right session.
+    let current_session = Arc::new(Mutex::new(session_name.to_string()));
+    let popup_open = Arc::new(AtomicBool::new(false));
+
     // Run the async I/O loop
     info!("Starting async I/O loop");
-    let result = run_async_loop(pty, pty_fd, &mut child, editor_triggers, intercept_ctrl_z).await;
+    let result = run_async_loop(
+        pty,
+        pty_fd,
+        &mut child,
+        editor_triggers,
+        intercept_ctrl_z,
+        current_session.clone(),
+        popup_open,
+    )
+    .await;
     info!("Async I/O loop ended with result: {:?}", result);
 
     // Restore terminal
@@ -94,9 +123,16 @@ pub async fn attach_to_session(
     flush_stdin();
     log_pending_stdin("after second tcflush");
 
-    info!("Attach complete, result: {:?}", result);
+    let final_session = current_session.lock().await.clone();
+    info!(
+        "Attach complete, result: {:?}, final session: {}",
+        result, final_session
+    );
 
-    Ok(result)
+    Ok(AttachOutcome {
+        result,
+        final_session,
+    })
 }
 
 /// Return true if `haystack` contains `needle` as a contiguous subsequence.
@@ -205,6 +241,8 @@ async fn run_async_loop(
     child: &mut tokio::process::Child,
     editor_triggers: Vec<Vec<u8>>,
     intercept_ctrl_z: bool,
+    current_session: Arc<Mutex<String>>,
+    popup_open: Arc<AtomicBool>,
 ) -> AttachResult {
     // Channel for shutdown signal
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<AttachResult>(1);
@@ -255,6 +293,19 @@ async fn run_async_loop(
                 Ok(n) => {
                     let data = &buf[..n];
 
+                    // While the in-session switcher popup is open, forward
+                    // every byte to tmux verbatim. tmux routes keystrokes to
+                    // the popup (which has its own PTY), and our hotkeys
+                    // (Ctrl+Q etc.) shouldn't fire while the user is in the
+                    // picker.
+                    if popup_open.load(Ordering::Acquire) {
+                        if pty_writer.write_all(data).await.is_err() {
+                            break;
+                        }
+                        let _ = pty_writer.flush().await;
+                        continue;
+                    }
+
                     // Check for Ctrl+Q (0x11) anywhere in the input
                     if data.contains(&0x11) {
                         debug!("Ctrl+Q detected, detaching");
@@ -267,6 +318,37 @@ async fn run_async_loop(
                         debug!("Ctrl+\\ detected, switching to shell");
                         let _ = stdin_shutdown.send(AttachResult::SwitchToShell).await;
                         break;
+                    }
+
+                    // Check for Ctrl+O (0x0F): open the switcher popup over
+                    // the attached pane. We swallow the byte (don't forward
+                    // it) and spawn a task that runs `tmux display-popup`
+                    // followed by `tmux switch-client` on selection. The
+                    // attach loop keeps running so the user stays "in" the
+                    // pane the whole time.
+                    if data.contains(&0x0F) {
+                        if popup_open
+                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                            .is_ok()
+                        {
+                            debug!("Ctrl+O detected, spawning switcher popup");
+                            let popup_open = popup_open.clone();
+                            let current_session = current_session.clone();
+                            tokio::spawn(async move {
+                                run_switcher_popup(current_session, popup_open).await;
+                            });
+                        }
+                        // Skip the 0x0F byte; never forward it.
+                        let filtered: Vec<u8> =
+                            data.iter().copied().filter(|b| *b != 0x0F).collect();
+                        if filtered.is_empty() {
+                            continue;
+                        }
+                        if pty_writer.write_all(&filtered).await.is_err() {
+                            break;
+                        }
+                        let _ = pty_writer.flush().await;
+                        continue;
                     }
 
                     // Check for any user-configured editor trigger bytes.
@@ -347,6 +429,76 @@ async fn run_async_loop(
     resize_task.abort();
 
     result
+}
+
+/// Single-quote shell-escape `s` for embedding in a tmux `display-popup`
+/// shell command. Wraps in `'…'` and escapes any embedded single quotes
+/// as `'\''` (close-quote, literal quote, re-open-quote).
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Run the in-session switcher: spawn a `tmux display-popup` showing
+/// the picker subcommand, then on a non-empty result `tmux
+/// switch-client` to the chosen session and record it in
+/// `current_session`. Always clears `popup_open` before returning.
+async fn run_switcher_popup(current_session: Arc<Mutex<String>>, popup_open: Arc<AtomicBool>) {
+    let current_name = current_session.lock().await.clone();
+    let new_session = run_switcher_popup_inner(&current_name).await;
+    if let Some(name) = new_session {
+        info!("Switcher picked session: {}", name);
+        let switch_status = tokio::process::Command::new("tmux")
+            .args(["switch-client", "-t", &name])
+            .status()
+            .await;
+        match switch_status {
+            Ok(s) if s.success() => {
+                *current_session.lock().await = name;
+            }
+            Ok(s) => warn!("tmux switch-client exited with {:?}", s.code()),
+            Err(e) => warn!("Failed to spawn tmux switch-client: {}", e),
+        }
+    }
+    popup_open.store(false, Ordering::Release);
+}
+
+/// Spawn the popup and return the chosen session name, if any.
+async fn run_switcher_popup_inner(current_session: &str) -> Option<String> {
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "claude-commander".to_string());
+    let tmp = std::env::temp_dir().join(format!(
+        "cc-pick-{}-{}.txt",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+
+    let popup_cmd = format!(
+        "{} pick-session --out {} --current {}",
+        shell_quote(&exe),
+        shell_quote(&tmp.to_string_lossy()),
+        shell_quote(current_session),
+    );
+
+    let status = tokio::process::Command::new("tmux")
+        .args(["display-popup", "-E", "-h", "70%", "-w", "70%", &popup_cmd])
+        .status()
+        .await;
+
+    match status {
+        Ok(s) if !s.success() => {
+            warn!("tmux display-popup exited with {:?}", s.code());
+        }
+        Err(e) => {
+            warn!("Failed to spawn tmux display-popup: {}", e);
+        }
+        _ => {}
+    }
+
+    let pick = tokio::fs::read_to_string(&tmp).await.ok();
+    let _ = tokio::fs::remove_file(&tmp).await;
+    pick.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 #[cfg(test)]

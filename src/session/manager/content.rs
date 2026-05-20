@@ -7,7 +7,7 @@ impl SessionManager {
     pub async fn get_attach_command(&self, session_id: &SessionId) -> Result<String> {
         info!("get_attach_command called for session: {}", session_id);
 
-        let (tmux_name, worktree_path, program, status_bar) = {
+        let (tmux_name, worktree_path, title, program, status_bar) = {
             let state = self.store.read().await;
             let session = state
                 .get_session(session_id)
@@ -26,6 +26,7 @@ impl SessionManager {
             (
                 session.tmux_session_name.clone(),
                 session.worktree_path.clone(),
+                session.title.clone(),
                 session.program.clone(),
                 self.status_bar_info(session, &state),
             )
@@ -61,6 +62,8 @@ impl SessionManager {
             } else {
                 program.clone()
             };
+            let resume_program =
+                super::lifecycle::program_with_session_name(&resume_program, &title);
             info!("Recreating tmux session with: {}", resume_program);
             self.tmux
                 .create_session(&tmux_name, &worktree_path, Some(&resume_program))

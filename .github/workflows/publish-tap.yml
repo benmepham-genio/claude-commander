@@ -21,7 +21,7 @@ jobs:
           make_latest: 'true'
 
       - name: Bump claude-commander in sizeak/homebrew-tap
-        uses: mislav/bump-homebrew-formula-action@v3
+        uses: sizeak/bump-homebrew-formula-action@v4.1-303fix
         with:
           formula-name: claude-commander
           formula-path: Formula/claude-commander.rb

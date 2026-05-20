@@ -167,6 +167,8 @@ pub enum UserCommand {
     CheckoutBranch,
     /// Delete/kill current session
     DeleteSession,
+    /// Delete every session whose PR has merged on GitHub (palette-only)
+    DeleteMergedPrSessions,
     /// Rename the currently selected session (UI title only)
     RenameSession,
     /// Restart current session (kill tmux and recreate)
@@ -217,6 +219,8 @@ pub enum UserCommand {
     NewMultiRepoSession,
     /// Open the "Move to section" modal for the selected session.
     MoveToSection,
+    /// Collapse or expand the section containing the selected item.
+    ToggleSection,
 }
 
 impl UserCommand {
@@ -265,6 +269,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::NewProject => Self::NewProject,
             BindableAction::CheckoutBranch => Self::CheckoutBranch,
             BindableAction::DeleteSession => Self::DeleteSession,
+            BindableAction::DeleteMergedPrSessions => Self::DeleteMergedPrSessions,
             BindableAction::RenameSession => Self::RenameSession,
             BindableAction::RestartSession => Self::RestartSession,
             BindableAction::RemoveProject => Self::RemoveProject,
@@ -285,6 +290,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::ScanDirectory => Self::ScanDirectory,
             BindableAction::NewMultiRepoSession => Self::NewMultiRepoSession,
             BindableAction::MoveToSection => Self::MoveToSection,
+            BindableAction::ToggleSection => Self::ToggleSection,
         }
     }
 }
@@ -762,6 +768,17 @@ mod tests {
             state: KeyEventState::empty(),
         };
         assert!(UserCommand::from_key(key, &b).is_none());
+    }
+
+    #[test]
+    fn test_toggle_section_not_bound_by_default() {
+        let b = kb();
+        // z is unbound by default, falls through to TextInput
+        let key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::TextInput('z'))
+        ));
     }
 
     #[test]

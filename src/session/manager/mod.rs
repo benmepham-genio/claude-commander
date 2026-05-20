@@ -160,6 +160,41 @@ pub fn sanitize_name(name: &str) -> String {
         .to_string()
 }
 
+/// Compute the branch name a new session would target, given the user's typed
+/// title and the configured `branch_prefix`. Mirrors the logic in
+/// `SessionManager::generate_branch_name`, but as a free function so the new
+/// session dialog can preview the result without holding a `SessionManager`.
+pub fn candidate_branch_name(title: &str, branch_prefix: &str) -> String {
+    let sanitized = sanitize_name(title);
+    if branch_prefix.is_empty() {
+        sanitized
+    } else {
+        format!("{}/{}", branch_prefix, sanitized)
+    }
+}
+
+/// Look up whether the candidate branch implied by `title` would resolve to an
+/// existing branch from `existing`. Used by the new-session dialog to surface a
+/// "will check out existing branch" hint as the user types.
+///
+/// `existing` is the flat list of local-name branch identifiers from
+/// `load_branch_entries` (local names and the stripped form of `origin/<x>`
+/// remote-only entries), matching what `finalize_session` will resolve.
+pub fn match_existing_branch<'a>(
+    title: &str,
+    branch_prefix: &str,
+    existing: &'a [String],
+) -> Option<&'a str> {
+    let candidate = candidate_branch_name(title, branch_prefix);
+    if candidate.is_empty() {
+        return None;
+    }
+    existing
+        .iter()
+        .find(|b| b.as_str() == candidate)
+        .map(|b| b.as_str())
+}
+
 /// Decide whether the `[branch]` annotation should be shown next to a session
 /// title.
 ///

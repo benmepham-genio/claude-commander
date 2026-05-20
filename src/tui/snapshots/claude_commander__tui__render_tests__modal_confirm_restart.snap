@@ -1,6 +1,5 @@
 ---
 source: src/tui/render_tests.rs
-assertion_line: 499
 expression: terminal.backend()
 ---
 "                                                                                                                        "
@@ -13,10 +12,10 @@ expression: terminal.backend()
 "                                                                                                                        "
 "                                                                                                                        "
 "                                                                                                                        "
-"                              ┌ Restart Session ─────────────────────────────────────────┐                              "
+"                              ╭ Restart Session ─────────────────────────────────────────╮                              "
 "                              │This will kill the current tmux session and start a fresh │                              "
 "                              │one.                                                      │                              "
-"                              └──────────────────────────────────────────────────────────┘                              "
+"                              ╰──────────────────────────────────────────────────────────╯                              "
 "                                                                                                                        "
 "                                                                                                                        "
 "                                                                                                                        "

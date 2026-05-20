@@ -2,7 +2,7 @@
 source: src/tui/render_tests.rs
 expression: terminal.backend()
 ---
-"┌ Preview · Info · Shell ──────────────────────────────────┐"
+"╭ Preview · Info · Shell ──────────────────────────────────╮"
 "│Select a session to see info                              │"
 "│                                                          │"
 "│                                                          │"
@@ -11,4 +11,4 @@ expression: terminal.backend()
 "│                                                          │"
 "│                                                          │"
 "│                                                          │"
-"└──────────────────────────────────────────────────────────┘"
+"╰──────────────────────────────────────────────────────────╯"

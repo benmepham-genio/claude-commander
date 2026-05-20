@@ -94,7 +94,19 @@ impl<'a> TreeList<'a> {
 
                     ListItem::new(line)
                 }
-                SessionListItem::Spacer => ListItem::new(Line::from("")),
+                SessionListItem::Spacer => {
+                    let rule: String = "─".repeat(20);
+                    let line = Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(
+                            rule,
+                            Style::default()
+                                .fg(self.theme.text_secondary)
+                                .add_modifier(Modifier::DIM),
+                        ),
+                    ]);
+                    ListItem::new(line)
+                }
 
                 SessionListItem::Worktree {
                     title,
@@ -260,9 +272,15 @@ impl<'a> TreeList<'a> {
 
                     ListItem::new(Line::from(spans))
                 }
-                SessionListItem::SectionHeader { name, count } => {
+                SessionListItem::SectionHeader {
+                    name,
+                    count,
+                    collapsed,
+                } => {
+                    let twistie = if *collapsed { "▸ " } else { "▾ " };
                     let line = Line::from(vec![
                         Span::raw(" "),
+                        Span::styled(twistie, Style::default().fg(self.theme.text_secondary)),
                         Span::styled(
                             name.clone(),
                             Style::default()

@@ -7,6 +7,17 @@ use ratatui::style::{Color, Style};
 
 use crate::config::theme::{AgentWorkingStyle, ThemeOverrides};
 
+/// All recognised preset names, in display order.
+pub const PRESET_NAMES: &[&str] = &[
+    "(auto)",
+    "basic",
+    "indexed",
+    "truecolor",
+    "monokai-dimmed",
+    "zedokai",
+    "rose-pine",
+];
+
 /// Terminal color capability
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ColorMode {
@@ -311,14 +322,198 @@ impl Theme {
         }
     }
 
+    /// Monokai Dimmed — a muted/desaturated take on the classic Monokai color scheme
+    pub fn monokai_dimmed() -> Self {
+        Self {
+            border_focused: Color::Rgb(181, 165, 106),  // Muted gold/yellow #b5a56a
+            border_unfocused: Color::Rgb(85, 85, 85),   // Dark gray #555555
+
+            selection_bg: Color::Rgb(58, 61, 65),       // Dark blue-gray #3a3d41
+            selection_fg: Some(Color::Rgb(255, 255, 255)),
+
+            status_creating: Color::Rgb(220, 220, 170), // Muted yellow #dcdcaa
+            status_running: Color::Rgb(181, 206, 168),  // Muted green #b5cea8
+            status_stopped: Color::Rgb(128, 128, 128),  // Gray #808080
+            status_pr: Color::Rgb(181, 206, 168),       // Muted green
+            status_pr_merged: Color::Rgb(128, 128, 128), // Gray
+
+            pr_open: Color::Rgb(103, 150, 230),         // Muted blue #6796e6
+            pr_draft: Color::Rgb(128, 128, 128),        // Gray #808080
+            pr_closed: Color::Rgb(209, 105, 105),       // Muted red #d16969
+
+            pr_pill_open_bg: Color::Rgb(45, 65, 120),   // Dark muted blue
+            pr_pill_draft_bg: Color::Rgb(70, 70, 70),   // Dark gray
+            pr_pill_closed_bg: Color::Rgb(120, 50, 50), // Dark muted red
+            pr_pill_review_bg: Color::Rgb(55, 90, 55),  // Dark muted green
+            pr_pill_merged_bg: Color::Rgb(85, 60, 100), // Dark muted purple
+            pr_pill_text: Color::Rgb(230, 230, 230),    // Near-white
+
+            agent_working: AgentWorkingStyle::Rainbow,
+            agent_waiting: Color::Rgb(220, 220, 170),   // Muted yellow #dcdcaa
+            unread_indicator: Color::Rgb(103, 150, 230), // Muted blue #6796e6
+
+            text_primary: Color::Rgb(212, 212, 212),    // Light gray #d4d4d4
+            text_secondary: Color::Rgb(150, 150, 150),  // Medium gray #969696
+            text_accent: Color::Rgb(124, 165, 212),     // Muted blue #7ca5d4
+            project_colors: vec![
+                (Color::Rgb(181, 165, 106), Color::Rgb(220, 220, 170)), // Gold / muted yellow
+                (Color::Rgb(100, 160, 160), Color::Rgb(140, 200, 200)), // Teal
+                (Color::Rgb(206, 145, 120), Color::Rgb(230, 180, 160)), // Coral
+                (Color::Rgb(106, 130, 180), Color::Rgb(150, 170, 210)), // Slate-blue
+                (Color::Rgb(140, 170, 140), Color::Rgb(181, 206, 168)), // Sage
+                (Color::Rgb(170, 140, 170), Color::Rgb(197, 134, 192)), // Mauve
+            ],
+
+            diff_added: Color::Rgb(181, 206, 168),      // Muted green #b5cea8
+            diff_removed: Color::Rgb(209, 105, 105),    // Muted red #d16969
+            diff_hunk_header: Color::Rgb(197, 134, 192), // Muted purple #c586c0
+            diff_file_header: Color::Rgb(220, 220, 170), // Muted yellow #dcdcaa
+            diff_context: Color::Reset,
+
+            modal_info: Color::Rgb(124, 165, 212),      // Muted blue #7ca5d4
+            modal_warning: Color::Rgb(220, 220, 170),   // Muted yellow #dcdcaa
+            modal_error: Color::Rgb(209, 105, 105),     // Muted red #d16969
+
+            palette_command_bg: Color::Rgb(50, 50, 50), // Dark gray
+            palette_command_fg: Color::Rgb(204, 204, 204), // Light gray #cccccc
+
+            status_bar_bg: Color::Rgb(45, 45, 45),      // Dark gray #2d2d2d
+            status_bar_fg: Color::Rgb(204, 204, 204),   // Light gray #cccccc
+        }
+    }
+
+    /// Zedokai — inspired by the Zed editor's Monokai variant with a filter/spectrum twist
+    pub fn zedokai() -> Self {
+        Self {
+            border_focused: Color::Rgb(249, 38, 114),   // Vivid pink #f92672
+            border_unfocused: Color::Rgb(73, 72, 62),   // Dark gray #49483e
+
+            selection_bg: Color::Rgb(73, 72, 62),       // Dark warm gray #49483e
+            selection_fg: Some(Color::Rgb(248, 248, 242)), // Bright white #f8f8f2
+
+            status_creating: Color::Rgb(253, 151, 31),  // Vivid orange #fd971f
+            status_running: Color::Rgb(166, 226, 46),   // Bright green #a6e22e
+            status_stopped: Color::Rgb(117, 113, 94),   // Warm gray #75715e
+            status_pr: Color::Rgb(166, 226, 46),        // Bright green
+            status_pr_merged: Color::Rgb(117, 113, 94), // Warm gray
+
+            pr_open: Color::Rgb(102, 217, 239),         // Sky blue #66d9ef
+            pr_draft: Color::Rgb(117, 113, 94),         // Warm gray #75715e
+            pr_closed: Color::Rgb(249, 38, 114),        // Pink #f92672
+
+            pr_pill_open_bg: Color::Rgb(30, 90, 100),   // Dark cyan
+            pr_pill_draft_bg: Color::Rgb(55, 55, 48),   // Dark warm gray
+            pr_pill_closed_bg: Color::Rgb(120, 15, 55), // Dark pink
+            pr_pill_review_bg: Color::Rgb(50, 100, 15), // Dark green
+            pr_pill_merged_bg: Color::Rgb(70, 45, 100), // Dark purple
+            pr_pill_text: Color::Rgb(248, 248, 242),    // Bright white #f8f8f2
+
+            agent_working: AgentWorkingStyle::Rainbow,
+            agent_waiting: Color::Rgb(253, 151, 31),    // Orange #fd971f
+            unread_indicator: Color::Rgb(102, 217, 239), // Sky blue #66d9ef
+
+            text_primary: Color::Rgb(248, 248, 242),    // Warm white #f8f8f2
+            text_secondary: Color::Rgb(117, 113, 94),   // Warm gray #75715e
+            text_accent: Color::Rgb(174, 129, 255),     // Vivid purple #ae81ff
+            project_colors: vec![
+                (Color::Rgb(249, 38, 114), Color::Rgb(255, 100, 150)),  // Pink
+                (Color::Rgb(102, 217, 239), Color::Rgb(140, 230, 245)), // Cyan
+                (Color::Rgb(166, 226, 46), Color::Rgb(200, 240, 110)),  // Green
+                (Color::Rgb(253, 151, 31), Color::Rgb(255, 190, 100)),  // Orange
+                (Color::Rgb(174, 129, 255), Color::Rgb(200, 170, 255)), // Purple
+                (Color::Rgb(230, 219, 116), Color::Rgb(245, 235, 160)), // Yellow
+            ],
+
+            diff_added: Color::Rgb(166, 226, 46),       // Green #a6e22e
+            diff_removed: Color::Rgb(249, 38, 114),     // Pink #f92672
+            diff_hunk_header: Color::Rgb(102, 217, 239), // Blue #66d9ef
+            diff_file_header: Color::Rgb(230, 219, 116), // Yellow #e6db74
+            diff_context: Color::Reset,
+
+            modal_info: Color::Rgb(102, 217, 239),      // Cyan #66d9ef
+            modal_warning: Color::Rgb(253, 151, 31),    // Orange #fd971f
+            modal_error: Color::Rgb(249, 38, 114),      // Pink #f92672
+
+            palette_command_bg: Color::Rgb(50, 50, 42), // Dark warm gray
+            palette_command_fg: Color::Rgb(248, 248, 242), // Warm white #f8f8f2
+
+            status_bar_bg: Color::Rgb(30, 31, 28),      // Very dark bg #1e1f1c
+            status_bar_fg: Color::Rgb(248, 248, 242),   // Warm white #f8f8f2
+        }
+    }
+
+    /// Rosé Pine — a soft pink/rose aesthetic inspired by Rosé Pine
+    pub fn rose_pine() -> Self {
+        Self {
+            border_focused: Color::Rgb(235, 111, 146),  // Rose/pink #eb6f92
+            border_unfocused: Color::Rgb(57, 53, 82),   // Muted overlay #393552
+
+            selection_bg: Color::Rgb(42, 39, 63),       // Subtle highlight #2a273f
+            selection_fg: Some(Color::Rgb(224, 222, 244)), // Soft white #e0def4
+
+            status_creating: Color::Rgb(246, 193, 119), // Gold #f6c177
+            status_running: Color::Rgb(156, 207, 216),  // Foam/teal #9ccfd8
+            status_stopped: Color::Rgb(110, 106, 134),  // Muted #6e6a86
+            status_pr: Color::Rgb(156, 207, 216),       // Foam/teal
+            status_pr_merged: Color::Rgb(110, 106, 134), // Muted
+
+            pr_open: Color::Rgb(196, 167, 231),         // Iris/purple #c4a7e7
+            pr_draft: Color::Rgb(110, 106, 134),        // Muted #6e6a86
+            pr_closed: Color::Rgb(235, 111, 146),       // Love/pink #eb6f92
+
+            pr_pill_open_bg: Color::Rgb(80, 60, 110),   // Dark iris
+            pr_pill_draft_bg: Color::Rgb(55, 53, 70),   // Dark muted
+            pr_pill_closed_bg: Color::Rgb(110, 45, 65), // Dark love
+            pr_pill_review_bg: Color::Rgb(40, 90, 95),  // Dark foam
+            pr_pill_merged_bg: Color::Rgb(50, 40, 75),  // Dark iris variant
+            pr_pill_text: Color::Rgb(224, 222, 244),    // Soft white #e0def4
+
+            agent_working: AgentWorkingStyle::Rainbow,
+            agent_waiting: Color::Rgb(246, 193, 119),   // Gold #f6c177
+            unread_indicator: Color::Rgb(196, 167, 231), // Iris #c4a7e7
+
+            text_primary: Color::Rgb(224, 222, 244),    // Soft white #e0def4
+            text_secondary: Color::Rgb(144, 140, 170),  // Subtle #908caa
+            text_accent: Color::Rgb(196, 167, 231),     // Iris/purple #c4a7e7
+            project_colors: vec![
+                (Color::Rgb(235, 111, 146), Color::Rgb(235, 188, 186)), // Rose / rose-lighter
+                (Color::Rgb(196, 167, 231), Color::Rgb(196, 167, 231)), // Iris
+                (Color::Rgb(156, 207, 216), Color::Rgb(156, 207, 216)), // Foam
+                (Color::Rgb(246, 193, 119), Color::Rgb(246, 193, 119)), // Gold
+                (Color::Rgb(49, 116, 143), Color::Rgb(62, 143, 176)),  // Pine
+                (Color::Rgb(235, 111, 146), Color::Rgb(215, 130, 126)), // Love variant
+            ],
+
+            diff_added: Color::Rgb(156, 207, 216),      // Foam #9ccfd8
+            diff_removed: Color::Rgb(235, 111, 146),    // Love/pink #eb6f92
+            diff_hunk_header: Color::Rgb(196, 167, 231), // Iris #c4a7e7
+            diff_file_header: Color::Rgb(246, 193, 119), // Gold #f6c177
+            diff_context: Color::Reset,
+
+            modal_info: Color::Rgb(156, 207, 216),      // Foam #9ccfd8
+            modal_warning: Color::Rgb(246, 193, 119),   // Gold #f6c177
+            modal_error: Color::Rgb(235, 111, 146),     // Love #eb6f92
+
+            palette_command_bg: Color::Rgb(38, 35, 58),  // Dark navy-rose #26233a
+            palette_command_fg: Color::Rgb(224, 222, 244), // Soft white #e0def4
+
+            status_bar_bg: Color::Rgb(31, 29, 46),      // Dark bg #1f1d2e
+            status_bar_fg: Color::Rgb(224, 222, 244),   // Muted rose fg #e0def4
+        }
+    }
+
     /// Look up a preset palette by name.
     ///
-    /// Recognised names: `"basic"`, `"indexed"`, `"truecolor"`.
+    /// Recognised names: `"basic"`, `"indexed"`, `"truecolor"`, `"monokai-dimmed"`,
+    /// `"zedokai"`, `"rosé-pine"` / `"rose-pine"`.
     pub fn from_preset(name: &str) -> Option<Self> {
         match name.to_lowercase().as_str() {
             "basic" => Some(Self::basic()),
             "indexed" => Some(Self::indexed()),
             "truecolor" => Some(Self::truecolor()),
+            "monokai-dimmed" | "monokai_dimmed" => Some(Self::monokai_dimmed()),
+            "zedokai" => Some(Self::zedokai()),
+            "rosé-pine" | "rose-pine" | "rosé_pine" | "rose_pine" => Some(Self::rose_pine()),
             _ => None,
         }
     }
@@ -611,6 +806,41 @@ mod tests {
             Theme::from_preset("TrueColor").unwrap().border_focused,
             Color::Rgb(137, 180, 250)
         );
+    }
+
+    #[test]
+    fn test_from_preset_monokai_dimmed() {
+        let theme = Theme::from_preset("monokai-dimmed").unwrap();
+        assert_eq!(theme.border_focused, Color::Rgb(181, 165, 106));
+        assert_eq!(theme.status_running, Color::Rgb(181, 206, 168));
+        assert_eq!(theme.text_primary, Color::Rgb(212, 212, 212));
+        assert_eq!(theme.project_colors.len(), 6);
+
+        // Underscore variant
+        assert!(Theme::from_preset("monokai_dimmed").is_some());
+    }
+
+    #[test]
+    fn test_from_preset_zedokai() {
+        let theme = Theme::from_preset("zedokai").unwrap();
+        assert_eq!(theme.border_focused, Color::Rgb(249, 38, 114));
+        assert_eq!(theme.status_running, Color::Rgb(166, 226, 46));
+        assert_eq!(theme.text_primary, Color::Rgb(248, 248, 242));
+        assert_eq!(theme.project_colors.len(), 6);
+    }
+
+    #[test]
+    fn test_from_preset_rose_pine() {
+        let theme = Theme::from_preset("rose-pine").unwrap();
+        assert_eq!(theme.border_focused, Color::Rgb(235, 111, 146));
+        assert_eq!(theme.status_running, Color::Rgb(156, 207, 216));
+        assert_eq!(theme.text_primary, Color::Rgb(224, 222, 244));
+        assert_eq!(theme.project_colors.len(), 6);
+
+        // Alternate name variants all resolve
+        assert!(Theme::from_preset("rosé-pine").is_some());
+        assert!(Theme::from_preset("rose_pine").is_some());
+        assert!(Theme::from_preset("rosé_pine").is_some());
     }
 
     #[test]

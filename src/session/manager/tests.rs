@@ -140,6 +140,42 @@ fn test_display_branch_shows_when_prefix_segment_doesnt_match() {
 }
 
 #[test]
+fn test_match_existing_branch_local_hit() {
+    let existing = vec!["feature-auth".to_string(), "main".to_string()];
+    assert_eq!(
+        match_existing_branch("Feature Auth", "", &existing),
+        Some("feature-auth")
+    );
+}
+
+#[test]
+fn test_match_existing_branch_with_prefix() {
+    let existing = vec!["cc/feature-auth".to_string()];
+    assert_eq!(
+        match_existing_branch("Feature Auth", "cc", &existing),
+        Some("cc/feature-auth")
+    );
+    // Without the prefix configured, the bare candidate doesn't match the
+    // prefixed entry.
+    assert_eq!(match_existing_branch("Feature Auth", "", &existing), None);
+}
+
+#[test]
+fn test_match_existing_branch_no_match() {
+    let existing = vec!["main".to_string(), "develop".to_string()];
+    assert_eq!(match_existing_branch("brand-new", "", &existing), None);
+}
+
+#[test]
+fn test_match_existing_branch_empty_value() {
+    let existing = vec!["main".to_string()];
+    assert_eq!(match_existing_branch("", "", &existing), None);
+    // All-special title sanitizes to empty — no spurious match against an
+    // empty-string entry either.
+    assert_eq!(match_existing_branch("!!!", "", &existing), None);
+}
+
+#[test]
 fn test_display_branch_hides_when_title_equals_branch() {
     // Checkout flow sets title == branch verbatim — no annotation even
     // if the branch contains characters sanitize_name() would rewrite.

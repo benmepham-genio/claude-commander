@@ -123,18 +123,23 @@ pub enum SectionAssignment {
 /// matches, or is moved manually via [`WorktreeSession::section_override`].
 ///
 /// Rules in order:
-/// 1. If `section_override` names a configured section, use it (hard lock).
-/// 2. Otherwise scan `sections[start..]` and return the first predicate match,
+/// 1. If `section_override` is the reserved [`IN_PROGRESS`] literal, lock the
+///    session in the implicit catch-all (predicate scan disabled).
+/// 2. If `section_override` names a configured section, use it (hard lock).
+/// 3. Otherwise scan `sections[start..]` and return the first predicate match,
 ///    where `start` is the current section's config index (or 0 if the
 ///    session has no current section, its current section is predicate-less,
 ///    or its current section no longer exists).
-/// 3. If nothing matches in that range, stay where we were. If `current_section`
+/// 4. If nothing matches in that range, stay where we were. If `current_section`
 ///    doesn't exist in the config, fall to [`SectionAssignment::InProgress`].
 pub fn assign_section(session: &WorktreeSession, sections: &[SectionConfig]) -> SectionAssignment {
-    if let Some(name) = &session.section_override
-        && sections.iter().any(|s| &s.name == name)
-    {
-        return SectionAssignment::Matched(name.clone());
+    if let Some(name) = &session.section_override {
+        if name == IN_PROGRESS {
+            return SectionAssignment::InProgress;
+        }
+        if sections.iter().any(|s| &s.name == name) {
+            return SectionAssignment::Matched(name.clone());
+        }
     }
 
     let start = session
@@ -845,6 +850,27 @@ mod tests {
         assert_eq!(
             assign_section(&session, &sections),
             SectionAssignment::Matched("In progress".into())
+        );
+    }
+
+    #[test]
+    fn override_to_in_progress_locks_session_against_predicate() {
+        // A user manually moved a session to In Progress while it has an open
+        // PR that would otherwise match a predicate-bearing section. The
+        // override must keep it pinned in In Progress.
+        let mut session = make_session();
+        session.pr_state = Some(PrState::Open);
+        session.section_override = Some(IN_PROGRESS.to_string());
+
+        let sections = vec![SectionConfig {
+            name: "Open".into(),
+            pr_state: Some(StatePredicate::One(PrState::Open)),
+            ..Default::default()
+        }];
+
+        assert_eq!(
+            assign_section(&session, &sections),
+            SectionAssignment::InProgress
         );
     }
 

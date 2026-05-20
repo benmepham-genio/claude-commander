@@ -437,13 +437,19 @@ impl App {
     }
 
     /// Handle new session command
-    pub(super) fn handle_new_session(&mut self) {
+    pub(super) async fn handle_new_session(&mut self) {
         if let Some(project_id) = self.ui_state.selected_project_id {
+            let repo_path = {
+                let state = self.store.read().await;
+                state.get_project(&project_id).map(|p| p.repo_path.clone())
+            };
+            let existing_branches = repo_path.and_then(|p| existing_branch_names(&p));
             self.ui_state.modal = Modal::Input {
                 title: "New Session".to_string(),
                 prompt: "Enter session name:".to_string(),
                 value: String::new(),
                 on_submit: InputAction::CreateSession { project_id },
+                existing_branches,
             };
         } else {
             self.ui_state.status_message = Some((
@@ -487,6 +493,11 @@ impl App {
         let Some((project_id, parent_session_id, parent_branch, parent_title)) = resolved else {
             return;
         };
+        let repo_path = {
+            let state = self.store.read().await;
+            state.get_project(&project_id).map(|p| p.repo_path.clone())
+        };
+        let existing_branches = repo_path.and_then(|p| existing_branch_names(&p));
         self.ui_state.modal = Modal::Input {
             title: format!("New Session Stacked on \"{}\"", parent_title),
             prompt: "Enter session name:".to_string(),
@@ -496,6 +507,7 @@ impl App {
                 parent_session_id,
                 parent_branch,
             },
+            existing_branches,
         };
     }
 
@@ -971,7 +983,8 @@ impl App {
     }
 
     /// Build the section-picker rows for the move-to-section palette mode.
-    /// Always includes an "Auto" entry first to clear any existing override.
+    /// Always includes an "Auto" entry first to clear any existing override,
+    /// followed by the implicit "In Progress" catch-all.
     fn gather_section_picker_items(
         &self,
         session_id: SessionId,
@@ -985,6 +998,14 @@ impl App {
                 session_id,
                 target: None,
                 label: auto_label,
+            });
+        }
+        let in_progress = crate::session::IN_PROGRESS;
+        if q.is_empty() || in_progress.to_lowercase().contains(&q) {
+            out.push(QuickSwitchItem::SectionMove {
+                session_id,
+                target: Some(in_progress.to_string()),
+                label: in_progress.to_string(),
             });
         }
         for section in &self.config.sections {
@@ -1150,6 +1171,171 @@ impl App {
         }
     }
 
+    /// Sweep every project for sessions whose PR has merged on GitHub and
+    /// open a single confirmation that names the count. No-op (with a
+    /// transient status message) when nothing qualifies.
+    pub(super) async fn handle_delete_merged_pr_sessions(&mut self) {
+        let merged: Vec<(SessionId, String)> = {
+            let state = self.store.read().await;
+            state
+                .sessions
+                .values()
+                .filter(|s| s.pr_is_merged())
+                .map(|s| (s.id, s.branch.clone()))
+                .collect()
+        };
+
+        if merged.is_empty() {
+            self.ui_state.status_message = Some((
+                "No sessions with merged PRs".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        }
+
+        let count = merged.len();
+        let preview: Vec<String> = merged
+            .iter()
+            .take(5)
+            .map(|(_, b)| format!("  • {b}"))
+            .collect();
+        let more = if count > 5 {
+            format!("\n  … and {} more", count - 5)
+        } else {
+            String::new()
+        };
+        let message = format!(
+            "Delete {count} session(s) with merged PRs?\n\nBranches:\n{}{}\n\nThis will kill the tmux sessions and remove the worktrees.",
+            preview.join("\n"),
+            more,
+        );
+        let session_ids = merged.into_iter().map(|(id, _)| id).collect();
+
+        self.ui_state.modal = Modal::Confirm {
+            title: "Delete merged-PR sessions".to_string(),
+            message,
+            on_confirm: ConfirmAction::DeleteMergedPrSessions { session_ids },
+        };
+    }
+
+    /// Remove a single session: capture cleanup data, mutate persistent
+    /// state, refresh the list, and spawn the tmux/worktree teardown.
+    ///
+    /// Shared by the `DeleteSession` and `DeleteMergedPrSessions` confirm
+    /// arms. Clears `selected_session_id` only when it matches the removed
+    /// session — bulk callers leave the user's current selection alone.
+    async fn delete_session_immediately(
+        &mut self,
+        session_id: SessionId,
+    ) -> crate::error::Result<()> {
+        let cleanup_data = {
+            let state = self.store.read().await;
+            state.get_session(&session_id).map(|s| {
+                let repo_path = state
+                    .get_project(&s.project_id)
+                    .map(|p| p.repo_path.clone());
+                (
+                    s.tmux_session_name.clone(),
+                    s.shell_tmux_session_name.clone(),
+                    s.worktree_path.clone(),
+                    repo_path,
+                )
+            })
+        };
+
+        self.store
+            .mutate(move |state| {
+                state.remove_session(&session_id);
+            })
+            .await?;
+
+        if self.ui_state.selected_session_id == Some(session_id) {
+            self.ui_state.selected_session_id = None;
+        }
+        self.refresh_list_items().await;
+
+        if let Some((tmux_name, shell_tmux_name, worktree_path, repo_path)) = cleanup_data {
+            let tmux = self.session_manager.tmux.clone();
+            let tx = self.event_loop.sender();
+            tokio::spawn(async move {
+                background::cleanup_session_tmux(
+                    &tmux,
+                    &tmux_name,
+                    shell_tmux_name.as_deref(),
+                    repo_path
+                        .as_ref()
+                        .map(|rp| (worktree_path.as_path(), rp.as_path())),
+                    &tx,
+                )
+                .await;
+            });
+        }
+        Ok(())
+    }
+
+    /// Whether the currently selected list item is a section header.
+    pub(super) fn selected_item_is_section_header(&self) -> bool {
+        self.ui_state
+            .list_state
+            .selected()
+            .and_then(|idx| self.ui_state.list_items.get(idx))
+            .is_some_and(|item| matches!(item, SessionListItem::SectionHeader { .. }))
+    }
+
+    /// Toggle collapse/expand for the section that contains the selected item.
+    ///
+    /// When the selected item is a section header, toggle that section directly.
+    /// When the selected item is a project or worktree, walk backwards to find
+    /// the nearest section header and toggle it.
+    pub(super) async fn handle_toggle_section(&mut self) {
+        if self.config.sections.is_empty() {
+            return;
+        }
+        let Some(idx) = self.ui_state.list_state.selected() else {
+            return;
+        };
+
+        let section_name = self.find_parent_section_name(idx);
+        let Some(name) = section_name else {
+            return;
+        };
+
+        if self.ui_state.collapsed_sections.contains(&name) {
+            self.ui_state.collapsed_sections.remove(&name);
+        } else {
+            self.ui_state.collapsed_sections.insert(name.clone());
+        }
+
+        self.refresh_list_items().await;
+
+        // After rebuilding the list, find the section header and select it.
+        // This handles both collapse (selected child is now hidden) and expand
+        // (keep focus on the header).
+        for (i, item) in self.ui_state.list_items.iter().enumerate() {
+            if let SessionListItem::SectionHeader { name: n, .. } = item
+                && *n == name
+            {
+                self.ui_state.list_state.list_state.select(Some(i));
+                break;
+            }
+        }
+
+        self.update_selection();
+        self.spawn_preview_update();
+    }
+
+    /// Walk backwards from `idx` to find the name of the nearest section header.
+    fn find_parent_section_name(&self, idx: usize) -> Option<String> {
+        for i in (0..=idx).rev() {
+            if let Some(SessionListItem::SectionHeader { name, .. }) =
+                self.ui_state.list_items.get(i)
+            {
+                return Some(name.clone());
+            }
+        }
+        None
+    }
+
     /// Open the "Move to section" palette for the selected session.
     /// The palette lists "Auto" plus one entry per configured `[[sections]]`;
     /// selecting "Auto" clears any override.
@@ -1215,6 +1401,7 @@ impl App {
             prompt: "Enter new session name:".to_string(),
             value: current_title,
             on_submit: InputAction::RenameSession { session_id },
+            existing_branches: None,
         };
     }
 
@@ -1490,58 +1677,41 @@ impl App {
     pub(super) async fn handle_confirm(&mut self, action: ConfirmAction) {
         match action {
             ConfirmAction::DeleteSession { session_id } => {
-                // 1. Capture session data before removal
-                let cleanup_data = {
-                    let state = self.store.read().await;
-                    state.get_session(&session_id).map(|s| {
-                        let repo_path = state
-                            .get_project(&s.project_id)
-                            .map(|p| p.repo_path.clone());
-                        (
-                            s.tmux_session_name.clone(),
-                            s.shell_tmux_session_name.clone(),
-                            s.worktree_path.clone(),
-                            repo_path,
-                        )
-                    })
-                };
-
-                // 2. Remove from state immediately so the UI updates
-                if let Err(e) = self
-                    .store
-                    .mutate(move |state| {
-                        state.remove_session(&session_id);
-                    })
-                    .await
-                {
-                    self.ui_state.modal = Modal::Error {
-                        message: format!("Failed to save state: {}", e),
-                    };
-                    return;
+                match self.delete_session_immediately(session_id).await {
+                    Ok(()) => {
+                        self.ui_state.status_message = Some((
+                            "Session deleted".to_string(),
+                            Instant::now() + Duration::from_secs(3),
+                        ));
+                    }
+                    Err(e) => {
+                        self.ui_state.modal = Modal::Error {
+                            message: format!("Failed to save state: {}", e),
+                        };
+                    }
                 }
-                self.ui_state.selected_session_id = None;
-                self.ui_state.status_message = Some((
-                    "Session deleted".to_string(),
-                    Instant::now() + Duration::from_secs(3),
-                ));
-                self.refresh_list_items().await;
-
-                // 3. Spawn background cleanup (kill tmux + remove worktree)
-                if let Some((tmux_name, shell_tmux_name, worktree_path, repo_path)) = cleanup_data {
-                    let tmux = self.session_manager.tmux.clone();
-                    let tx = self.event_loop.sender();
-                    tokio::spawn(async move {
-                        background::cleanup_session_tmux(
-                            &tmux,
-                            &tmux_name,
-                            shell_tmux_name.as_deref(),
-                            repo_path
-                                .as_ref()
-                                .map(|rp| (worktree_path.as_path(), rp.as_path())),
-                            &tx,
-                        )
-                        .await;
-                    });
+            }
+            ConfirmAction::DeleteMergedPrSessions { session_ids } => {
+                let total = session_ids.len();
+                let mut succeeded = 0usize;
+                let mut last_error: Option<String> = None;
+                for sid in session_ids {
+                    match self.delete_session_immediately(sid).await {
+                        Ok(()) => succeeded += 1,
+                        Err(e) => last_error = Some(e.to_string()),
+                    }
+                }
+                if let Some(err) = last_error {
+                    self.ui_state.modal = Modal::Error {
+                        message: format!(
+                            "Deleted {succeeded}/{total} merged-PR session(s) before a state-save failure: {err}"
+                        ),
+                    };
+                } else {
+                    self.ui_state.status_message = Some((
+                        format!("Deleted {succeeded} merged-PR session(s)"),
+                        Instant::now() + Duration::from_secs(3),
+                    ));
                 }
             }
             ConfirmAction::RestartSession { session_id } => {
@@ -1729,6 +1899,24 @@ impl App {
                 }
             }
         });
+    }
+}
+
+/// Best-effort flat list of branch names (local + remote-only with the
+/// `origin/` prefix stripped) for the new-session dialog's existing-branch
+/// hint. Returns `None` if the repo can't be opened — the dialog falls back
+/// to no hint rather than failing.
+pub(super) fn existing_branch_names(repo_path: &std::path::Path) -> Option<Vec<String>> {
+    match load_branch_entries(repo_path) {
+        Ok(entries) => Some(entries.into_iter().map(|e| e.local_name).collect()),
+        Err(e) => {
+            tracing::warn!(
+                "Failed to load branches for new-session hint at {}: {}",
+                repo_path.display(),
+                e
+            );
+            None
+        }
     }
 }
 

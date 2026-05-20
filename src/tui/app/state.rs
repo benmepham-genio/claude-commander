@@ -475,7 +475,12 @@ impl App {
         let grouped = if self.config.sections.is_empty() {
             build_project_grouped_items(&state, &self.ui_state.agent_states)
         } else {
-            build_section_grouped_items(&state, &self.config.sections, &self.ui_state.agent_states)
+            build_section_grouped_items(
+                &state,
+                &self.config.sections,
+                &self.ui_state.agent_states,
+                &self.ui_state.collapsed_sections,
+            )
         };
         items.extend(grouped);
 
@@ -700,6 +705,7 @@ fn build_section_grouped_items(
     state: &crate::config::AppState,
     sections: &[crate::session::SectionConfig],
     agent_states: &HashMap<SessionId, AgentState>,
+    collapsed_sections: &std::collections::HashSet<String>,
 ) -> Vec<SessionListItem> {
     let sessions: Vec<crate::session::WorktreeSession> = state.sessions.values().cloned().collect();
     let groups = crate::session::build_sections(&sessions, sections);
@@ -712,10 +718,16 @@ fn build_section_grouped_items(
         if group_idx > 0 {
             items.push(SessionListItem::Spacer);
         }
+        let collapsed = collapsed_sections.contains(&group.name);
         items.push(SessionListItem::SectionHeader {
             name: group.name.clone(),
             count: group.sessions.len(),
+            collapsed,
         });
+
+        if collapsed {
+            continue;
+        }
 
         let is_in_progress = group.name == crate::session::IN_PROGRESS;
         // Preserve group sort order (oldest-first) while partitioning by project.
