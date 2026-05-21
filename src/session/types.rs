@@ -1170,8 +1170,7 @@ mod tests {
 
     #[test]
     fn test_multi_repo_session_set_status() {
-        let mut session =
-            MultiRepoSession::new_creating("Test", "test-branch", "claude");
+        let mut session = MultiRepoSession::new_creating("Test", "test-branch", "claude");
         let before = session.last_active_at;
         std::thread::sleep(std::time::Duration::from_millis(10));
         session.set_status(SessionStatus::Running);
@@ -1181,8 +1180,7 @@ mod tests {
 
     #[test]
     fn test_multi_repo_session_touch() {
-        let mut session =
-            MultiRepoSession::new_creating("Test", "test-branch", "claude");
+        let mut session = MultiRepoSession::new_creating("Test", "test-branch", "claude");
         let before = session.last_active_at;
         std::thread::sleep(std::time::Duration::from_millis(10));
         session.touch();
@@ -1191,8 +1189,7 @@ mod tests {
 
     #[test]
     fn test_multi_repo_session_project_ids() {
-        let mut session =
-            MultiRepoSession::new_creating("Test", "test-branch", "claude");
+        let mut session = MultiRepoSession::new_creating("Test", "test-branch", "claude");
         let p1 = ProjectId::new();
         let p2 = ProjectId::new();
         session.repos.push(MultiRepoEntry {
@@ -1221,6 +1218,61 @@ mod tests {
         assert!(session.matches_query("claude"));
         assert!(!session.matches_query("unrelated"));
         assert!(session.matches_query(""));
+    }
+
+    /// The TUI attach loop classifies a tmux session as "Claude" (eligible
+    /// for fresh auto-restart) when its name does NOT end in `-sh`. Multi-repo
+    /// Claude sessions are named `cc-mr-<id>` and must be classified as Claude.
+    /// This test locks in that invariant — a regression here would either
+    /// strand multi-repo sessions on process exit or misroute their shell
+    /// variant through the Claude restart path.
+    #[test]
+    fn test_multi_repo_tmux_name_is_claude_not_shell() {
+        let session = MultiRepoSession::new_creating("Test", "test", "claude");
+        assert!(
+            !session.tmux_session_name.ends_with("-sh"),
+            "multi-repo Claude tmux name must not end in -sh, got: {}",
+            session.tmux_session_name
+        );
+
+        // The corresponding shell session DOES end in -sh.
+        let shell_name = format!("{}-sh", session.tmux_session_name);
+        assert!(shell_name.ends_with("-sh"));
+        assert!(shell_name.starts_with("cc-mr-"));
+    }
+
+    /// Distinguishes a multi-repo Claude tmux name (`cc-mr-...`) from a
+    /// single-repo Claude name (`cc-...`). Both must be classified as Claude
+    /// (no `-sh` suffix) but only the multi-repo variant has the `cc-mr-`
+    /// prefix that routes to `state.multi_repo_sessions`.
+    #[test]
+    fn test_multi_repo_tmux_name_distinguishable_from_single_repo() {
+        let mr = MultiRepoSession::new_creating("a", "a", "claude");
+        let sr = WorktreeSession::new(
+            ProjectId::new(),
+            "b",
+            "b",
+            PathBuf::from("/tmp/wt"),
+            "claude",
+        );
+        assert!(mr.tmux_session_name.starts_with("cc-mr-"));
+        assert!(sr.tmux_session_name.starts_with("cc-"));
+        assert!(!sr.tmux_session_name.starts_with("cc-mr-"));
+    }
+
+    /// A multi-repo session in `Stopped` state must round-trip through serde
+    /// without losing its tmux session name — the restart-by-tmux-name path
+    /// relies on this name to look the session up after a process exit.
+    #[test]
+    fn test_multi_repo_session_tmux_name_serde_roundtrip() {
+        let mut session = MultiRepoSession::new_creating("Test", "test", "claude");
+        session.set_status(SessionStatus::Stopped);
+        let tmux_name = session.tmux_session_name.clone();
+
+        let json = serde_json::to_string(&session).unwrap();
+        let decoded: MultiRepoSession = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.tmux_session_name, tmux_name);
+        assert_eq!(decoded.status, SessionStatus::Stopped);
     }
 
     #[test]
