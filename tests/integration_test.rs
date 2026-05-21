@@ -736,7 +736,7 @@ async fn test_stacked_session_gets_own_branch_not_parents() {
     let base_branch = Some(parent_branch.clone());
     let is_stacked = {
         let state = store.read().await;
-        base_branch.as_ref().map_or(false, |base| {
+        base_branch.as_ref().is_some_and(|base| {
             state
                 .sessions
                 .values()
@@ -744,7 +744,11 @@ async fn test_stacked_session_gets_own_branch_not_parents() {
         })
     };
     assert!(is_stacked, "base_branch should match parent session");
-    let branch_for_prepare = if is_stacked { None } else { base_branch.clone() };
+    let branch_for_prepare = if is_stacked {
+        None
+    } else {
+        base_branch.clone()
+    };
 
     let child_id = manager
         .prepare_session(

@@ -313,7 +313,7 @@ async fn main() -> Result<()> {
 
             use claude_commander::git::GitBackend;
             use claude_commander::session::{
-                program_is_claude, program_with_claude_flags, SessionManager,
+                SessionManager, program_is_claude, program_with_claude_flags,
             };
             use claude_commander::tui::theme::Theme;
             use std::sync::Arc;
@@ -331,8 +331,8 @@ async fn main() -> Result<()> {
             manager.check_tmux().await?;
 
             // Build program string with Claude-specific flags
-            let base_program = program
-                .unwrap_or_else(|| config_store.read().default_program.clone());
+            let base_program =
+                program.unwrap_or_else(|| config_store.read().default_program.clone());
             if !program_is_claude(&base_program)
                 && (effort.is_some() || mode.is_some() || initial_prompt.is_some())
             {
@@ -346,11 +346,8 @@ async fn main() -> Result<()> {
                 )
                 .exit();
             }
-            let program = program_with_claude_flags(
-                &base_program,
-                mode.as_deref(),
-                effort.as_deref(),
-            );
+            let program =
+                program_with_claude_flags(&base_program, mode.as_deref(), effort.as_deref());
 
             // Resolve path to repo root (handles worktrees, subdirectories, symlinks)
             let path = {
@@ -389,7 +386,11 @@ async fn main() -> Result<()> {
             } else {
                 false
             };
-            let branch_for_prepare = if is_stacked { None } else { base_branch.clone() };
+            let branch_for_prepare = if is_stacked {
+                None
+            } else {
+                base_branch.clone()
+            };
 
             println!("Creating session '{}'...", name);
             let session_id = manager
@@ -398,7 +399,9 @@ async fn main() -> Result<()> {
             manager
                 .link_stack_parent_by_branch(&session_id, base_branch.as_deref())
                 .await?;
-            manager.finalize_session(&session_id, initial_prompt).await?;
+            manager
+                .finalize_session(&session_id, initial_prompt)
+                .await?;
 
             println!("Session created: {}", session_id);
             println!();

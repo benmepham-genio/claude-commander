@@ -70,9 +70,7 @@ impl SessionManager {
         let base = base.to_string();
         self.store
             .mutate(move |state| {
-                let session_project = state
-                    .get_session(&sid)
-                    .map(|s| s.project_id);
+                let session_project = state.get_session(&sid).map(|s| s.project_id);
                 if let Some(pid) = session_project {
                     let parent_id = state
                         .sessions
