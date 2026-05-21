@@ -339,7 +339,26 @@ impl SessionManager {
     /// session name. Used when the process inside the pane exits (e.g. Claude
     /// had nothing to resume) so the user seamlessly gets a fresh conversation
     /// instead of being dropped back to the TUI.
+    ///
+    /// Handles both single-repo (`state.sessions`) and multi-repo
+    /// (`state.multi_repo_sessions`) sessions — the latter use `cc-mr-*`
+    /// tmux names and a shared `parent_dir` as their cwd.
     pub async fn restart_session_fresh_by_tmux_name(&self, tmux_name: &str) -> Result<()> {
+        let target = {
+            let state = self.store.read().await;
+            classify_restart_target(&state, tmux_name)
+        };
+
+        match target {
+            RestartTarget::SingleRepo => self.restart_single_repo_by_tmux_name(tmux_name).await,
+            RestartTarget::MultiRepo => self.restart_multi_repo_by_tmux_name(tmux_name).await,
+            RestartTarget::NotFound => {
+                Err(SessionError::TmuxSessionNotFound(tmux_name.to_string()).into())
+            }
+        }
+    }
+
+    async fn restart_single_repo_by_tmux_name(&self, tmux_name: &str) -> Result<()> {
         let (session_id, worktree_path, title, program, status_bar) = {
             let state = self.store.read().await;
             let session = state
@@ -390,6 +409,59 @@ impl SessionManager {
 
         info!(
             "Restarted session {} fresh (no --resume) via tmux name: {}",
+            session_id, tmux_name
+        );
+        Ok(())
+    }
+
+    async fn restart_multi_repo_by_tmux_name(&self, tmux_name: &str) -> Result<()> {
+        let (session_id, parent_dir, title, program) = {
+            let state = self.store.read().await;
+            let session = state
+                .multi_repo_sessions
+                .values()
+                .find(|s| s.tmux_session_name == tmux_name)
+                .ok_or_else(|| SessionError::TmuxSessionNotFound(tmux_name.to_string()))?;
+            (
+                session.id,
+                session.parent_dir.clone(),
+                session.title.clone(),
+                session.program.clone(),
+            )
+        };
+
+        let _ = self.tmux.kill_session(tmux_name).await;
+
+        let launch_cmd = program_with_session_name(&program, &title);
+        let create_result = self
+            .tmux
+            .create_session(tmux_name, &parent_dir, Some(&launch_cmd))
+            .await;
+
+        if let Err(e) = create_result {
+            let sid = session_id;
+            let _ = self
+                .store
+                .mutate(move |state| {
+                    if let Some(session) = state.get_multi_repo_session_mut(&sid) {
+                        session.set_status(SessionStatus::Stopped);
+                    }
+                })
+                .await;
+            return Err(e);
+        }
+
+        let sid = session_id;
+        self.store
+            .mutate(move |state| {
+                if let Some(session) = state.get_multi_repo_session_mut(&sid) {
+                    session.set_status(SessionStatus::Running);
+                }
+            })
+            .await?;
+
+        info!(
+            "Restarted multi-repo session {} fresh (no --resume) via tmux name: {}",
             session_id, tmux_name
         );
         Ok(())
@@ -481,6 +553,36 @@ impl SessionManager {
 /// the invocation (e.g. for `bash` or `zsh` as the program).
 fn program_is_claude(program: &str) -> bool {
     program.split_whitespace().next() == Some("claude")
+}
+
+/// Identifies which session map (if any) owns a given tmux session name.
+///
+/// Used by `restart_session_fresh_by_tmux_name` to decide whether to restart a
+/// single-repo or multi-repo session. Extracted so the lookup-routing logic
+/// can be unit-tested without spinning up real tmux.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum RestartTarget {
+    SingleRepo,
+    MultiRepo,
+    NotFound,
+}
+
+pub(super) fn classify_restart_target(state: &AppState, tmux_name: &str) -> RestartTarget {
+    if state
+        .sessions
+        .values()
+        .any(|s| s.tmux_session_name == tmux_name)
+    {
+        RestartTarget::SingleRepo
+    } else if state
+        .multi_repo_sessions
+        .values()
+        .any(|s| s.tmux_session_name == tmux_name)
+    {
+        RestartTarget::MultiRepo
+    } else {
+        RestartTarget::NotFound
+    }
 }
 
 /// Inject `-n <session_title>` into a Claude command so the Claude Code
