@@ -266,8 +266,10 @@ async fn test_session_manager_restart() {
     }
 
     // Restart from Running state
-    let result = manager.restart_session(&session_id).await;
-    assert!(result.is_ok(), "Should restart running session");
+    manager
+        .restart_session(&session_id)
+        .await
+        .expect("Should restart running session");
 
     // Verify still Running after restart
     {
@@ -284,8 +286,10 @@ async fn test_session_manager_restart() {
         assert_eq!(session.status, SessionStatus::Stopped);
     }
 
-    let result = manager.restart_session(&session_id).await;
-    assert!(result.is_ok(), "Should restart stopped session");
+    manager
+        .restart_session(&session_id)
+        .await
+        .expect("Should restart stopped session");
 
     {
         let state = store.read().await;

@@ -68,3 +68,62 @@ pub(crate) fn pr_badge_color(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_theme() -> Theme {
+        Theme::basic()
+    }
+
+    /// `Theme::basic()` uses concrete ANSI colours for every `pr_pill_*_bg`
+    /// field, none of which equal `Color::default()` (== `Color::Reset`).
+    /// Asserting equality to those specific theme fields kills the
+    /// `replace pr_pill_bg_color -> Color with Default::default()` mutant.
+    #[test]
+    fn pr_pill_bg_color_open_returns_theme_open_bg() {
+        let theme = test_theme();
+        let color = pr_pill_bg_color(&theme, Some(PrState::Open), false, false, &[], &[]);
+        assert_eq!(color, theme.pr_pill_open_bg);
+        assert_ne!(color, Color::default());
+    }
+
+    #[test]
+    fn pr_pill_bg_color_merged_returns_theme_merged_bg() {
+        let theme = test_theme();
+        let color = pr_pill_bg_color(&theme, Some(PrState::Merged), true, false, &[], &[]);
+        assert_eq!(color, theme.pr_pill_merged_bg);
+        assert_ne!(color, Color::default());
+    }
+
+    #[test]
+    fn pr_pill_bg_color_closed_returns_theme_closed_bg() {
+        let theme = test_theme();
+        let color = pr_pill_bg_color(&theme, Some(PrState::Closed), false, false, &[], &[]);
+        assert_eq!(color, theme.pr_pill_closed_bg);
+    }
+
+    #[test]
+    fn pr_pill_bg_color_draft_returns_theme_draft_bg() {
+        let theme = test_theme();
+        let color = pr_pill_bg_color(&theme, Some(PrState::Open), false, true, &[], &[]);
+        assert_eq!(color, theme.pr_pill_draft_bg);
+    }
+
+    #[test]
+    fn pr_pill_bg_color_review_returns_theme_review_bg() {
+        let theme = test_theme();
+        let labels = vec!["needs-review".to_string()];
+        let review_labels = vec!["needs-review".to_string()];
+        let color = pr_pill_bg_color(
+            &theme,
+            Some(PrState::Open),
+            false,
+            false,
+            &labels,
+            &review_labels,
+        );
+        assert_eq!(color, theme.pr_pill_review_bg);
+    }
+}

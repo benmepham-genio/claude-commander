@@ -587,6 +587,70 @@ fn test_glyph_creating_shows_spinner() {
     assert_eq!(c, theme.status_creating);
 }
 
+// Cycle-arithmetic tests for the spinner index computation in
+// `session_status_glyph`: `SPINNER_FRAMES[(tick as usize / 3) % SPINNER_FRAMES.len()]`.
+// SPINNER_FRAMES has 10 entries, so the cycle is `(tick / 3) % 10`. Each
+// test below picks tick values whose original-vs-mutant outputs differ:
+//
+//   tick=3  → original `(3/3)%10 = 1` ⇒ frame[1] = "⠙"
+//             `/`→`%`: `(3%3)%10 = 0` ⇒ "⠋"  (distinguishes / from %)
+//             `/`→`*`: `(3*3)%10 = 9` ⇒ "⠏"  (distinguishes / from *)
+//             `%`→`/`: `(3/3)/10 = 0` ⇒ "⠋"  (distinguishes % from /)
+//   tick=30 → original `(30/3)%10 = 0` ⇒ "⠋"
+//             `%`→`/`: `(30/3)/10 = 1` ⇒ "⠙"  (extra guard for % from /)
+
+#[test]
+fn test_glyph_creating_spinner_uses_tick_div_three_mod_len() {
+    let theme = Theme::basic();
+    let items = empty_items();
+
+    // tick=3: original index 1 → "⠙"
+    let (g, _) = make_tree(&theme, &items)
+        .tick(3)
+        .session_status_glyph(SessionStatus::Creating, None, false)
+        .unwrap();
+    assert_eq!(
+        g, "⠙",
+        "tick=3 must select SPINNER_FRAMES[(3/3)%10] = SPINNER_FRAMES[1]"
+    );
+
+    // tick=30: original index 0 → "⠋" (catches `%` → `/` which would give 1)
+    let (g, _) = make_tree(&theme, &items)
+        .tick(30)
+        .session_status_glyph(SessionStatus::Creating, None, false)
+        .unwrap();
+    assert_eq!(
+        g, "⠋",
+        "tick=30 must select SPINNER_FRAMES[(30/3)%10] = SPINNER_FRAMES[0]"
+    );
+}
+
+#[test]
+fn test_glyph_working_spinner_uses_tick_div_three_mod_len() {
+    let theme = Theme::basic();
+    let items = empty_items();
+
+    // tick=3: original index 1 → "⠙"
+    let (g, _) = make_tree(&theme, &items)
+        .tick(3)
+        .session_status_glyph(SessionStatus::Running, Some(AgentState::Working), false)
+        .unwrap();
+    assert_eq!(
+        g, "⠙",
+        "tick=3 must select SPINNER_FRAMES[(3/3)%10] = SPINNER_FRAMES[1]"
+    );
+
+    // tick=30: original index 0 → "⠋" (catches `%` → `/` which would give 1)
+    let (g, _) = make_tree(&theme, &items)
+        .tick(30)
+        .session_status_glyph(SessionStatus::Running, Some(AgentState::Working), false)
+        .unwrap();
+    assert_eq!(
+        g, "⠋",
+        "tick=30 must select SPINNER_FRAMES[(30/3)%10] = SPINNER_FRAMES[0]"
+    );
+}
+
 #[test]
 fn test_stacked_child_row_has_extra_indent() {
     // The stacked child should sit one extra indent (STACK_INDENT) further
@@ -751,4 +815,125 @@ fn test_program_suffix_hidden_when_programs_uniform() {
         "uniform programs should not render suffix: {:?}",
         lines[1]
     );
+}
+
+// -- TreeListState boundary tests (cargo-mutants gap closure) --
+
+#[test]
+fn test_previous_on_empty_state_with_zero_index_does_not_underflow() {
+    // Regression: `any_selectable()` must report `false` for an empty state so
+    // that `previous()` early-returns before computing `count - 1`. If
+    // `any_selectable` were to always return `true`, or if `item_count > 0`
+    // were weakened to `>= 0`, this call would underflow `count - 1` (count=0)
+    // and panic in debug builds.
+    let mut state = TreeListState::new();
+    // No `set_item_count`/`set_selectable` calls: item_count == 0, selectable empty.
+    // Force selection to Some(0) so that `previous()` hits the `i == 0` arm
+    // that does `count - 1` once it gets past the early-return guard.
+    state.select(Some(0));
+    state.previous();
+    // No panic, no spurious selection change.
+    assert_eq!(state.selected(), Some(0));
+}
+
+#[test]
+fn test_next_on_empty_state_with_zero_index_is_a_noop() {
+    // Mirror of the above test for `next()`: even if the early-return guard
+    // were flipped, the modulo loop would refuse to select on an empty count,
+    // but we still pin the observable behaviour to a no-op.
+    let mut state = TreeListState::new();
+    state.select(Some(0));
+    state.next();
+    assert_eq!(state.selected(), Some(0));
+}
+
+#[test]
+fn test_navigation_noop_when_all_rows_unselectable() {
+    // With every row unselectable, `any_selectable()` must return false. The
+    // existing `selectable.iter().any(|s| *s)` branch is exercised here: if it
+    // were replaced with `true`, the loop would still find no selectable index
+    // but we still want to assert the observable contract — `next()` does not
+    // produce a selection from `None`.
+    let mut state = TreeListState::new();
+    state.set_selectable(vec![false, false, false]);
+    assert_eq!(state.selected(), None);
+    state.next();
+    assert_eq!(state.selected(), None);
+    state.previous();
+    assert_eq!(state.selected(), None);
+}
+
+#[test]
+fn test_next_wraps_via_modulo_not_addition() {
+    // Pin the wrap-around contract: from the last index, `next()` selects 0.
+    // If `(i + 1) % count` were replaced with `(i + 1) + count`, the start
+    // value would be `count * 2` rather than `0`; the subsequent
+    // `(start + offset) % count` still normalises to zero, but we drive the
+    // selectable mask so the *first* attempt lands on the wrap target.
+    let mut state = TreeListState::new();
+    state.set_item_count(4);
+    state.select(Some(3));
+    state.next();
+    assert_eq!(state.selected(), Some(0));
+
+    // And with an unselectable mask that forces traversal past the wrap point,
+    // confirm we wrap forward to the next selectable row rather than walking
+    // off the end.
+    let mut state = TreeListState::new();
+    state.set_selectable(vec![true, false, false, false]);
+    state.select(Some(0));
+    state.next();
+    // Only index 0 is selectable, so `next()` from 0 wraps to 0.
+    assert_eq!(state.selected(), Some(0));
+}
+
+#[test]
+fn test_set_selectable_clears_out_of_range_selection() {
+    // Kills `>= -> <` and `|| -> &&` mutants in set_selectable: when the
+    // current selection is past the end of the new mask, the selection must
+    // be cleared. `is_selectable(sel)` on an out-of-range index returns `true`
+    // (via `unwrap_or(true)`), so the `!is_selectable(sel)` half of the `||`
+    // is `false`; only the `sel >= item_count` half is `true`. Replacing `>=`
+    // with `<` makes the whole expression `false`; replacing `||` with `&&`
+    // also yields `false`. Either way, the mutant would *keep* the selection.
+    let mut state = TreeListState::new();
+    state.set_item_count(10);
+    state.select(Some(7));
+
+    state.set_selectable(vec![true, true, true]);
+    assert_eq!(
+        state.selected(),
+        None,
+        "out-of-range selection must be cleared"
+    );
+}
+
+#[test]
+fn test_set_selectable_clears_selection_on_unselectable_index() {
+    // Kills `delete !` mutant: when the current selection is in-range but
+    // points at an unselectable row, the selection must be cleared. With the
+    // `!` deleted, the condition becomes `sel >= item_count || is_selectable(sel)`,
+    // which is `false || false = false`, leaving the selection intact.
+    let mut state = TreeListState::new();
+    state.set_item_count(3);
+    state.select(Some(1));
+
+    state.set_selectable(vec![true, false, true]);
+    assert_eq!(
+        state.selected(),
+        None,
+        "selection on an unselectable row must be cleared"
+    );
+}
+
+#[test]
+fn test_set_selectable_preserves_valid_selection() {
+    // Companion to the above: when the selection is in-range AND selectable,
+    // it must be preserved. Guards against an overly-aggressive clear.
+    let mut state = TreeListState::new();
+    state.set_item_count(3);
+    state.select(Some(2));
+
+    state.set_selectable(vec![true, false, true]);
+    assert_eq!(state.selected(), Some(2));
 }

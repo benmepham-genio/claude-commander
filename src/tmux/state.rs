@@ -331,6 +331,96 @@ mod tests {
         assert!(entry.1.elapsed() > Duration::from_secs(5));
     }
 
+    // -- detect() TTL boundary tests --
+    //
+    // These tests target the cache freshness check at the top of `detect()`:
+    //   if let Some((state, cached_at)) = self.cache.get(tmux_session_name)
+    //       && cached_at.elapsed() < self.cache_ttl
+    //   { return *state; }
+    //
+    // They distinguish `<` from `==`, `<=`, and `>` by pre-populating the
+    // private `cache` field directly (same-module privacy) so we can place
+    // entries at precise points relative to the TTL window without relying on
+    // wall-clock sleeps. `Instant::elapsed()` saturates to `Duration::ZERO`
+    // for instants in the future, which gives us an exact boundary handle.
+    //
+    // We deliberately don't call `detect()` through the cache-miss branch
+    // in the first test (which would invoke the real tmux executor against
+    // a non-existent session); instead the second test inspects the cache
+    // entry post-call to observe whether a miss occurred.
+    //
+    // Truth table for `elapsed=0, ttl=0` (the future-instant + ZERO TTL case):
+    //   `<`  : 0 < 0  → false → miss   (correct)
+    //   `<=` : 0 <= 0 → true  → hit
+    //   `==` : 0 == 0 → true  → hit
+    //   `>`  : 0 > 0  → false → miss
+    //
+    // Truth table for `elapsed≈0, ttl=1h` (fresh entry, large TTL):
+    //   `<`  : tiny < hour → true  → hit (correct)
+    //   `<=` : tiny <= hour → true → hit
+    //   `==` : tiny == hour → false → miss
+    //   `>`  : tiny > hour  → false → miss
+
+    #[tokio::test]
+    async fn test_detect_cache_hit_with_fresh_entry() {
+        // Large TTL + just-now cached_at => elapsed is tiny relative to TTL,
+        // so the freshness check is firmly inside the cache window. Returns
+        // the cached state without invoking the executor.
+        //
+        // Kills `replace < with ==` (miss: tiny != hour → Unknown via miss)
+        // Kills `replace < with >`  (miss: tiny not > hour → Unknown via miss)
+        // The `<=` mutant still says hit here — covered by the next test.
+        let executor = TmuxExecutor::new();
+        let mut detector = AgentStateDetector::new(executor, Duration::from_secs(3600));
+        detector.cache.insert(
+            "tts-fresh".to_string(),
+            (AgentState::Working, Instant::now()),
+        );
+
+        let result = detector.detect("tts-fresh").await;
+        assert_eq!(
+            result,
+            AgentState::Working,
+            "fresh cache entry within TTL must hit and return the cached state"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detect_cache_miss_at_exact_boundary() {
+        // `Instant::elapsed()` saturates to zero for instants in the future,
+        // so a future cached_at + a TTL of zero yields `elapsed == ttl == 0`
+        // deterministically. Correct `<` says miss; `<=` and `==` say hit.
+        //
+        // We observe hit-vs-miss by inspecting the cache entry's instant
+        // after the call: on hit the entry is unchanged (still in the future,
+        // so `elapsed()` is zero); on miss `detect_fresh` runs and the entry
+        // is re-inserted with `Instant::now()`, whose `elapsed()` becomes
+        // positive almost immediately. This sidesteps the executor's return
+        // value (which would otherwise depend on the tmux environment).
+        //
+        // Kills `replace < with <=` (would hit, leave future instant intact)
+        // Kills `replace < with ==` (same — would hit at exact equality)
+        let executor = TmuxExecutor::new();
+        let mut detector = AgentStateDetector::new(executor, Duration::ZERO);
+        let future = Instant::now() + Duration::from_secs(3600);
+        detector
+            .cache
+            .insert("tts-boundary".to_string(), (AgentState::Working, future));
+
+        let _ = detector.detect("tts-boundary").await;
+
+        let (_, after) = detector
+            .cache
+            .get("tts-boundary")
+            .expect("cache entry must still exist after detect");
+        assert!(
+            after.elapsed() > Duration::ZERO,
+            "with ttl=0 and elapsed=0, correct `<` must miss and re-insert \
+             a now-stamped entry; a `<=` or `==` mutant would have hit and \
+             left the original future instant in place (elapsed == 0)"
+        );
+    }
+
     // -- is_claude_program tests --
 
     #[test]

@@ -633,4 +633,29 @@ mod tests {
         assert!(text.contains("PR #99"));
         assert!(text.contains("(merged)"));
     }
+
+    #[test]
+    fn label_style_uses_accent_color_and_bold() {
+        let theme = test_theme();
+        let view = InfoView::new(InfoContent::Empty, &theme);
+        let style = view.label_style();
+        assert_eq!(style.fg, Some(theme.text_accent));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn value_style_uses_primary_text_color() {
+        let theme = test_theme();
+        let view = InfoView::new(InfoContent::Empty, &theme);
+        let style = view.value_style();
+        assert_eq!(style.fg, Some(theme.text_primary));
+    }
+
+    #[test]
+    fn secondary_style_uses_secondary_text_color() {
+        let theme = test_theme();
+        let view = InfoView::new(InfoContent::Empty, &theme);
+        let style = view.secondary_style();
+        assert_eq!(style.fg, Some(theme.text_secondary));
+    }
 }

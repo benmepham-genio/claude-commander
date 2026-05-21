@@ -810,6 +810,7 @@ impl App {
                         let session_name = cmd.split_whitespace().last().unwrap_or("").to_string();
                         if !session_name.is_empty() {
                             let mut current_session = session_name.clone();
+                            let mut consecutive_ends: u8 = 0;
 
                             loop {
                                 let editor_triggers =
@@ -913,6 +914,7 @@ impl App {
 
                                         // Flush between switches
                                         crate::tmux::flush_stdin();
+                                        consecutive_ends = 0;
                                         info!("Switching to session: {}", current_session);
                                         continue;
                                     }
@@ -925,11 +927,49 @@ impl App {
                                         // the tmux session alive, and then re-attach.
                                         self.open_editor_for_tmux_session(&current_session).await;
                                         crate::tmux::flush_stdin();
+                                        consecutive_ends = 0;
                                         continue;
+                                    }
+                                    crate::tmux::AttachResult::SessionEnded => {
+                                        info!("Session ended, attempting fresh restart");
+                                        let is_claude_session = !current_session.ends_with("-sh");
+                                        if is_claude_session && consecutive_ends < 3 {
+                                            consecutive_ends += 1;
+                                            match self
+                                                .session_manager
+                                                .restart_session_fresh_by_tmux_name(
+                                                    &current_session,
+                                                )
+                                                .await
+                                            {
+                                                Ok(()) => {
+                                                    info!(
+                                                        "Auto-restarted session fresh (attempt {})",
+                                                        consecutive_ends
+                                                    );
+                                                    crate::tmux::flush_stdin();
+                                                    continue;
+                                                }
+                                                Err(e) => {
+                                                    warn!("Failed to auto-restart session: {}", e);
+                                                    self.ui_state.shell_toggle_pair = None;
+                                                    break;
+                                                }
+                                            }
+                                        } else {
+                                            if consecutive_ends >= 3 {
+                                                warn!(
+                                                    "Session ended {} consecutive times, \
+                                                     giving up",
+                                                    consecutive_ends
+                                                );
+                                            }
+                                            self.ui_state.shell_toggle_pair = None;
+                                            break;
+                                        }
                                     }
                                     result => {
                                         info!("Attach ended: {:?}", result);
-                                        // Clear toggle state on normal detach
                                         self.ui_state.shell_toggle_pair = None;
                                         break;
                                     }
