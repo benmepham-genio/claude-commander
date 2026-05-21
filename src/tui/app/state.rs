@@ -645,11 +645,7 @@ fn build_multi_repo_items(state: &crate::config::AppState) -> Vec<SessionListIte
         let project_names: Vec<String> = mr
             .repos
             .iter()
-            .filter_map(|entry| {
-                state
-                    .get_project(&entry.project_id)
-                    .map(|p| p.name.clone())
-            })
+            .filter_map(|entry| state.get_project(&entry.project_id).map(|p| p.name.clone()))
             .collect();
         items.push(SessionListItem::MultiRepo {
             id: mr.id,

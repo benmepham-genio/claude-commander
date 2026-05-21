@@ -64,9 +64,9 @@ impl SessionManager {
         // Read session metadata
         let (title, branch_name, program, repo_entries) = {
             let state = self.store.read().await;
-            let session = state
-                .get_multi_repo_session(session_id)
-                .ok_or_else(|| SessionError::CreationFailed("Multi-repo session not found".into()))?;
+            let session = state.get_multi_repo_session(session_id).ok_or_else(|| {
+                SessionError::CreationFailed("Multi-repo session not found".into())
+            })?;
             (
                 session.title.clone(),
                 session.branch.clone(),
@@ -133,7 +133,10 @@ impl SessionManager {
                     .await?;
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    warn!("git fetch failed for {} (continuing): {}", project_name, stderr);
+                    warn!(
+                        "git fetch failed for {} (continuing): {}",
+                        project_name, stderr
+                    );
                 }
             }
 
@@ -233,17 +236,12 @@ impl SessionManager {
 
     /// Delete a multi-repo session: kill tmux, remove worktrees, clean up parent dir.
     #[instrument(skip(self))]
-    pub async fn delete_multi_repo_session(
-        &self,
-        session_id: &MultiRepoSessionId,
-    ) -> Result<()> {
+    pub async fn delete_multi_repo_session(&self, session_id: &MultiRepoSessionId) -> Result<()> {
         let session = {
             let state = self.store.read().await;
             state
                 .get_multi_repo_session(session_id)
-                .ok_or_else(|| {
-                    SessionError::CreationFailed("Multi-repo session not found".into())
-                })?
+                .ok_or_else(|| SessionError::CreationFailed("Multi-repo session not found".into()))?
                 .clone()
         };
 
@@ -336,11 +334,7 @@ impl SessionManager {
             title
         );
         for (_id, repo_path, _main_branch, name) in projects {
-            md.push_str(&format!(
-                "- `./{}/` — {}\n",
-                name,
-                repo_path.display()
-            ));
+            md.push_str(&format!("- `./{}/` — {}\n", name, repo_path.display()));
         }
         md.push_str(&format!(
             "\n## Notes\n\n\
