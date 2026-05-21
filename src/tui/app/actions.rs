@@ -377,13 +377,19 @@ impl App {
     }
 
     /// Handle new session command
-    pub(super) fn handle_new_session(&mut self) {
+    pub(super) async fn handle_new_session(&mut self) {
         if let Some(project_id) = self.ui_state.selected_project_id {
+            let repo_path = {
+                let state = self.store.read().await;
+                state.get_project(&project_id).map(|p| p.repo_path.clone())
+            };
+            let existing_branches = repo_path.and_then(|p| existing_branch_names(&p));
             self.ui_state.modal = Modal::Input {
                 title: "New Session".to_string(),
                 prompt: "Enter session name:".to_string(),
                 value: String::new(),
                 on_submit: InputAction::CreateSession { project_id },
+                existing_branches,
             };
         } else {
             self.ui_state.status_message = Some((
@@ -427,6 +433,11 @@ impl App {
         let Some((project_id, parent_session_id, parent_branch, parent_title)) = resolved else {
             return;
         };
+        let repo_path = {
+            let state = self.store.read().await;
+            state.get_project(&project_id).map(|p| p.repo_path.clone())
+        };
+        let existing_branches = repo_path.and_then(|p| existing_branch_names(&p));
         self.ui_state.modal = Modal::Input {
             title: format!("New Session Stacked on \"{}\"", parent_title),
             prompt: "Enter session name:".to_string(),
@@ -436,6 +447,7 @@ impl App {
                 parent_session_id,
                 parent_branch,
             },
+            existing_branches,
         };
     }
 
@@ -1322,6 +1334,7 @@ impl App {
             prompt: "Enter new session name:".to_string(),
             value: current_title,
             on_submit: InputAction::RenameSession { session_id },
+            existing_branches: None,
         };
     }
 
@@ -1717,6 +1730,24 @@ impl App {
                     });
                 }
             }
+        }
+    }
+}
+
+/// Best-effort flat list of branch names (local + remote-only with the
+/// `origin/` prefix stripped) for the new-session dialog's existing-branch
+/// hint. Returns `None` if the repo can't be opened — the dialog falls back
+/// to no hint rather than failing.
+pub(super) fn existing_branch_names(repo_path: &std::path::Path) -> Option<Vec<String>> {
+    match load_branch_entries(repo_path) {
+        Ok(entries) => Some(entries.into_iter().map(|e| e.local_name).collect()),
+        Err(e) => {
+            tracing::warn!(
+                "Failed to load branches for new-session hint at {}: {}",
+                repo_path.display(),
+                e
+            );
+            None
         }
     }
 }
