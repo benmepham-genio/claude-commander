@@ -587,7 +587,7 @@ impl App {
                 self.handle_select_shell().await;
             }
             UserCommand::NewSession => {
-                self.handle_new_session();
+                self.handle_new_session().await;
             }
             UserCommand::NewStackedSession => {
                 self.handle_new_stacked_session().await;

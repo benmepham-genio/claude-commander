@@ -335,6 +335,66 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Restart a session's tmux pane without `--resume`, identified by tmux
+    /// session name. Used when the process inside the pane exits (e.g. Claude
+    /// had nothing to resume) so the user seamlessly gets a fresh conversation
+    /// instead of being dropped back to the TUI.
+    pub async fn restart_session_fresh_by_tmux_name(&self, tmux_name: &str) -> Result<()> {
+        let (session_id, worktree_path, title, program, status_bar) = {
+            let state = self.store.read().await;
+            let session = state
+                .sessions
+                .values()
+                .find(|s| s.tmux_session_name == tmux_name)
+                .ok_or_else(|| SessionError::TmuxSessionNotFound(tmux_name.to_string()))?;
+            (
+                session.id,
+                session.worktree_path.clone(),
+                session.title.clone(),
+                session.program.clone(),
+                self.status_bar_info(session, &state),
+            )
+        };
+
+        let _ = self.tmux.kill_session(tmux_name).await;
+
+        let launch_cmd = program_with_session_name(&program, &title);
+        let create_result = self
+            .tmux
+            .create_session(tmux_name, &worktree_path, Some(&launch_cmd))
+            .await;
+
+        if let Err(e) = create_result {
+            let sid = session_id;
+            let _ = self
+                .store
+                .mutate(move |state| {
+                    if let Some(session) = state.get_session_mut(&sid) {
+                        session.set_status(SessionStatus::Stopped);
+                    }
+                })
+                .await;
+            return Err(e);
+        }
+
+        self.tmux.configure_status_bar(tmux_name, &status_bar).await;
+
+        let sid = session_id;
+        self.store
+            .mutate(move |state| {
+                if let Some(session) = state.get_session_mut(&sid) {
+                    session.set_status(SessionStatus::Running);
+                }
+            })
+            .await?;
+
+        info!(
+            "Restarted session {} fresh (no --resume) via tmux name: {}",
+            session_id, tmux_name
+        );
+        Ok(())
+    }
+
     /// Kill a session (stop tmux, optionally remove worktree)
     #[instrument(skip(self))]
     pub async fn kill_session(&self, session_id: &SessionId, remove_worktree: bool) -> Result<()> {
