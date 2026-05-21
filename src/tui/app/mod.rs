@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use crossterm::{
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+        KeyboardEnhancementFlags, MouseButton, MouseEventKind, PopKeyboardEnhancementFlags,
         PushKeyboardEnhancementFlags,
     },
     execute,
@@ -23,11 +23,12 @@ use crossterm::{
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Margin, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+        Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Wrap,
     },
 };
 use tracing::{debug, info, warn};
@@ -105,6 +106,16 @@ pub enum Modal {
         prompt: String,
         value: String,
         on_submit: InputAction,
+        /// When `Some`, the dialog renders a dynamic hint indicating whether
+        /// the sanitized session name corresponds to an already-existing
+        /// branch (local or remote). Populated by `handle_new_session` /
+        /// `handle_new_stacked_session`; other Input flows (Rename) leave
+        /// this as `None`.
+        ///
+        /// Entries are the local-name form returned by `load_branch_entries`
+        /// (i.e. remote-only `origin/<x>` is stored as just `<x>` to match
+        /// `finalize_session`'s resolution logic).
+        existing_branches: Option<Vec<String>>,
     },
     /// Confirmation modal
     Confirm {
@@ -255,7 +266,12 @@ pub enum SettingsTab {
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 4] = [Self::General, Self::Keybindings, Self::Theme, Self::Sections];
+    const ALL: [SettingsTab; 4] = [
+        Self::General,
+        Self::Keybindings,
+        Self::Theme,
+        Self::Sections,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -353,6 +369,11 @@ pub enum SettingsEditing {
         action_name: String,
         keys: Vec<String>,
     },
+    /// Picking from a list of options (used for theme presets)
+    OptionPicker {
+        options: Vec<String>,
+        selected: usize,
+    },
 }
 
 /// Action to perform when input modal is submitted
@@ -377,6 +398,7 @@ pub enum InputAction {
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
     DeleteSession { session_id: SessionId },
+    DeleteMergedPrSessions { session_ids: Vec<SessionId> },
     RestartSession { session_id: SessionId },
     RemoveProject { project_id: ProjectId },
 }
@@ -449,6 +471,9 @@ pub struct AppUiState {
     pub cascade_paused: bool,
     /// Section names that are currently collapsed in the list view.
     pub collapsed_sections: std::collections::HashSet<String>,
+    /// Last left-mouse click on a session-list row: (list index, timestamp).
+    /// Used to detect double-click on the same row within `DOUBLE_CLICK_WINDOW`.
+    pub last_left_click: Option<(usize, Instant)>,
 }
 
 impl Default for AppUiState {
@@ -486,6 +511,7 @@ impl Default for AppUiState {
             agent_states: HashMap::new(),
             cascade_paused: false,
             collapsed_sections: std::collections::HashSet::new(),
+            last_left_click: None,
         }
     }
 }
@@ -763,6 +789,7 @@ impl App {
                         let session_name = cmd.split_whitespace().last().unwrap_or("").to_string();
                         if !session_name.is_empty() {
                             let mut current_session = session_name.clone();
+                            let mut consecutive_ends: u8 = 0;
 
                             loop {
                                 let editor_triggers =
@@ -775,6 +802,26 @@ impl App {
                                 // sessions, where SIGTSTP would freeze the
                                 // pane with no shell to recover from.
                                 let intercept_ctrl_z = !current_session.ends_with("-sh");
+
+                                // Stamp last_attached_at so the in-tmux
+                                // switcher can sort Alt+Tab-style by MRU.
+                                let to_stamp = current_session.clone();
+                                if let Err(e) = self
+                                    .store
+                                    .mutate(move |state| {
+                                        if let Some(session) = state
+                                            .sessions
+                                            .values_mut()
+                                            .find(|s| s.matches_tmux_name(&to_stamp))
+                                        {
+                                            session.mark_attached();
+                                        }
+                                    })
+                                    .await
+                                {
+                                    warn!("Failed to stamp last_attached_at: {}", e);
+                                }
+
                                 let outcome = match crate::tmux::attach_to_session(
                                     &current_session,
                                     editor_triggers,
@@ -796,8 +843,7 @@ impl App {
                                 // The in-session switcher may have run `tmux switch-client`
                                 // mid-attach, so the session we exited from isn't
                                 // necessarily the one we entered with. Trust the outcome.
-                                let switched_via_popup =
-                                    outcome.final_session != current_session;
+                                let switched_via_popup = outcome.final_session != current_session;
                                 current_session = outcome.final_session;
                                 if switched_via_popup {
                                     // Picking a new session in the popup invalidates the
@@ -847,6 +893,7 @@ impl App {
 
                                         // Flush between switches
                                         crate::tmux::flush_stdin();
+                                        consecutive_ends = 0;
                                         info!("Switching to session: {}", current_session);
                                         continue;
                                     }
@@ -859,11 +906,49 @@ impl App {
                                         // the tmux session alive, and then re-attach.
                                         self.open_editor_for_tmux_session(&current_session).await;
                                         crate::tmux::flush_stdin();
+                                        consecutive_ends = 0;
                                         continue;
+                                    }
+                                    crate::tmux::AttachResult::SessionEnded => {
+                                        info!("Session ended, attempting fresh restart");
+                                        let is_claude_session = !current_session.ends_with("-sh");
+                                        if is_claude_session && consecutive_ends < 3 {
+                                            consecutive_ends += 1;
+                                            match self
+                                                .session_manager
+                                                .restart_session_fresh_by_tmux_name(
+                                                    &current_session,
+                                                )
+                                                .await
+                                            {
+                                                Ok(()) => {
+                                                    info!(
+                                                        "Auto-restarted session fresh (attempt {})",
+                                                        consecutive_ends
+                                                    );
+                                                    crate::tmux::flush_stdin();
+                                                    continue;
+                                                }
+                                                Err(e) => {
+                                                    warn!("Failed to auto-restart session: {}", e);
+                                                    self.ui_state.shell_toggle_pair = None;
+                                                    break;
+                                                }
+                                            }
+                                        } else {
+                                            if consecutive_ends >= 3 {
+                                                warn!(
+                                                    "Session ended {} consecutive times, \
+                                                     giving up",
+                                                    consecutive_ends
+                                                );
+                                            }
+                                            self.ui_state.shell_toggle_pair = None;
+                                            break;
+                                        }
                                     }
                                     result => {
                                         info!("Attach ended: {:?}", result);
-                                        // Clear toggle state on normal detach
                                         self.ui_state.shell_toggle_pair = None;
                                         break;
                                     }

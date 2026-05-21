@@ -328,12 +328,7 @@ async fn run_async_loop(
                     // pane the whole time.
                     if data.contains(&0x0F) {
                         if popup_open
-                            .compare_exchange(
-                                false,
-                                true,
-                                Ordering::AcqRel,
-                                Ordering::Acquire,
-                            )
+                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                             .is_ok()
                         {
                             debug!("Ctrl+O detected, spawning switcher popup");
@@ -448,7 +443,8 @@ fn shell_quote(s: &str) -> String {
 /// switch-client` to the chosen session and record it in
 /// `current_session`. Always clears `popup_open` before returning.
 async fn run_switcher_popup(current_session: Arc<Mutex<String>>, popup_open: Arc<AtomicBool>) {
-    let new_session = run_switcher_popup_inner().await;
+    let current_name = current_session.lock().await.clone();
+    let new_session = run_switcher_popup_inner(&current_name).await;
     if let Some(name) = new_session {
         info!("Switcher picked session: {}", name);
         let switch_status = tokio::process::Command::new("tmux")
@@ -467,7 +463,7 @@ async fn run_switcher_popup(current_session: Arc<Mutex<String>>, popup_open: Arc
 }
 
 /// Spawn the popup and return the chosen session name, if any.
-async fn run_switcher_popup_inner() -> Option<String> {
+async fn run_switcher_popup_inner(current_session: &str) -> Option<String> {
     let exe = std::env::current_exe()
         .ok()
         .and_then(|p| p.to_str().map(|s| s.to_string()))
@@ -479,9 +475,10 @@ async fn run_switcher_popup_inner() -> Option<String> {
     ));
 
     let popup_cmd = format!(
-        "{} pick-session --out {}",
+        "{} pick-session --out {} --current {}",
         shell_quote(&exe),
-        shell_quote(&tmp.to_string_lossy())
+        shell_quote(&tmp.to_string_lossy()),
+        shell_quote(current_session),
     );
 
     let status = tokio::process::Command::new("tmux")

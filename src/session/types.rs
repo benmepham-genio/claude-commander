@@ -307,6 +307,11 @@ pub struct WorktreeSession {
     /// oldest-in-section-first sort order.
     #[serde(default = "chrono::Utc::now")]
     pub entered_section_at: DateTime<Utc>,
+    /// Most recent time the user attached to this session. Drives the
+    /// Alt+Tab-style MRU ordering in the in-tmux session picker.
+    /// `None` for sessions never attached since adopting the field.
+    #[serde(default)]
+    pub last_attached_at: Option<DateTime<Utc>>,
 }
 
 impl WorktreeSession {
@@ -352,6 +357,7 @@ impl WorktreeSession {
             section_override: None,
             current_section: None,
             entered_section_at: now,
+            last_attached_at: None,
         }
     }
 
@@ -397,6 +403,7 @@ impl WorktreeSession {
             section_override: None,
             current_section: None,
             entered_section_at: now,
+            last_attached_at: None,
         }
     }
 
@@ -411,6 +418,18 @@ impl WorktreeSession {
     /// Mark the session as active (update last_active_at)
     pub fn touch(&mut self) {
         self.last_active_at = Utc::now();
+    }
+
+    /// Record an attach event. Used by the in-tmux switcher to order
+    /// sessions Alt+Tab-style by most-recently viewed.
+    pub fn mark_attached(&mut self) {
+        self.last_attached_at = Some(Utc::now());
+    }
+
+    /// Whether `name` refers to this session — either the primary tmux
+    /// session or its paired shell session (toggled via Ctrl+\).
+    pub fn matches_tmux_name(&self, name: &str) -> bool {
+        self.tmux_session_name == name || self.shell_tmux_session_name.as_deref() == Some(name)
     }
 
     /// Check if this session matches a search query (fuzzy subsequence).
@@ -429,6 +448,15 @@ impl WorktreeSession {
         .iter()
         .filter_map(|s| crate::fuzzy::fuzzy_score(s, query))
         .max()
+    }
+
+    /// True when the session's PR is merged on GitHub. Honours the legacy
+    /// `pr_merged` flag for state.json files written before `pr_state` existed.
+    pub fn pr_is_merged(&self) -> bool {
+        matches!(
+            crate::git::effective_pr_state(self.pr_state, self.pr_merged),
+            crate::git::PrState::Merged,
+        )
     }
 }
 
@@ -655,6 +683,40 @@ mod tests {
         assert_eq!(session.program, "claude");
         assert!(session.tmux_session_name.starts_with("cc-"));
         assert_eq!(session.status, SessionStatus::Running);
+    }
+
+    #[test]
+    fn test_pr_is_merged() {
+        let mut session = WorktreeSession::new(
+            ProjectId::new(),
+            "x",
+            "b",
+            PathBuf::from("/tmp/x"),
+            "claude",
+        );
+
+        // Default (no PR info): not merged.
+        assert!(!session.pr_is_merged());
+
+        // Explicit pr_state == Merged → merged.
+        session.pr_state = Some(crate::git::PrState::Merged);
+        session.pr_merged = false;
+        assert!(session.pr_is_merged());
+
+        // Backward compat: pre-pr_state state.json with pr_merged=true.
+        session.pr_state = None;
+        session.pr_merged = true;
+        assert!(session.pr_is_merged());
+
+        // Explicit state wins over the legacy bool when they disagree.
+        session.pr_state = Some(crate::git::PrState::Open);
+        session.pr_merged = true;
+        assert!(!session.pr_is_merged());
+
+        // Explicit Open with bool false → not merged.
+        session.pr_state = Some(crate::git::PrState::Open);
+        session.pr_merged = false;
+        assert!(!session.pr_is_merged());
     }
 
     #[test]

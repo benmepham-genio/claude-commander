@@ -158,6 +158,8 @@ pub enum UserCommand {
     CheckoutBranch,
     /// Delete/kill current session
     DeleteSession,
+    /// Delete every session whose PR has merged on GitHub (palette-only)
+    DeleteMergedPrSessions,
     /// Rename the currently selected session (UI title only)
     RenameSession,
     /// Restart current session (kill tmux and recreate)
@@ -256,6 +258,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::NewProject => Self::NewProject,
             BindableAction::CheckoutBranch => Self::CheckoutBranch,
             BindableAction::DeleteSession => Self::DeleteSession,
+            BindableAction::DeleteMergedPrSessions => Self::DeleteMergedPrSessions,
             BindableAction::RenameSession => Self::RenameSession,
             BindableAction::RestartSession => Self::RestartSession,
             BindableAction::RemoveProject => Self::RemoveProject,

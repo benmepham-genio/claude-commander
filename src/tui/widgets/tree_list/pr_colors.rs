@@ -2,7 +2,7 @@
 
 use ratatui::style::Color;
 
-use crate::git::PrState;
+use crate::git::{PrState, effective_pr_state};
 use crate::tui::theme::Theme;
 
 /// Does the PR have any label matching the "review needed" list?
@@ -24,13 +24,7 @@ pub(crate) fn pr_pill_bg_color(
     labels: &[String],
     review_labels: &[String],
 ) -> Color {
-    let effective_state = state.unwrap_or(if pr_merged {
-        PrState::Merged
-    } else {
-        PrState::Open
-    });
-
-    match effective_state {
+    match effective_pr_state(state, pr_merged) {
         PrState::Merged => theme.pr_pill_merged_bg,
         PrState::Closed => theme.pr_pill_closed_bg,
         PrState::Open => {
@@ -60,13 +54,7 @@ pub(crate) fn pr_badge_color(
     labels: &[String],
     review_labels: &[String],
 ) -> Color {
-    let effective_state = state.unwrap_or(if pr_merged {
-        PrState::Merged
-    } else {
-        PrState::Open
-    });
-
-    match effective_state {
+    match effective_pr_state(state, pr_merged) {
         PrState::Merged => theme.status_pr_merged,
         PrState::Closed => theme.pr_closed,
         PrState::Open => {

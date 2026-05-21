@@ -147,44 +147,49 @@ impl TmuxExecutor {
         // launched command with explicit env assignments so child processes
         // (the shell, then `claude` itself) see Claude Commander instead.
         let version = env!("CARGO_PKG_VERSION");
-        let wrapped_cmd = command
-            .map(|cmd| format!("TERM_PROGRAM=claude-commander TERM_PROGRAM_VERSION={version} {cmd}"));
+        let wrapped_cmd = command.map(|cmd| {
+            format!("TERM_PROGRAM=claude-commander TERM_PROGRAM_VERSION={version} {cmd}")
+        });
 
-        // Create session with remain-on-exit option so pane stays open if command exits
-        let args: Vec<&str> = if let Some(cmd) = wrapped_cmd.as_deref() {
-            vec![
-                "new-session",
-                "-d",
-                "-s",
-                session_name,
-                "-c",
-                working_dir_str,
-                "-x",
-                "200",
-                "-y",
-                "50",
-                cmd,
-            ]
-        } else {
-            vec![
-                "new-session",
-                "-d",
-                "-s",
-                session_name,
-                "-c",
-                working_dir_str,
-                "-x",
-                "200",
-                "-y",
-                "50",
-            ]
-        };
+        // Enable remain-on-exit globally BEFORE the new session's pane is
+        // born, in the SAME tmux invocation as new-session. If we set the
+        // option in a separate tmux call, two failure modes appear in
+        // environments without a pre-existing tmux server (e.g. CI):
+        //   1. `set-option -g` doesn't auto-start the server, so it fails
+        //      with "error connecting to /tmp/tmux-1001/default".
+        //   2. If we instead set remain-on-exit per-session AFTER
+        //      new-session, a fast-exiting command (e.g. non-interactive
+        //      `bash` with no controlling tty) can close the only pane,
+        //      end the session, and shut the server down before the
+        //      follow-up set-option call runs.
+        // Chaining `start-server`, `set-option -g`, and `new-session` into
+        // a single tmux invocation sidesteps both: the server is alive
+        // when set-option runs, and the new pane inherits the option from
+        // the moment it's created.
+        let mut args: Vec<&str> = vec![
+            "start-server",
+            ";",
+            "set-option",
+            "-g",
+            "remain-on-exit",
+            "on",
+            ";",
+            "new-session",
+            "-d",
+            "-s",
+            session_name,
+            "-c",
+            working_dir_str,
+            "-x",
+            "200",
+            "-y",
+            "50",
+        ];
+        if let Some(cmd) = wrapped_cmd.as_deref() {
+            args.push(cmd);
+        }
 
         self.execute(&args).await?;
-
-        // Set remain-on-exit so pane stays open if the program exits/crashes
-        self.execute(&["set-option", "-t", session_name, "remain-on-exit", "on"])
-            .await?;
 
         // Enable mouse support so scroll wheel enters copy mode for scrollback
         self.execute(&["set-option", "-t", session_name, "mouse", "on"])
@@ -307,22 +312,28 @@ pub struct StatusBarInfo {
 }
 
 impl StatusBarInfo {
+    const SEP: &'static str = " \u{2502} ";
+
     /// Format the left side of the status bar.
     ///
-    /// Agent session: `project | branch | PR #N | Ctrl-q: detach | Ctrl-\: shell | Ctrl-o: switch`
-    /// Shell session: `project | branch | PR #N | Ctrl-q: detach | Ctrl-\: agent | Ctrl-o: switch`
+    /// Uses bold labels and box-drawing separators (`│`) for a polished look.
     /// `#` is escaped to `##` for tmux format safety.
     pub fn format_left(&self) -> String {
         let safe_branch = self.branch.replace('#', "##");
         let pr = match self.pr_number {
-            Some(n) if self.pr_merged => format!(" | PR ##{} merged", n),
-            Some(n) => format!(" | PR ##{}", n),
+            Some(n) if self.pr_merged => format!("{}PR ##{} merged", Self::SEP, n),
+            Some(n) => format!("{}PR ##{}", Self::SEP, n),
             None => String::new(),
         };
         let toggle_hint = if self.is_shell { "agent" } else { "shell" };
         format!(
-            " {} | {}{} | Ctrl-q: detach | Ctrl-\\: {} | Ctrl-o: switch ",
-            self.project_name, safe_branch, pr, toggle_hint
+            " #[bold]{}#[nobold]{}{}{}{sep}#[bold]Ctrl-q#[nobold]: detach{sep}#[bold]Ctrl-\\#[nobold]: {}{sep}#[bold]Ctrl-o#[nobold]: switch ",
+            self.project_name,
+            Self::SEP,
+            safe_branch,
+            pr,
+            toggle_hint,
+            sep = Self::SEP,
         )
     }
 
@@ -374,7 +385,7 @@ mod tests {
         let info = test_info("feature-auth", None, false);
         assert_eq!(
             info.format_left(),
-            " my-project | feature-auth | Ctrl-q: detach | Ctrl-\\: shell | Ctrl-o: switch "
+            " #[bold]my-project#[nobold] \u{2502} feature-auth \u{2502} #[bold]Ctrl-q#[nobold]: detach \u{2502} #[bold]Ctrl-\\#[nobold]: shell \u{2502} #[bold]Ctrl-o#[nobold]: switch "
         );
     }
 
@@ -389,7 +400,7 @@ mod tests {
         let info = test_info("feature", Some(42), false);
         assert_eq!(
             info.format_left(),
-            " my-project | feature | PR ##42 | Ctrl-q: detach | Ctrl-\\: shell | Ctrl-o: switch "
+            " #[bold]my-project#[nobold] \u{2502} feature \u{2502} PR ##42 \u{2502} #[bold]Ctrl-q#[nobold]: detach \u{2502} #[bold]Ctrl-\\#[nobold]: shell \u{2502} #[bold]Ctrl-o#[nobold]: switch "
         );
     }
 
@@ -398,7 +409,7 @@ mod tests {
         let info = test_info("feature", Some(42), true);
         assert_eq!(
             info.format_left(),
-            " my-project | feature | PR ##42 merged | Ctrl-q: detach | Ctrl-\\: shell | Ctrl-o: switch "
+            " #[bold]my-project#[nobold] \u{2502} feature \u{2502} PR ##42 merged \u{2502} #[bold]Ctrl-q#[nobold]: detach \u{2502} #[bold]Ctrl-\\#[nobold]: shell \u{2502} #[bold]Ctrl-o#[nobold]: switch "
         );
     }
 
@@ -408,7 +419,7 @@ mod tests {
         info.is_shell = true;
         assert_eq!(
             info.format_left(),
-            " my-project | feature-auth | Ctrl-q: detach | Ctrl-\\: agent | Ctrl-o: switch "
+            " #[bold]my-project#[nobold] \u{2502} feature-auth \u{2502} #[bold]Ctrl-q#[nobold]: detach \u{2502} #[bold]Ctrl-\\#[nobold]: agent \u{2502} #[bold]Ctrl-o#[nobold]: switch "
         );
     }
 

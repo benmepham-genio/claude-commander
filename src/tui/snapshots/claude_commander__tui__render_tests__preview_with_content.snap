@@ -2,7 +2,7 @@
 source: src/tui/render_tests.rs
 expression: terminal.backend()
 ---
-"┌ Preview · Info · Shell ──────────────────────────────────┐"
+"╭ Preview · Info · Shell ──────────────────────────────────╮"
 "│$ claude --resume                                         │"
 "│                                                          │"
 "│Claude is thinking...                                     │"
@@ -13,4 +13,4 @@ expression: terminal.backend()
 "│Reading src/auth.rs...                                    │"
 "│                                                          │"
 "│                                                          │"
-"└──────────────────────────────────────────────────────────┘"
+"╰──────────────────────────────────────────────────────────╯"

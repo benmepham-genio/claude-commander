@@ -1,6 +1,13 @@
 //! Background tasks: preview updates, PR status checks, info fetching, AI summaries.
 
+use futures::StreamExt;
+
 use super::*;
+
+/// Cap concurrent subprocess fan-outs (e.g. `gh pr list` across all
+/// sessions). Each call holds 3+ pipe FDs, so unbounded fan-out can
+/// EMFILE under the macOS launchd 256-FD default.
+const PR_FANOUT_CONCURRENCY: usize = 8;
 
 impl App {
     /// Spawn a background task to fetch preview/diff/shell data.
@@ -73,12 +80,14 @@ impl App {
                     .collect()
             };
 
-            let results = futures::future::join_all(sessions_to_check.into_iter().map(
+            let results: Vec<_> = futures::stream::iter(sessions_to_check.into_iter().map(
                 |(session_id, branch, repo_path)| async move {
                     let pr_result = check_pr_for_branch(&repo_path, &branch).await;
                     (session_id, pr_result)
                 },
             ))
+            .buffer_unordered(PR_FANOUT_CONCURRENCY)
+            .collect()
             .await;
 
             let _ = tx

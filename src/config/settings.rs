@@ -124,6 +124,10 @@ pub struct Config {
     #[serde(default)]
     pub theme: ThemeOverrides,
 
+    /// Use rounded border corners (╭╮╰╯) instead of square (┌┐└┘). Default false.
+    #[serde(default)]
+    pub rounded_borders: bool,
+
     /// Section definitions for grouping sessions in the TUI list.
     /// First-match-wins in declared order; unmatched sessions fall into a
     /// built-in "Other" catch-all.
@@ -163,6 +167,7 @@ impl Default for Config {
             log_file: None,
             keybindings: KeyBindings::default(),
             theme: ThemeOverrides::default(),
+            rounded_borders: false,
             sections: Vec::new(),
         }
     }

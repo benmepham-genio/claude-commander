@@ -36,6 +36,7 @@ pub enum BindableAction {
     NewProject,
     CheckoutBranch,
     DeleteSession,
+    DeleteMergedPrSessions,
     RenameSession,
     RestartSession,
     RemoveProject,
@@ -74,6 +75,7 @@ impl BindableAction {
         Self::NewProject,
         Self::CheckoutBranch,
         Self::DeleteSession,
+        Self::DeleteMergedPrSessions,
         Self::RenameSession,
         Self::RestartSession,
         Self::RemoveProject,
@@ -112,6 +114,7 @@ impl BindableAction {
             Self::NewProject => "new_project",
             Self::CheckoutBranch => "checkout_branch",
             Self::DeleteSession => "delete_session",
+            Self::DeleteMergedPrSessions => "delete_merged_pr_sessions",
             Self::RenameSession => "rename_session",
             Self::RestartSession => "restart_session",
             Self::RemoveProject => "remove_project",
@@ -151,6 +154,7 @@ impl BindableAction {
             Self::NewProject => "New project (add git repo)",
             Self::CheckoutBranch => "Checkout existing branch",
             Self::DeleteSession => "Delete/kill session",
+            Self::DeleteMergedPrSessions => "Delete sessions with merged PRs",
             Self::RenameSession => "Rename session",
             Self::RestartSession => "Restart session",
             Self::RemoveProject => "Remove project",
@@ -188,6 +192,7 @@ impl BindableAction {
             | Self::NewProject
             | Self::CheckoutBranch
             | Self::DeleteSession
+            | Self::DeleteMergedPrSessions
             | Self::RenameSession
             | Self::RestartSession
             | Self::RemoveProject
@@ -225,6 +230,7 @@ impl FromStr for BindableAction {
             "new_project" => Ok(Self::NewProject),
             "checkout_branch" => Ok(Self::CheckoutBranch),
             "delete_session" => Ok(Self::DeleteSession),
+            "delete_merged_pr_sessions" => Ok(Self::DeleteMergedPrSessions),
             "rename_session" => Ok(Self::RenameSession),
             "restart_session" => Ok(Self::RestartSession),
             "remove_project" => Ok(Self::RemoveProject),

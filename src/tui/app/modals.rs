@@ -11,13 +11,27 @@ impl App {
                 title,
                 prompt,
                 value,
+                existing_branches,
                 ..
             } => {
-                // Fixed height: 2 borders + prompt line + blank + input = 5 rows.
-                // Previous 20%-of-terminal rule wasted ~4 lines of vertical
-                // space for a single-line input.
+                // Resolve the hint up-front so we know whether to reserve a
+                // line for it. Only the new-session flows populate
+                // `existing_branches`; everyone else gets the original
+                // 5-row layout.
+                let hint = existing_branches.as_ref().and_then(|branches| {
+                    crate::session::match_existing_branch(
+                        value,
+                        &self.config.branch_prefix,
+                        branches,
+                    )
+                    .map(|b| format!("↳ existing branch: {} — will check out", b))
+                });
+
+                // Base: 2 borders + prompt + blank + input = 5 rows. Add one
+                // row when the existing-branch hint is showing so the layout
+                // doesn't jump when it appears/disappears.
                 let modal_width = (area.width * 60 / 100).max(40);
-                let modal_height = 5u16;
+                let modal_height = if hint.is_some() { 6u16 } else { 5u16 };
                 let modal_area = Rect {
                     x: area.x + (area.width.saturating_sub(modal_width)) / 2,
                     y: area.y + (area.height.saturating_sub(modal_height)) / 2,
@@ -29,14 +43,26 @@ impl App {
                 let block = Block::default()
                     .title(format!(" {} ", title))
                     .borders(Borders::ALL)
+                    .border_type(self.border_type())
                     .border_style(Style::default().fg(self.theme.modal_warning));
 
                 let inner = block.inner(modal_area);
                 frame.render_widget(block, modal_area);
 
-                let text = format!("{}\n\n❯ {}_", prompt, value);
-                let paragraph = Paragraph::new(text);
-                frame.render_widget(paragraph, inner);
+                let mut lines: Vec<Line> = vec![
+                    Line::from(prompt.as_str()),
+                    Line::from(""),
+                    Line::from(format!("❯ {}_", value)),
+                ];
+                if let Some(h) = hint {
+                    lines.push(Line::from(Span::styled(
+                        h,
+                        Style::default()
+                            .fg(self.theme.modal_info)
+                            .add_modifier(Modifier::ITALIC),
+                    )));
+                }
+                frame.render_widget(Paragraph::new(lines), inner);
             }
 
             Modal::PathInput {
@@ -66,6 +92,7 @@ impl App {
                 let block = Block::default()
                     .title(format!(" {} ", title))
                     .borders(Borders::ALL)
+                    .border_type(self.border_type())
                     .border_style(Style::default().fg(self.theme.modal_warning));
 
                 let inner = block.inner(modal_area);
@@ -130,6 +157,7 @@ impl App {
                 let block = Block::default()
                     .title(format!(" {} ", title))
                     .borders(Borders::ALL)
+                    .border_type(self.border_type())
                     .border_style(Style::default().fg(self.theme.modal_info));
 
                 let inner = block.inner(modal_area);
@@ -158,6 +186,7 @@ impl App {
                 let block = Block::default()
                     .title(format!(" {} ", title))
                     .borders(Borders::ALL)
+                    .border_type(self.border_type())
                     .border_style(Style::default().fg(self.theme.modal_error));
 
                 let inner = block.inner(modal_area);
@@ -175,6 +204,7 @@ impl App {
                 let block = Block::default()
                     .title(" Error ")
                     .borders(Borders::ALL)
+                    .border_type(self.border_type())
                     .border_style(Style::default().fg(self.theme.modal_error));
 
                 let inner = block.inner(modal_area);
@@ -231,6 +261,7 @@ impl App {
                 let block = Block::default()
                     .title(title)
                     .borders(Borders::ALL)
+                    .border_type(self.border_type())
                     .border_style(Style::default().fg(self.theme.modal_info));
 
                 let inner = block.inner(modal_area);
@@ -402,6 +433,7 @@ impl App {
                 let block = Block::default()
                     .title(title)
                     .borders(Borders::ALL)
+                    .border_type(self.border_type())
                     .border_style(Style::default().fg(self.theme.modal_info));
 
                 let inner = block.inner(modal_area);
@@ -593,6 +625,7 @@ impl App {
         let block = Block::default()
             .title(" Help ")
             .borders(Borders::ALL)
+            .border_type(self.border_type())
             .border_style(Style::default().fg(self.theme.modal_info));
         let inner = block.inner(modal_area);
         frame.render_widget(block, modal_area);

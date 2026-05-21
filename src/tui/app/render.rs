@@ -3,6 +3,15 @@
 use super::*;
 
 impl App {
+    /// Return the border type based on config: rounded or plain (square).
+    pub(super) fn border_type(&self) -> BorderType {
+        if self.config.rounded_borders {
+            BorderType::Rounded
+        } else {
+            BorderType::Plain
+        }
+    }
+
     /// Render the UI
     pub(super) fn render(&mut self, frame: &mut Frame) {
         let size = frame.area();
@@ -107,25 +116,36 @@ impl App {
         Line::from(spans)
     }
 
-    /// Render the preview pane
-    pub(super) fn render_preview(&mut self, frame: &mut Frame, area: Rect) {
+    /// Build a standard right-pane block with tabs, border styling, and focus state.
+    fn pane_block(&self, tabs: &[&str], active_tab: usize) -> Block<'static> {
         let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
-        let dim_opacity = if !is_focused && self.config.dim_unfocused_preview {
-            Some(self.config.dim_unfocused_opacity)
-        } else {
-            None
-        };
-
-        let title = self.build_pane_tabs(&["Preview", "Info", "Shell"], 0);
-
-        let block = Block::default()
+        let title = self.build_pane_tabs(tabs, active_tab);
+        Block::default()
             .title(title)
             .borders(Borders::ALL)
+            .border_type(self.border_type())
             .border_style(if is_focused {
                 self.theme.border_focused()
             } else {
                 self.theme.border_unfocused()
-            });
+            })
+    }
+
+    /// Return `Some(opacity)` when the right pane is unfocused and dim is enabled,
+    /// `None` otherwise. Used by preview and shell panes.
+    fn pane_dim_opacity(&self) -> Option<f32> {
+        let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
+        if !is_focused && self.config.dim_unfocused_preview {
+            Some(self.config.dim_unfocused_opacity)
+        } else {
+            None
+        }
+    }
+
+    /// Render the preview pane
+    pub(super) fn render_preview(&mut self, frame: &mut Frame, area: Rect) {
+        let dim_opacity = self.pane_dim_opacity();
+        let block = self.pane_block(&["Preview", "Info", "Shell"], 0);
 
         // Update preview state with visible area
         let inner_height = area.height.saturating_sub(2);
@@ -143,7 +163,6 @@ impl App {
 
     /// Render the info pane (session metadata, PR details, AI summary)
     pub(super) fn render_info(&mut self, frame: &mut Frame, area: Rect) {
-        let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
         let on_project = self.is_project_selected();
 
         // Compute display string for the generate-summary hotkey (None = AI disabled)
@@ -157,20 +176,11 @@ impl App {
             None
         };
 
-        let title = if on_project {
-            self.build_pane_tabs(&["Shell", "Info"], 1)
+        let block = if on_project {
+            self.pane_block(&["Shell", "Info"], 1)
         } else {
-            self.build_pane_tabs(&["Preview", "Info", "Shell"], 1)
+            self.pane_block(&["Preview", "Info", "Shell"], 1)
         };
-
-        let block = Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(if is_focused {
-                self.theme.border_focused()
-            } else {
-                self.theme.border_unfocused()
-            });
 
         // Build the info content based on current selection
         let content = if let Some(session_id) = self.ui_state.selected_session_id {
@@ -234,7 +244,7 @@ impl App {
                     None
                 };
 
-                let data = InfoSessionData {
+                InfoContent::Session(InfoSessionData {
                     title,
                     branch,
                     created_at,
@@ -247,83 +257,8 @@ impl App {
                     pr_merged,
                     enriched_pr,
                     ai_summary,
-                    summary_key_hint: summary_key_hint.clone(),
-                };
-
-                // Count lines for scroll state
-                let line_count = InfoView::new(InfoContent::Session(data), &self.theme)
-                    .build_lines()
-                    .len();
-                let inner_height = area.height.saturating_sub(2);
-                self.ui_state
-                    .info_state
-                    .set_metrics(line_count, inner_height);
-
-                // Rebuild data (it was consumed by the line count call)
-                let enriched_pr = self
-                    .ui_state
-                    .enriched_pr
-                    .as_ref()
-                    .and_then(|(sid, pr)| if *sid == session_id { Some(pr) } else { None });
-                let ai_summary = if self.config.ai_summary_enabled {
-                    self.ui_state.ai_summaries.get(&session_id)
-                } else {
-                    None
-                };
-                // Re-find session data (original was consumed)
-                let session_data2 = self.ui_state.list_items.iter().find_map(|item| {
-                    if let SessionListItem::Worktree {
-                        id,
-                        title,
-                        branch,
-                        status,
-                        program,
-                        pr_number,
-                        pr_url,
-                        pr_merged,
-                        worktree_path,
-                        created_at,
-                        ..
-                    } = item
-                    {
-                        if *id == session_id {
-                            Some((
-                                title.clone(),
-                                branch.clone(),
-                                *status,
-                                program.clone(),
-                                *pr_number,
-                                pr_url.clone(),
-                                *pr_merged,
-                                worktree_path.display().to_string(),
-                                created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
-                            ))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                });
-                if let Some((t, b, s, p, pn, pu, pm, wp, ca)) = session_data2 {
-                    InfoContent::Session(InfoSessionData {
-                        title: t,
-                        branch: b,
-                        created_at: ca,
-                        status: s,
-                        program: p,
-                        worktree_path: wp,
-                        diff_info: &self.ui_state.diff_info,
-                        pr_number: pn,
-                        pr_url: pu,
-                        pr_merged: pm,
-                        enriched_pr,
-                        ai_summary,
-                        summary_key_hint,
-                    })
-                } else {
-                    InfoContent::Empty
-                }
+                    summary_key_hint,
+                })
             } else {
                 InfoContent::Empty
             }
@@ -352,9 +287,6 @@ impl App {
             });
 
             if let Some((name, repo_path, main_branch)) = project_data {
-                let inner_height = area.height.saturating_sub(2);
-                self.ui_state.info_state.set_metrics(3, inner_height);
-
                 InfoContent::Project(InfoProjectData {
                     name,
                     repo_path,
@@ -367,7 +299,16 @@ impl App {
             InfoContent::Empty
         };
 
-        let info_view = InfoView::new(content, &self.theme)
+        // Build lines once, use for both scroll metrics and rendering
+        let info_view = InfoView::new(content, &self.theme);
+        let lines = info_view.build_lines();
+        let inner_height = area.height.saturating_sub(2);
+        self.ui_state
+            .info_state
+            .set_metrics(lines.len(), inner_height);
+
+        let info_view = info_view
+            .with_prebuilt_lines(lines)
             .block(block)
             .scroll(self.ui_state.info_state.scroll_offset);
 
@@ -376,27 +317,13 @@ impl App {
 
     /// Render the shell pane
     pub(super) fn render_shell(&mut self, frame: &mut Frame, area: Rect) {
-        let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
-        let dim_opacity = if !is_focused && self.config.dim_unfocused_preview {
-            Some(self.config.dim_unfocused_opacity)
-        } else {
-            None
-        };
+        let dim_opacity = self.pane_dim_opacity();
 
-        let title = if self.is_project_selected() {
-            self.build_pane_tabs(&["Shell", "Info"], 0)
+        let block = if self.is_project_selected() {
+            self.pane_block(&["Shell", "Info"], 0)
         } else {
-            self.build_pane_tabs(&["Preview", "Info", "Shell"], 2)
+            self.pane_block(&["Preview", "Info", "Shell"], 2)
         };
-
-        let block = Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(if is_focused {
-                self.theme.border_focused()
-            } else {
-                self.theme.border_unfocused()
-            });
 
         let inner_height = area.height.saturating_sub(2);
         self.ui_state
@@ -424,44 +351,79 @@ impl App {
             height: 1,
         };
 
-        let status = if let Some((ref msg, expires)) = self.ui_state.status_message {
+        let base_style = self.theme.status_bar();
+        let sep = Span::styled(" \u{2502} ", base_style);
+
+        // Fill the entire status bar background
+        let bg_line = Line::from(vec![Span::styled(
+            " ".repeat(status_area.width as usize),
+            base_style,
+        )]);
+        frame.render_widget(Paragraph::new(bg_line), status_area);
+
+        let toast = if let Some((ref msg, expires)) = self.ui_state.status_message {
             if Instant::now() < expires {
-                msg.clone()
+                Some(msg.clone())
             } else {
-                String::new()
+                None
             }
         } else {
-            String::new()
+            None
         };
 
         let restart_needed = self.config_store.restart_required();
 
-        let status = if status.is_empty() {
-            let session_count = self
-                .ui_state
-                .list_items
-                .iter()
-                .filter(|i| i.is_worktree())
-                .count();
+        let session_count = self
+            .ui_state
+            .list_items
+            .iter()
+            .filter(|i| i.is_worktree())
+            .count();
+
+        let sessions_span = Span::styled(
+            format!(" Sessions: {session_count}"),
+            base_style.add_modifier(Modifier::BOLD),
+        );
+
+        let help_hint = Span::styled("? help ", base_style);
+
+        // Build left-side spans and right-side help hint based on state
+        let left_spans = if let Some(msg) = toast {
+            let mut spans = vec![sessions_span, sep.clone(), Span::styled(msg, base_style)];
             if restart_needed {
-                format!(
-                    "Sessions: {} | Restart to apply config changes | ? help",
-                    session_count
-                )
-            } else {
-                format!(
-                    "Sessions: {} | Press ? for help | n: new session | N: add project",
-                    session_count
-                )
+                spans.push(sep);
+                spans.push(Span::styled("Restart to apply config changes", base_style));
             }
+            spans
         } else if restart_needed {
-            format!("{} | Restart to apply config changes", status)
+            vec![
+                sessions_span,
+                sep,
+                Span::styled("Restart to apply config changes", base_style),
+            ]
         } else {
-            status
+            vec![
+                sessions_span,
+                sep.clone(),
+                Span::styled("n", base_style.add_modifier(Modifier::BOLD)),
+                Span::styled(": new session", base_style),
+                sep,
+                Span::styled("N", base_style.add_modifier(Modifier::BOLD)),
+                Span::styled(": add project", base_style),
+            ]
         };
 
-        let paragraph = Paragraph::new(status).style(self.theme.status_bar());
+        // Split the status area into left (fill) and right (fixed width for help hint)
+        let help_width = 8u16; // "? help " + padding
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Fill(1), Constraint::Length(help_width)])
+            .split(status_area);
 
-        frame.render_widget(paragraph, status_area);
+        let left_line = Line::from(left_spans);
+        frame.render_widget(Paragraph::new(left_line).style(base_style), chunks[0]);
+
+        let right_line = Line::from(vec![help_hint]).alignment(Alignment::Right);
+        frame.render_widget(Paragraph::new(right_line).style(base_style), chunks[1]);
     }
 }
