@@ -51,9 +51,45 @@ fn classify_help_key(key: &crossterm::event::KeyEvent, kb: &crate::config::KeyBi
 /// Which filterable modal needs its filter recomputed after a paste.
 /// Used to defer the `&mut self` refilter call until after the
 /// `&mut self.ui_state.modal` borrow has been released.
+#[derive(Debug, PartialEq, Eq)]
 enum PasteRefilter {
     CheckoutBranch,
     QuickSwitch,
+}
+
+/// Append clipboard text to the open modal's input field. Newlines are
+/// stripped so a multi-line paste doesn't accidentally submit. Returns
+/// `Some(PasteRefilter::…)` when the caller still needs to recompute a
+/// filtered list via an `&mut self` helper; `None` when handling is
+/// complete (or the modal has no text field).
+fn apply_paste_to_modal(modal: &mut Modal, text: &str) -> Option<PasteRefilter> {
+    let clean = text.replace(['\n', '\r'], "");
+    match modal {
+        Modal::Input { value, .. } => {
+            value.push_str(&clean);
+            None
+        }
+        Modal::PathInput {
+            value,
+            completer,
+            scroll,
+            ..
+        } => {
+            value.push_str(&clean);
+            completer.refilter(value);
+            *scroll = 0;
+            None
+        }
+        Modal::CheckoutBranch { query, .. } => {
+            query.push_str(&clean);
+            Some(PasteRefilter::CheckoutBranch)
+        }
+        Modal::QuickSwitch { query, .. } => {
+            query.push_str(&clean);
+            Some(PasteRefilter::QuickSwitch)
+        }
+        _ => None,
+    }
 }
 
 /// Plain printable characters (no modifier, or Shift only) belong in a
@@ -161,34 +197,7 @@ impl App {
             },
             InputEvent::Paste(text) => {
                 // Handle paste in modal input, ignore otherwise
-                let clean = text.replace(['\n', '\r'], "");
-                let needs_refilter = match &mut self.ui_state.modal {
-                    Modal::Input { value, .. } => {
-                        value.push_str(&clean);
-                        None
-                    }
-                    Modal::PathInput {
-                        value,
-                        completer,
-                        scroll,
-                        ..
-                    } => {
-                        value.push_str(&clean);
-                        completer.refilter(value);
-                        *scroll = 0;
-                        None
-                    }
-                    Modal::CheckoutBranch { query, .. } => {
-                        query.push_str(&clean);
-                        Some(PasteRefilter::CheckoutBranch)
-                    }
-                    Modal::QuickSwitch { query, .. } => {
-                        query.push_str(&clean);
-                        Some(PasteRefilter::QuickSwitch)
-                    }
-                    _ => None,
-                };
-                match needs_refilter {
+                match apply_paste_to_modal(&mut self.ui_state.modal, &text) {
                     Some(PasteRefilter::CheckoutBranch) => self.refilter_checkout_branches(),
                     Some(PasteRefilter::QuickSwitch) => self.refilter_quick_switch(),
                     None => {}
@@ -901,5 +910,147 @@ mod tests {
         ] {
             assert_eq!(palette_text_char(&key(code)), None, "{code:?}");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_paste_to_modal: routes clipboard text into the open modal's
+    // text field and reports whether the caller still needs to recompute
+    // a filtered list.
+    // -----------------------------------------------------------------------
+
+    use crate::session::ProjectId;
+    use crate::tui::app::{InputAction, Modal, PaletteMode};
+    use crate::tui::path_completer::PathCompleter;
+
+    fn checkout_modal(query: &str) -> Modal {
+        Modal::CheckoutBranch {
+            project_id: ProjectId::new(),
+            query: query.to_string(),
+            all_branches: Vec::new(),
+            filtered: Vec::new(),
+            selected_idx: 0,
+            scroll: 0,
+            fetching: false,
+        }
+    }
+
+    fn quick_switch_modal(query: &str) -> Modal {
+        Modal::QuickSwitch {
+            mode: PaletteMode::Unified,
+            query: query.to_string(),
+            matches: Vec::new(),
+            selected_idx: 0,
+            scroll: 0,
+        }
+    }
+
+    fn input_modal(value: &str) -> Modal {
+        Modal::Input {
+            title: String::new(),
+            prompt: String::new(),
+            value: value.to_string(),
+            on_submit: InputAction::AddProject,
+            existing_branches: None,
+        }
+    }
+
+    #[test]
+    fn paste_into_checkout_branch_appends_and_requests_refilter() {
+        // Regression: paste was silently dropped because the CheckoutBranch
+        // arm was missing from the InputEvent::Paste match.
+        let mut modal = checkout_modal("");
+        let refilter = apply_paste_to_modal(&mut modal, "feature-foo");
+        assert_eq!(refilter, Some(PasteRefilter::CheckoutBranch));
+        match modal {
+            Modal::CheckoutBranch { query, .. } => assert_eq!(query, "feature-foo"),
+            _ => panic!("modal variant changed"),
+        }
+    }
+
+    #[test]
+    fn paste_into_checkout_branch_appends_to_existing_query() {
+        let mut modal = checkout_modal("feat-");
+        apply_paste_to_modal(&mut modal, "bar");
+        match modal {
+            Modal::CheckoutBranch { query, .. } => assert_eq!(query, "feat-bar"),
+            _ => panic!("modal variant changed"),
+        }
+    }
+
+    #[test]
+    fn paste_into_checkout_branch_strips_newlines() {
+        // A multi-line paste must not contain \n / \r — Enter handling would
+        // otherwise submit prematurely if the input handler ever forwarded
+        // newlines as KeyCode::Enter.
+        let mut modal = checkout_modal("");
+        apply_paste_to_modal(&mut modal, "feature-foo\nfeature-bar\r\n");
+        match modal {
+            Modal::CheckoutBranch { query, .. } => {
+                assert_eq!(query, "feature-foofeature-bar");
+            }
+            _ => panic!("modal variant changed"),
+        }
+    }
+
+    #[test]
+    fn paste_into_quick_switch_appends_and_requests_refilter() {
+        let mut modal = quick_switch_modal("");
+        let refilter = apply_paste_to_modal(&mut modal, "hello");
+        assert_eq!(refilter, Some(PasteRefilter::QuickSwitch));
+        match modal {
+            Modal::QuickSwitch { query, .. } => assert_eq!(query, "hello"),
+            _ => panic!("modal variant changed"),
+        }
+    }
+
+    #[test]
+    fn paste_into_input_appends_without_refilter() {
+        // Modal::Input has no filtered list — no refilter is requested.
+        let mut modal = input_modal("foo");
+        let refilter = apply_paste_to_modal(&mut modal, "bar");
+        assert_eq!(refilter, None);
+        match modal {
+            Modal::Input { value, .. } => assert_eq!(value, "foobar"),
+            _ => panic!("modal variant changed"),
+        }
+    }
+
+    #[test]
+    fn paste_into_path_input_appends_and_refilters_inline() {
+        // PathInput owns its completer, so it can refilter inline without
+        // the caller's help — `None` is returned.
+        let mut modal = Modal::PathInput {
+            title: String::new(),
+            prompt: String::new(),
+            value: String::from("/tm"),
+            on_submit: InputAction::AddProject,
+            completer: PathCompleter::new(),
+            scroll: 7,
+        };
+        let refilter = apply_paste_to_modal(&mut modal, "p");
+        assert_eq!(refilter, None);
+        match modal {
+            Modal::PathInput { value, scroll, .. } => {
+                assert_eq!(value, "/tmp");
+                assert_eq!(scroll, 0, "scroll resets on input change");
+            }
+            _ => panic!("modal variant changed"),
+        }
+    }
+
+    #[test]
+    fn paste_into_no_modal_is_noop() {
+        let mut modal = Modal::None;
+        assert_eq!(apply_paste_to_modal(&mut modal, "hello"), None);
+        assert!(matches!(modal, Modal::None));
+    }
+
+    #[test]
+    fn paste_into_unhandled_modal_is_noop() {
+        // Help/Error/Confirm/Loading/Settings have no text input — paste is
+        // intentionally ignored. Spot-check one to pin the behavior.
+        let mut modal = Modal::Help { scroll: 0 };
+        assert_eq!(apply_paste_to_modal(&mut modal, "hello"), None);
+        assert!(matches!(modal, Modal::Help { scroll: 0 }));
     }
 }
