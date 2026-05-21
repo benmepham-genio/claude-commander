@@ -267,6 +267,9 @@ async fn test_session_manager_restart() {
 
     // Restart from Running state
     let result = manager.restart_session(&session_id).await;
+    if let Err(e) = &result {
+        eprintln!("restart_session (running) returned error: {e:#?}");
+    }
     assert!(result.is_ok(), "Should restart running session");
 
     // Verify still Running after restart
