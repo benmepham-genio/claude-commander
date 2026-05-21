@@ -436,8 +436,7 @@ impl App {
 
                 // Hint line
                 let hint_area = Rect { height: 1, ..inner };
-                let all_checked =
-                    !projects.is_empty() && projects.iter().all(|(_, _, c)| *c);
+                let all_checked = !projects.is_empty() && projects.iter().all(|(_, _, c)| *c);
                 let toggle_hint = if all_checked {
                     "deselect all"
                 } else {
@@ -486,10 +485,7 @@ impl App {
                                     Style::default().fg(self.theme.text_secondary)
                                 },
                             ),
-                            Span::styled(
-                                label.to_string(),
-                                style.add_modifier(Modifier::BOLD),
-                            ),
+                            Span::styled(label.to_string(), style.add_modifier(Modifier::BOLD)),
                         ])
                     } else {
                         let (_, name, checked) = &projects[row_idx - 1];
@@ -517,15 +513,16 @@ impl App {
             }
 
             Modal::MultiRepoTitle {
-                value,
-                project_ids,
-                ..
+                value, project_ids, ..
             } => {
                 let modal_area = centered_rect(60, 20, area);
                 frame.render_widget(Clear, modal_area);
 
                 let block = Block::default()
-                    .title(format!(" Multi-Repo Session ({} repos) ", project_ids.len()))
+                    .title(format!(
+                        " Multi-Repo Session ({} repos) ",
+                        project_ids.len()
+                    ))
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(self.theme.modal_warning));
 

@@ -36,12 +36,12 @@ impl App {
         if let Some(mr_id) = multi_repo_id {
             debug!("Spawning preview update for multi-repo session={}", mr_id);
             tokio::spawn(async move {
-                let preview_content =
-                    if let Ok(content) = mgr.get_multi_repo_content(&mr_id).await {
-                        content.content
-                    } else {
-                        String::new()
-                    };
+                let preview_content = if let Ok(content) = mgr.get_multi_repo_content(&mr_id).await
+                {
+                    content.content
+                } else {
+                    String::new()
+                };
                 let _ = tx
                     .send(AppEvent::StateUpdate(StateUpdate::PreviewReady {
                         session_id: None,

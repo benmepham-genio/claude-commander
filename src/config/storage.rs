@@ -584,11 +584,8 @@ mod tests {
     #[test]
     fn test_add_remove_multi_repo_session() {
         let mut state = AppState::new();
-        let session = crate::session::MultiRepoSession::new_creating(
-            "Update deps",
-            "update-deps",
-            "claude",
-        );
+        let session =
+            crate::session::MultiRepoSession::new_creating("Update deps", "update-deps", "claude");
         let id = session.id;
 
         state.add_multi_repo_session(session);
@@ -641,6 +638,85 @@ mod tests {
 
         let loaded = AppState::load_from(&state_path).unwrap();
         assert_eq!(loaded.multi_repo_session_count(), 0);
+    }
+
+    /// A multi-repo session must be findable in `multi_repo_sessions` by its
+    /// `tmux_session_name`. The restart-by-tmux-name path in `lifecycle.rs`
+    /// performs exactly this lookup; if it ever drops back to only searching
+    /// `state.sessions`, multi-repo sessions silently fail to restart when
+    /// their Claude process exits.
+    #[test]
+    fn test_multi_repo_session_findable_by_tmux_name() {
+        let mut state = AppState::new();
+        let session =
+            crate::session::MultiRepoSession::new_creating("Cross-repo", "cross-repo", "claude");
+        let tmux_name = session.tmux_session_name.clone();
+        let id = session.id;
+        state.add_multi_repo_session(session);
+
+        let found = state
+            .multi_repo_sessions
+            .values()
+            .find(|s| s.tmux_session_name == tmux_name);
+        assert!(found.is_some(), "multi-repo session not found by tmux name");
+        assert_eq!(found.unwrap().id, id);
+
+        // And a single-repo session lookup with the same name must NOT match.
+        let found_in_sessions = state
+            .sessions
+            .values()
+            .find(|s| s.tmux_session_name == tmux_name);
+        assert!(found_in_sessions.is_none());
+    }
+
+    /// `cc-mr-` and `cc-` namespaces must not collide: a single-repo session
+    /// lookup by tmux name must never match a multi-repo session, and
+    /// vice-versa.
+    #[test]
+    fn test_session_tmux_namespaces_disjoint() {
+        let mut state = AppState::new();
+
+        let mr = crate::session::MultiRepoSession::new_creating("a", "a", "claude");
+        let mr_tmux = mr.tmux_session_name.clone();
+        state.add_multi_repo_session(mr);
+
+        let sr = crate::session::WorktreeSession::new(
+            ProjectId::new(),
+            "b",
+            "b",
+            PathBuf::from("/tmp/wt"),
+            "claude",
+        );
+        let sr_tmux = sr.tmux_session_name.clone();
+        state.add_session(sr);
+
+        // mr_tmux only matches in multi_repo_sessions.
+        assert!(
+            state
+                .multi_repo_sessions
+                .values()
+                .any(|s| s.tmux_session_name == mr_tmux)
+        );
+        assert!(
+            !state
+                .sessions
+                .values()
+                .any(|s| s.tmux_session_name == mr_tmux)
+        );
+
+        // sr_tmux only matches in sessions.
+        assert!(
+            state
+                .sessions
+                .values()
+                .any(|s| s.tmux_session_name == sr_tmux)
+        );
+        assert!(
+            !state
+                .multi_repo_sessions
+                .values()
+                .any(|s| s.tmux_session_name == sr_tmux)
+        );
     }
 
     #[test]

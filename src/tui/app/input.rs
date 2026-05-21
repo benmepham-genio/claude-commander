@@ -555,8 +555,7 @@ impl App {
                         // them all; otherwise uncheck them all.
                         KeyCode::Char(' ') => {
                             if *selected_idx == 0 {
-                                let any_unchecked =
-                                    projects.iter().any(|(_, _, checked)| !checked);
+                                let any_unchecked = projects.iter().any(|(_, _, checked)| !checked);
                                 for entry in projects.iter_mut() {
                                     entry.2 = any_unchecked;
                                 }
@@ -591,10 +590,7 @@ impl App {
                 }
             }
 
-            Modal::MultiRepoTitle {
-                project_ids,
-                value,
-            } => match key.code {
+            Modal::MultiRepoTitle { project_ids, value } => match key.code {
                 KeyCode::Enter => {
                     if value.trim().is_empty() {
                         return;
@@ -603,7 +599,10 @@ impl App {
                     let title = value.clone();
                     self.ui_state.modal = Modal::Loading {
                         title: "Creating Multi-Repo Session".to_string(),
-                        message: format!("Setting up worktrees across {} repos...", project_ids.len()),
+                        message: format!(
+                            "Setting up worktrees across {} repos...",
+                            project_ids.len()
+                        ),
                     };
                     self.start_multi_repo_session(project_ids, title).await;
                 }

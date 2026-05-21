@@ -128,13 +128,12 @@ impl SessionManager {
         };
 
         if needs_recreate {
-            let resume_program = if self.config_store.read().resume_session
-                && status == SessionStatus::Stopped
-            {
-                format!("{} --resume", program)
-            } else {
-                program.clone()
-            };
+            let resume_program =
+                if self.config_store.read().resume_session && status == SessionStatus::Stopped {
+                    format!("{} --resume", program)
+                } else {
+                    program.clone()
+                };
             self.tmux
                 .create_session(&tmux_name, &parent_dir, Some(&resume_program))
                 .await?;
@@ -162,9 +161,7 @@ impl SessionManager {
             let state = self.store.read().await;
             state
                 .get_multi_repo_session(session_id)
-                .ok_or_else(|| {
-                    SessionError::CreationFailed("Multi-repo session not found".into())
-                })?
+                .ok_or_else(|| SessionError::CreationFailed("Multi-repo session not found".into()))?
                 .tmux_session_name
                 .clone()
         };

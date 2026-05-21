@@ -205,3 +205,108 @@ fn test_generate_branch_name_slash_in_prefix() {
 
     assert_eq!(manager.generate_branch_name("Foo"), "user/cc/foo");
 }
+
+// --- restart-by-tmux-name routing tests ---
+//
+// These lock in the bug that motivated extracting `classify_restart_target`:
+// when a multi-repo session's Claude process exited, `restart_session_fresh_by_tmux_name`
+// only searched `state.sessions` and returned `TmuxSessionNotFound` for any
+// `cc-mr-*` name, stranding the user back in the TUI. The classifier now
+// routes to either `state.sessions`, `state.multi_repo_sessions`, or NotFound.
+
+use super::lifecycle::{RestartTarget, classify_restart_target};
+use crate::session::{MultiRepoSession, WorktreeSession};
+use std::path::PathBuf;
+
+#[test]
+fn classify_restart_target_routes_single_repo_session() {
+    let mut state = AppState::new();
+    let session = WorktreeSession::new(
+        ProjectId::new(),
+        "single",
+        "single",
+        PathBuf::from("/tmp/single"),
+        "claude",
+    );
+    let tmux_name = session.tmux_session_name.clone();
+    state.add_session(session);
+
+    assert_eq!(
+        classify_restart_target(&state, &tmux_name),
+        RestartTarget::SingleRepo
+    );
+}
+
+#[test]
+fn classify_restart_target_routes_multi_repo_session() {
+    let mut state = AppState::new();
+    let session = MultiRepoSession::new_creating("multi", "multi", "claude");
+    let tmux_name = session.tmux_session_name.clone();
+    state.add_multi_repo_session(session);
+
+    assert_eq!(
+        classify_restart_target(&state, &tmux_name),
+        RestartTarget::MultiRepo
+    );
+}
+
+#[test]
+fn classify_restart_target_returns_not_found_for_unknown_name() {
+    let state = AppState::new();
+    assert_eq!(
+        classify_restart_target(&state, "cc-mr-deadbeef"),
+        RestartTarget::NotFound
+    );
+    assert_eq!(
+        classify_restart_target(&state, "cc-12345678"),
+        RestartTarget::NotFound
+    );
+}
+
+#[test]
+fn classify_restart_target_prefers_single_repo_when_both_present() {
+    // The two namespaces (`cc-` and `cc-mr-`) don't collide in practice, but
+    // the classifier still needs deterministic behavior if a name somehow
+    // appeared in both maps. Single-repo wins.
+    let mut state = AppState::new();
+    let mr = MultiRepoSession::new_creating("a", "a", "claude");
+    let shared_name = mr.tmux_session_name.clone();
+    state.add_multi_repo_session(mr);
+
+    let mut sr = WorktreeSession::new(
+        ProjectId::new(),
+        "b",
+        "b",
+        PathBuf::from("/tmp/b"),
+        "claude",
+    );
+    sr.tmux_session_name = shared_name.clone();
+    state.add_session(sr);
+
+    assert_eq!(
+        classify_restart_target(&state, &shared_name),
+        RestartTarget::SingleRepo
+    );
+}
+
+/// End-to-end check at the public entry point: an unknown tmux name still
+/// returns `TmuxSessionNotFound` (no silent success), matching the contract
+/// the attach loop in `tui/app/mod.rs` relies on for its retry counter.
+#[tokio::test]
+async fn restart_session_fresh_by_tmux_name_unknown_returns_not_found() {
+    let (_cdir, config_store) = test_config_store(Config::default());
+    let (_dir, store) = test_store();
+    let manager = SessionManager::new(config_store, store, "");
+
+    let err = manager
+        .restart_session_fresh_by_tmux_name("cc-mr-deadbeef")
+        .await
+        .expect_err("unknown tmux name should error");
+
+    match err {
+        crate::error::Error::Session(SessionError::TmuxSessionNotFound(name)) => {
+            assert_eq!(name, "cc-mr-deadbeef");
+        }
+        other => panic!("expected TmuxSessionNotFound, got {:?}", other),
+    }
+}

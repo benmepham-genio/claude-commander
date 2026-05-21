@@ -640,16 +640,12 @@ fn build_multi_repo_items(state: &crate::config::AppState) -> Vec<SessionListIte
     if mr_sessions.is_empty() {
         return items;
     }
-    mr_sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    mr_sessions.sort_by_key(|b| std::cmp::Reverse(b.created_at));
     for mr in mr_sessions {
         let project_names: Vec<String> = mr
             .repos
             .iter()
-            .filter_map(|entry| {
-                state
-                    .get_project(&entry.project_id)
-                    .map(|p| p.name.clone())
-            })
+            .filter_map(|entry| state.get_project(&entry.project_id).map(|p| p.name.clone()))
             .collect();
         items.push(SessionListItem::MultiRepo {
             id: mr.id,

@@ -1739,10 +1739,7 @@ impl App {
                     Instant::now() + Duration::from_secs(3),
                 ));
                 tokio::spawn(async move {
-                    if let Err(e) = session_manager
-                        .delete_multi_repo_session(&session_id)
-                        .await
-                    {
+                    if let Err(e) = session_manager.delete_multi_repo_session(&session_id).await {
                         let _ = tx
                             .send(AppEvent::StateUpdate(StateUpdate::Error {
                                 message: format!("Failed to delete multi-repo session: {}", e),
