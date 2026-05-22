@@ -33,7 +33,7 @@ pub enum AttachResult {
 /// Outcome of an attach. `final_session` is the tmux session the client
 /// was attached to when the attach loop exited — usually the same as the
 /// session passed in, but updated when the user picks a different
-/// session via the in-session switcher (Ctrl+O), which runs `tmux
+/// session via the in-session switcher (Ctrl+Space), which runs `tmux
 /// switch-client` mid-attach.
 #[derive(Debug)]
 pub struct AttachOutcome {
@@ -320,27 +320,27 @@ async fn run_async_loop(
                         break;
                     }
 
-                    // Check for Ctrl+O (0x0F): open the switcher popup over
+                    // Check for Ctrl+Space (0x00): open the switcher popup over
                     // the attached pane. We swallow the byte (don't forward
                     // it) and spawn a task that runs `tmux display-popup`
                     // followed by `tmux switch-client` on selection. The
                     // attach loop keeps running so the user stays "in" the
                     // pane the whole time.
-                    if data.contains(&0x0F) {
+                    if data.contains(&0x00) {
                         if popup_open
                             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                             .is_ok()
                         {
-                            debug!("Ctrl+O detected, spawning switcher popup");
+                            debug!("Ctrl+Space detected, spawning switcher popup");
                             let popup_open = popup_open.clone();
                             let current_session = current_session.clone();
                             tokio::spawn(async move {
                                 run_switcher_popup(current_session, popup_open).await;
                             });
                         }
-                        // Skip the 0x0F byte; never forward it.
+                        // Skip the 0x00 byte; never forward it.
                         let filtered: Vec<u8> =
-                            data.iter().copied().filter(|b| *b != 0x0F).collect();
+                            data.iter().copied().filter(|b| *b != 0x00).collect();
                         if filtered.is_empty() {
                             continue;
                         }

@@ -71,7 +71,7 @@ enum Commands {
         init: bool,
     },
 
-    /// Show the in-session session picker (used by Ctrl+O inside an attached
+    /// Show the in-session session picker (used by Ctrl+Space inside an attached
     /// session via `tmux display-popup`). Writes the chosen tmux session name
     /// to `--out` on selection; writes nothing on cancel.
     #[command(hide = true)]

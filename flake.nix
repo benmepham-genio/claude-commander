@@ -17,8 +17,7 @@
 
         commonArgs = {
           inherit src;
-          pname = "claude-commander";
-          version = "0.2.0";
+          inherit (craneLib.crateNameFromCargoToml { cargoToml = ./Cargo.toml; }) pname version;
           strictDeps = true;
 
           nativeBuildInputs = with pkgs; [
