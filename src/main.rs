@@ -42,6 +42,10 @@ enum Commands {
         /// Show all sessions including stopped ones
         #[arg(short, long)]
         all: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Create a new session
@@ -244,57 +248,62 @@ async fn main() -> Result<()> {
             app.run().await?;
         }
 
-        Some(Commands::List { all }) => {
+        Some(Commands::List { all, json }) => {
             setup_logging(cli.debug, false)?;
 
             let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
 
-            println!("Sessions:");
-            println!();
+            if json {
+                let entries = claude_commander::cli::build_session_list(&app_state, all);
+                println!("{}", serde_json::to_string_pretty(&entries)?);
+            } else {
+                println!("Sessions:");
+                println!();
 
-            if app_state.projects.is_empty() {
-                println!("  No projects. Use 'claude-commander' to add one.");
-                return Ok(());
-            }
+                if app_state.projects.is_empty() {
+                    println!("  No projects. Use 'claude-commander' to add one.");
+                    return Ok(());
+                }
 
-            for project in app_state.projects.values() {
-                println!("  {} ({})", project.name, project.main_branch);
+                for project in app_state.projects.values() {
+                    println!("  {} ({})", project.name, project.main_branch);
 
-                let sessions: Vec<_> = project
-                    .worktrees
-                    .iter()
-                    .filter_map(|id| app_state.sessions.get(id))
-                    .filter(|s| all || s.status.is_active())
-                    .collect();
+                    let sessions: Vec<_> = project
+                        .worktrees
+                        .iter()
+                        .filter_map(|id| app_state.sessions.get(id))
+                        .filter(|s| all || s.status.is_active())
+                        .collect();
 
-                if sessions.is_empty() {
-                    println!("    (no sessions)");
-                } else {
-                    for session in sessions {
-                        let status_icon = match session.status {
-                            claude_commander::SessionStatus::Creating
-                            | claude_commander::SessionStatus::Merging
-                            | claude_commander::SessionStatus::Pushing => "⠋",
-                            claude_commander::SessionStatus::Running => "●",
-                            claude_commander::SessionStatus::Stopped => "○",
-                            claude_commander::SessionStatus::CascadePaused => "⏸",
-                        };
-                        match claude_commander::session::display_branch(
-                            &session.title,
-                            &session.branch,
-                        ) {
-                            Some(shown_branch) => println!(
-                                "    {} {} [{}] ({})",
-                                status_icon, session.title, shown_branch, session.program
-                            ),
-                            None => println!(
-                                "    {} {} ({})",
-                                status_icon, session.title, session.program
-                            ),
+                    if sessions.is_empty() {
+                        println!("    (no sessions)");
+                    } else {
+                        for session in sessions {
+                            let status_icon = match session.status {
+                                claude_commander::SessionStatus::Creating
+                                | claude_commander::SessionStatus::Merging
+                                | claude_commander::SessionStatus::Pushing => "⠋",
+                                claude_commander::SessionStatus::Running => "●",
+                                claude_commander::SessionStatus::Stopped => "○",
+                                claude_commander::SessionStatus::CascadePaused => "⏸",
+                            };
+                            match claude_commander::session::display_branch(
+                                &session.title,
+                                &session.branch,
+                            ) {
+                                Some(shown_branch) => println!(
+                                    "    {} {} [{}] ({})",
+                                    status_icon, session.title, shown_branch, session.program
+                                ),
+                                None => println!(
+                                    "    {} {} ({})",
+                                    status_icon, session.title, session.program
+                                ),
+                            }
                         }
                     }
+                    println!();
                 }
-                println!();
             }
         }
 

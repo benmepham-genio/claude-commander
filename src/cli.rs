@@ -1,6 +1,10 @@
 //! CLI helper utilities shared across subcommands.
 
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+
 use crate::config::AppState;
+use crate::git::{PrState, effective_pr_state};
 use crate::session::WorktreeSession;
 
 /// Find a session by title (case-insensitive) or ID prefix.
@@ -28,11 +32,85 @@ pub fn find_session<'a>(state: &'a AppState, query: &str) -> Option<&'a Worktree
         .find(|s| s.id.to_string().starts_with(query))
 }
 
+/// JSON-serializable session entry for CLI output.
+#[derive(Debug, Serialize)]
+pub struct SessionJsonEntry {
+    pub id: String,
+    pub title: String,
+    pub branch: String,
+    pub status: String,
+    pub program: String,
+    pub project_name: String,
+    pub pr_number: Option<u32>,
+    pub pr_url: Option<String>,
+    /// Resolved PR state, accounting for legacy `pr_merged` field.
+    /// Only meaningful when `pr_number` is `Some`.
+    pub pr_state: PrState,
+    pub pr_draft: bool,
+    pub pr_labels: Vec<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl SessionJsonEntry {
+    pub fn from_session(session: &WorktreeSession, project_name: &str) -> Self {
+        Self {
+            id: session.id.as_uuid().to_string(),
+            title: session.title.clone(),
+            branch: session.branch.clone(),
+            status: session.status.to_string(),
+            program: session.program.clone(),
+            project_name: project_name.to_string(),
+            pr_number: session.pr_number,
+            pr_url: session.pr_url.clone(),
+            pr_state: effective_pr_state(session.pr_state, session.pr_merged),
+            pr_draft: session.pr_draft,
+            pr_labels: session.pr_labels.clone(),
+            created_at: session.created_at,
+        }
+    }
+}
+
+/// Build a JSON-serializable list of sessions, optionally including stopped ones.
+pub fn build_session_list(state: &AppState, include_stopped: bool) -> Vec<SessionJsonEntry> {
+    let mut entries = Vec::new();
+    for project in state.projects.values() {
+        for session in project
+            .worktrees
+            .iter()
+            .filter_map(|id| state.sessions.get(id))
+            .filter(|s| include_stopped || s.status.is_active())
+        {
+            entries.push(SessionJsonEntry::from_session(session, &project.name));
+        }
+    }
+    entries
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{ProjectId, WorktreeSession};
+    use crate::session::{Project, ProjectId, SessionStatus, WorktreeSession};
     use std::path::PathBuf;
+
+    fn make_project(name: &str) -> Project {
+        Project::new(name, PathBuf::from("/tmp/repo"), "main")
+    }
+
+    fn make_state_with_project(
+        project: &Project,
+        sessions: Vec<WorktreeSession>,
+    ) -> AppState {
+        let mut state = AppState::new();
+        let mut proj = project.clone();
+        for s in &sessions {
+            proj.add_worktree(s.id);
+        }
+        state.projects.insert(proj.id, proj);
+        for s in sessions {
+            state.sessions.insert(s.id, s);
+        }
+        state
+    }
 
     fn make_state(sessions: Vec<WorktreeSession>) -> AppState {
         let mut state = AppState::new();
@@ -45,6 +123,16 @@ mod tests {
     fn make_session(title: &str) -> WorktreeSession {
         WorktreeSession::new(
             ProjectId::new(),
+            title,
+            &format!("branch-{}", title),
+            PathBuf::from("/tmp/wt"),
+            "claude",
+        )
+    }
+
+    fn make_session_for_project(title: &str, project_id: ProjectId) -> WorktreeSession {
+        WorktreeSession::new(
+            project_id,
             title,
             &format!("branch-{}", title),
             PathBuf::from("/tmp/wt"),
@@ -98,5 +186,118 @@ mod tests {
     fn returns_none_on_empty_state() {
         let state = AppState::new();
         assert!(find_session(&state, "anything").is_none());
+    }
+
+    // -- SessionJsonEntry tests --
+
+    #[test]
+    fn json_entry_has_expected_fields() {
+        let session = make_session("fix-bug");
+        let entry = SessionJsonEntry::from_session(&session, "my-project");
+        let json: serde_json::Value = serde_json::to_value(&entry).unwrap();
+
+        assert_eq!(json["title"], "fix-bug");
+        assert_eq!(json["branch"], "branch-fix-bug");
+        assert_eq!(json["program"], "claude");
+        assert_eq!(json["project_name"], "my-project");
+        assert_eq!(json["pr_draft"], false);
+        assert!(json["pr_number"].is_null());
+        assert!(json["pr_url"].is_null());
+        // No PR set + pr_merged=false → defaults to "open" via effective_pr_state
+        assert_eq!(json["pr_state"], "open");
+        assert!(json["pr_labels"].as_array().unwrap().is_empty());
+        assert!(json["created_at"].is_string());
+        assert!(json["id"].is_string());
+        assert!(json["status"].is_string());
+    }
+
+    #[test]
+    fn json_entry_includes_pr_fields_when_set() {
+        let mut session = make_session("with-pr");
+        session.pr_number = Some(42);
+        session.pr_url = Some("https://github.com/org/repo/pull/42".to_string());
+        session.pr_state = Some(crate::git::PrState::Open);
+        session.pr_draft = true;
+        session.pr_labels = vec!["bug".to_string(), "urgent".to_string()];
+
+        let entry = SessionJsonEntry::from_session(&session, "proj");
+        let json: serde_json::Value = serde_json::to_value(&entry).unwrap();
+
+        assert_eq!(json["pr_number"], 42);
+        assert_eq!(json["pr_url"], "https://github.com/org/repo/pull/42");
+        assert_eq!(json["pr_state"], "open");
+        assert_eq!(json["pr_draft"], true);
+        assert_eq!(json["pr_labels"], serde_json::json!(["bug", "urgent"]));
+    }
+
+    #[test]
+    fn json_entry_resolves_legacy_pr_merged() {
+        let mut session = make_session("legacy");
+        session.pr_number = Some(10);
+        session.pr_state = None;
+        session.pr_merged = true;
+
+        let entry = SessionJsonEntry::from_session(&session, "proj");
+        let json: serde_json::Value = serde_json::to_value(&entry).unwrap();
+
+        assert_eq!(json["pr_state"], "merged");
+    }
+
+    #[test]
+    fn json_entry_id_is_full_uuid() {
+        let session = make_session("test");
+        let entry = SessionJsonEntry::from_session(&session, "proj");
+        // SessionId::Display truncates to 8 chars, but JSON should have the full UUID
+        assert!(entry.id.len() > 8);
+        assert!(uuid::Uuid::parse_str(&entry.id).is_ok());
+    }
+
+    // -- build_session_list tests --
+
+    #[test]
+    fn build_list_excludes_stopped_by_default() {
+        let project = make_project("repo");
+        let mut s1 = make_session_for_project("running", project.id);
+        s1.set_status(SessionStatus::Running);
+        let mut s2 = make_session_for_project("stopped", project.id);
+        s2.set_status(SessionStatus::Stopped);
+
+        let state = make_state_with_project(&project, vec![s1, s2]);
+        let list = build_session_list(&state, false);
+
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].title, "running");
+    }
+
+    #[test]
+    fn build_list_includes_stopped_when_requested() {
+        let project = make_project("repo");
+        let mut s1 = make_session_for_project("running", project.id);
+        s1.set_status(SessionStatus::Running);
+        let mut s2 = make_session_for_project("stopped", project.id);
+        s2.set_status(SessionStatus::Stopped);
+
+        let state = make_state_with_project(&project, vec![s1, s2]);
+        let list = build_session_list(&state, true);
+
+        assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn build_list_populates_project_name() {
+        let project = make_project("my-repo");
+        let s = make_session_for_project("task", project.id);
+        let state = make_state_with_project(&project, vec![s]);
+        let list = build_session_list(&state, false);
+
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].project_name, "my-repo");
+    }
+
+    #[test]
+    fn build_list_empty_when_no_projects() {
+        let state = AppState::new();
+        let list = build_session_list(&state, true);
+        assert!(list.is_empty());
     }
 }
