@@ -422,3 +422,70 @@ fn test_adjust_list_scroll_short_list_stays_at_top() {
     assert_eq!(adjust_list_scroll(2, 0, 10), 0);
     assert_eq!(adjust_list_scroll(0, 0, 10), 0);
 }
+
+// ---------------------------------------------------------------------------
+// Settings: build_settings_rows + apply_settings_edit for worktrees_dir
+// ---------------------------------------------------------------------------
+
+use crate::config::{AppState, ConfigStore, StateStore};
+
+fn make_test_app() -> App {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_path = tmp.path().join("config.toml");
+    let state_path = tmp.path().join("state.json");
+    let config = Config::default();
+    let config_store = Arc::new(ConfigStore::with_path(config, config_path));
+    let store = Arc::new(StateStore::with_path(AppState::new(), state_path));
+    // Leak the TempDir so paths stay valid for the lifetime of the test.
+    std::mem::forget(tmp);
+    App::new(config_store, store)
+}
+
+#[test]
+fn test_worktrees_dir_row_shows_default_when_none() {
+    let app = make_test_app();
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let row = rows
+        .iter()
+        .find(|r| r.field_key == "worktrees_dir")
+        .unwrap();
+    assert_eq!(row.value, "(default)");
+}
+
+#[test]
+fn test_worktrees_dir_row_shows_custom_path() {
+    let mut app = make_test_app();
+    app.config.worktrees_dir = Some(std::path::PathBuf::from("/custom/path"));
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let row = rows
+        .iter()
+        .find(|r| r.field_key == "worktrees_dir")
+        .unwrap();
+    assert_eq!(row.value, "/custom/path");
+}
+
+#[test]
+fn test_apply_worktrees_dir_sets_custom_path() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(SettingsTab::General, "worktrees_dir", "/my/worktrees");
+    assert_eq!(
+        app.config.worktrees_dir,
+        Some(std::path::PathBuf::from("/my/worktrees"))
+    );
+}
+
+#[test]
+fn test_apply_worktrees_dir_empty_clears_to_none() {
+    let mut app = make_test_app();
+    app.config.worktrees_dir = Some(std::path::PathBuf::from("/custom"));
+    app.apply_settings_edit(SettingsTab::General, "worktrees_dir", "");
+    assert_eq!(app.config.worktrees_dir, None);
+}
+
+#[test]
+fn test_apply_worktrees_dir_default_sentinel_clears_to_none() {
+    let mut app = make_test_app();
+    app.config.worktrees_dir = Some(std::path::PathBuf::from("/custom"));
+    app.apply_settings_edit(SettingsTab::General, "worktrees_dir", "(default)");
+    assert_eq!(app.config.worktrees_dir, None);
+}

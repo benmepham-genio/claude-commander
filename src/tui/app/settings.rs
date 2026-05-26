@@ -731,12 +731,11 @@ impl App {
                 "branch_prefix" => self.config.branch_prefix = value.to_string(),
                 "shell_program" => self.config.shell_program = value.to_string(),
                 "worktrees_dir" => {
-                    self.config.worktrees_dir =
-                        if value.is_empty() || value == "(default)" {
-                            None
-                        } else {
-                            Some(PathBuf::from(value))
-                        };
+                    self.config.worktrees_dir = if value.is_empty() || value == "(default)" {
+                        None
+                    } else {
+                        Some(PathBuf::from(value))
+                    };
                 }
                 "per_repo_worktree_dirs" => {
                     if let Ok(b) = value.parse::<bool>() {
