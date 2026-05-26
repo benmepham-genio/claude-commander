@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::config::AppState;
-use crate::git::{PrState, effective_pr_state};
-use crate::session::WorktreeSession;
+use crate::git::{PrState, ReviewDecision, effective_pr_state};
+use crate::session::{AgentState, WorktreeSession};
 
 /// Find a session by title (case-insensitive) or ID prefix.
 ///
@@ -84,6 +84,90 @@ pub fn build_session_list(state: &AppState, include_stopped: bool) -> Vec<Sessio
         }
     }
     entries
+}
+
+/// JSON-serializable session detail for the `status` subcommand.
+#[derive(Debug, Serialize)]
+pub struct StatusJsonEntry {
+    pub id: String,
+    pub title: String,
+    pub branch: String,
+    pub status: String,
+    pub program: String,
+    pub project_name: String,
+    pub agent_state: String,
+    pub diff_stat: Option<String>,
+    pub pr_number: Option<u32>,
+    pub pr_url: Option<String>,
+    pub pr_state: PrState,
+    pub pr_draft: bool,
+    pub pr_labels: Vec<String>,
+    pub review_decision: Option<ReviewDecision>,
+    pub pr_reviewers: Vec<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl StatusJsonEntry {
+    pub fn from_session(
+        session: &WorktreeSession,
+        project_name: &str,
+        agent_state: AgentState,
+        diff_stat: Option<String>,
+    ) -> Self {
+        Self {
+            id: session.id.as_uuid().to_string(),
+            title: session.title.clone(),
+            branch: session.branch.clone(),
+            status: session.status.to_string(),
+            program: session.program.clone(),
+            project_name: project_name.to_string(),
+            agent_state: agent_state.to_string(),
+            diff_stat,
+            pr_number: session.pr_number,
+            pr_url: session.pr_url.clone(),
+            pr_state: effective_pr_state(session.pr_state, session.pr_merged),
+            pr_draft: session.pr_draft,
+            pr_labels: session.pr_labels.clone(),
+            review_decision: session.review_decision,
+            pr_reviewers: session.pr_reviewers.clone(),
+            created_at: session.created_at,
+        }
+    }
+}
+
+/// Format a human-readable status summary for a session.
+pub fn format_status_human(entry: &StatusJsonEntry) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("Session: {} ({})", entry.title, entry.id));
+    lines.push(format!("Branch:  {}", entry.branch));
+    lines.push(format!("Status:  {} | Agent: {}", entry.status, entry.agent_state));
+    lines.push(format!("Program: {} | Project: {}", entry.program, entry.project_name));
+
+    if let Some(ref stat) = entry.diff_stat {
+        lines.push(format!("Diff:    {}", stat.trim()));
+    }
+
+    if let Some(pr) = entry.pr_number {
+        let url = entry.pr_url.as_deref().unwrap_or("(no url)");
+        lines.push(format!(
+            "PR:      #{} ({}, {}) {}",
+            pr,
+            entry.pr_state,
+            if entry.pr_draft { "draft" } else { "ready" },
+            url,
+        ));
+        if let Some(ref decision) = entry.review_decision {
+            lines.push(format!("Review:  {:?}", decision));
+        }
+        if !entry.pr_reviewers.is_empty() {
+            lines.push(format!("Reviewers: {}", entry.pr_reviewers.join(", ")));
+        }
+        if !entry.pr_labels.is_empty() {
+            lines.push(format!("Labels:  {}", entry.pr_labels.join(", ")));
+        }
+    }
+
+    lines.join("\n")
 }
 
 #[cfg(test)]
@@ -299,5 +383,104 @@ mod tests {
         let state = AppState::new();
         let list = build_session_list(&state, true);
         assert!(list.is_empty());
+    }
+
+    // -- StatusJsonEntry tests --
+
+    #[test]
+    fn status_entry_has_expected_fields() {
+        let session = make_session("fix-bug");
+        let entry =
+            StatusJsonEntry::from_session(&session, "proj", AgentState::Working, Some("3 files changed".to_string()));
+        let json: serde_json::Value = serde_json::to_value(&entry).unwrap();
+
+        assert_eq!(json["title"], "fix-bug");
+        assert_eq!(json["agent_state"], "working");
+        assert_eq!(json["diff_stat"], "3 files changed");
+        assert_eq!(json["project_name"], "proj");
+        assert!(json["pr_reviewers"].as_array().unwrap().is_empty());
+        assert!(json["review_decision"].is_null());
+    }
+
+    #[test]
+    fn status_entry_with_pr_and_reviews() {
+        let mut session = make_session("reviewed");
+        session.pr_number = Some(5);
+        session.pr_url = Some("https://github.com/org/repo/pull/5".to_string());
+        session.pr_state = Some(crate::git::PrState::Open);
+        session.review_decision = Some(ReviewDecision::Approved);
+        session.pr_reviewers = vec!["alice".to_string(), "bob".to_string()];
+
+        let entry = StatusJsonEntry::from_session(&session, "proj", AgentState::Idle, None);
+        let json: serde_json::Value = serde_json::to_value(&entry).unwrap();
+
+        assert_eq!(json["pr_number"], 5);
+        assert_eq!(json["review_decision"], "approved");
+        assert_eq!(json["pr_reviewers"], serde_json::json!(["alice", "bob"]));
+        assert!(json["diff_stat"].is_null());
+    }
+
+    #[test]
+    fn status_entry_agent_state_variants() {
+        let session = make_session("test");
+        for (state, expected) in [
+            (AgentState::Working, "working"),
+            (AgentState::Idle, "idle"),
+            (AgentState::WaitingForInput, "waiting"),
+            (AgentState::Unknown, "unknown"),
+        ] {
+            let entry = StatusJsonEntry::from_session(&session, "p", state, None);
+            assert_eq!(entry.agent_state, expected);
+        }
+    }
+
+    // -- format_status_human tests --
+
+    #[test]
+    fn human_format_includes_basic_info() {
+        let session = make_session("my-task");
+        let entry = StatusJsonEntry::from_session(
+            &session,
+            "my-project",
+            AgentState::Working,
+            Some("2 files changed, 10 insertions(+)".to_string()),
+        );
+        let output = format_status_human(&entry);
+
+        assert!(output.contains("my-task"));
+        assert!(output.contains("my-project"));
+        assert!(output.contains("working"));
+        assert!(output.contains("2 files changed"));
+    }
+
+    #[test]
+    fn human_format_shows_pr_when_present() {
+        let mut session = make_session("with-pr");
+        session.pr_number = Some(42);
+        session.pr_url = Some("https://example.com/pull/42".to_string());
+        session.pr_state = Some(crate::git::PrState::Open);
+        session.pr_labels = vec!["bug".to_string()];
+        session.pr_reviewers = vec!["alice".to_string()];
+        session.review_decision = Some(ReviewDecision::ChangesRequested);
+
+        let entry = StatusJsonEntry::from_session(&session, "proj", AgentState::Idle, None);
+        let output = format_status_human(&entry);
+
+        assert!(output.contains("#42"));
+        assert!(output.contains("https://example.com/pull/42"));
+        assert!(output.contains("bug"));
+        assert!(output.contains("alice"));
+        assert!(output.contains("ChangesRequested"));
+    }
+
+    #[test]
+    fn human_format_omits_pr_when_absent() {
+        let session = make_session("no-pr");
+        let entry = StatusJsonEntry::from_session(&session, "proj", AgentState::Idle, None);
+        let output = format_status_human(&entry);
+
+        assert!(!output.contains("PR:"));
+        assert!(!output.contains("Review:"));
+        assert!(!output.contains("Labels:"));
     }
 }
