@@ -84,6 +84,12 @@ claude-commander list
 # Create a new session
 claude-commander new "feature-auth" --path /path/to/repo
 
+# Create a session with an initial prompt (starts working immediately)
+claude-commander new "fix-auth" --initial-prompt "Fix the auth bypass in login.rs" --effort high
+
+# Create a session in plan mode, forking from a specific branch
+claude-commander new "feature-api" --base-branch develop --mode plan
+
 # Attach to a session
 claude-commander attach feature-auth
 
@@ -187,6 +193,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `o` | Open PR in browser (when the session has a PR) |
 | `S` | Scan directory for git repos and add them as projects |
 | `s` | Open shell in worktree |
+| `v` | Toggle project/section view (requires `[[sections]]` config) |
 | palette only | Collapse/expand section (press on any item in the section, or `Enter` on the section header) |
 | palette only | Move session to section (manual override; see [Session List Sections](#session-list-sections)) |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
@@ -206,6 +213,7 @@ When attached to a session (via `Enter` or `claude-commander attach`):
 |-----|--------|
 | `Ctrl-q` | Detach and return to session list |
 | `Ctrl-\` | Switch between Claude and shell pane |
+| `Ctrl-Space` | Open the in-session switcher popup to jump to another claude-commander session without detaching |
 | `Ctrl-.` | Open the session worktree in your editor (requires a terminal that emits CSI-u or xterm modifyOtherKeys sequences for Ctrl-.) |
 
 ## Configuration

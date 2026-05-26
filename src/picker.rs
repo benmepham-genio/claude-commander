@@ -1,7 +1,7 @@
 //! Standalone session picker for use inside a tmux popup.
 //!
 //! Invoked as `claude-commander pick-session --out <path>` from within
-//! an attached session (Ctrl+O while attached). Reads the persisted
+//! an attached session (Ctrl+Space while attached). Reads the persisted
 //! `AppState`, lets the user fuzzy-filter sessions, and writes the
 //! chosen session's `tmux_session_name` to `<path>`. The outer TUI
 //! reads that file when the popup closes and re-attaches to the chosen

@@ -443,4 +443,155 @@ mod tests {
         };
         assert_eq!(info.summary(), "3 file(s), +15 -7 lines");
     }
+
+    /// Closes mutant `diff.rs:68:9: replace DiffInfo::is_stale -> bool with true`.
+    ///
+    /// A `DiffInfo` computed just now is NOT stale against a generous TTL.
+    /// If `is_stale` is replaced with constantly returning `true`, this fails.
+    #[test]
+    fn test_diff_info_is_stale_fresh_returns_false() {
+        let info = DiffInfo::empty();
+        assert!(!info.is_stale(Duration::from_secs(3600)));
+    }
+
+    /// Complements the fresh case: an entry older than TTL is stale.
+    /// Constructs `computed_at` in the past via `Instant::now() - large_duration`
+    /// so we don't have to sleep in tests.
+    #[test]
+    fn test_diff_info_is_stale_past_returns_true() {
+        let mut info = DiffInfo::empty();
+        info.computed_at = Instant::now()
+            .checked_sub(Duration::from_secs(60))
+            .expect("Instant arithmetic should succeed");
+        assert!(info.is_stale(Duration::from_millis(500)));
+    }
+
+    /// Closes mutant `diff.rs:73:78: replace > with < in DiffInfo::has_changes`.
+    ///
+    /// Column 78 falls on the third comparison (`lines_removed > 0`). We pin
+    /// it down by constructing a `DiffInfo` whose ONLY non-zero field is
+    /// `lines_removed`. The mutated predicate (`lines_removed < 0`) would be
+    /// false for `lines_removed == 5`, and the overall `||` chain would
+    /// return false, failing this assertion.
+    #[test]
+    fn test_diff_info_has_changes_only_removed() {
+        let info = DiffInfo {
+            diff: String::new(),
+            files_changed: 0,
+            lines_added: 0,
+            lines_removed: 5,
+            line_count: 0,
+            computed_at: Instant::now(),
+            base_commit: String::new(),
+        };
+        assert!(info.has_changes());
+    }
+
+    /// Boundary case: all zeros means no changes. Ensures the `>` is strict
+    /// (not `>=`) and that flipping it would not coincidentally still pass.
+    #[test]
+    fn test_diff_info_has_changes_all_zero() {
+        let info = DiffInfo {
+            diff: String::new(),
+            files_changed: 0,
+            lines_added: 0,
+            lines_removed: 0,
+            line_count: 0,
+            computed_at: Instant::now(),
+            base_commit: String::new(),
+        };
+        assert!(!info.has_changes());
+    }
+
+    /// Closes mutant `diff.rs:120:20: delete ! in DiffCache<K>::get_diff`.
+    ///
+    /// The `!` negates `is_stale` to gate the cache-hit early return. With
+    /// `!` deleted, a fresh entry is treated as stale and `get_diff` falls
+    /// through to `compute_diff_for_path` (which shells out to git on a
+    /// non-git tempdir — at best returning a different `DiffInfo`).
+    ///
+    /// We pre-insert a fresh entry directly via the private `cache` field
+    /// (same-module access), then assert `get_diff` returns the SAME `Arc`
+    /// (pointer equality), proving the fast cache-hit path executed.
+    #[tokio::test]
+    async fn test_get_diff_returns_cached_when_fresh() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let cache: DiffCache<u32> = DiffCache::with_ttl(Duration::from_secs(3600));
+        let sentinel = Arc::new(DiffInfo {
+            diff: "sentinel".to_string(),
+            files_changed: 42,
+            lines_added: 0,
+            lines_removed: 0,
+            line_count: 0,
+            computed_at: Instant::now(),
+            base_commit: "sentinel-base".to_string(),
+        });
+
+        {
+            let mut guard = cache.cache.write().await;
+            guard.insert(7u32, Arc::clone(&sentinel));
+        }
+
+        let got = cache
+            .get_diff(&7u32, tmp.path())
+            .await
+            .expect("get_diff should hit cache");
+        assert!(
+            Arc::ptr_eq(&got, &sentinel),
+            "get_diff must return the cached Arc on fresh hit"
+        );
+        assert_eq!(got.files_changed, 42);
+        assert_eq!(got.base_commit, "sentinel-base");
+    }
+
+    /// Closes mutant `diff.rs:147:9: replace DiffCache<K>::invalidate with ()`.
+    ///
+    /// Insert two entries, invalidate one, assert the targeted key is gone
+    /// while the other remains. The `-> ()` mutation would leave both intact.
+    #[tokio::test]
+    async fn test_invalidate_removes_only_target_key() {
+        let cache: DiffCache<u32> = DiffCache::with_ttl(Duration::from_secs(3600));
+        let entry_a = Arc::new(DiffInfo::empty());
+        let entry_b = Arc::new(DiffInfo::empty());
+
+        {
+            let mut guard = cache.cache.write().await;
+            guard.insert(1u32, Arc::clone(&entry_a));
+            guard.insert(2u32, Arc::clone(&entry_b));
+        }
+
+        cache.invalidate(&1u32).await;
+
+        let guard = cache.cache.read().await;
+        assert!(
+            !guard.contains_key(&1u32),
+            "invalidate must remove the targeted key"
+        );
+        assert!(
+            guard.contains_key(&2u32),
+            "invalidate must leave other keys untouched"
+        );
+    }
+
+    /// Closes mutant `diff.rs:153:9: replace DiffCache<K>::clear with ()`.
+    ///
+    /// Insert two entries, clear, assert the cache is empty. The `-> ()`
+    /// mutation would leave both entries in place.
+    #[tokio::test]
+    async fn test_clear_removes_all_entries() {
+        let cache: DiffCache<u32> = DiffCache::with_ttl(Duration::from_secs(3600));
+
+        {
+            let mut guard = cache.cache.write().await;
+            guard.insert(1u32, Arc::new(DiffInfo::empty()));
+            guard.insert(2u32, Arc::new(DiffInfo::empty()));
+        }
+
+        cache.clear().await;
+
+        let guard = cache.cache.read().await;
+        assert!(guard.is_empty(), "clear must remove every cached entry");
+    }
 }

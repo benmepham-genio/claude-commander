@@ -800,7 +800,7 @@ impl App {
         let session_manager = self.session_manager.clone();
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
-            match session_manager.finalize_session(&session_id).await {
+            match session_manager.finalize_session(&session_id, None).await {
                 Ok(sid) => {
                     let _ = tx
                         .send(AppEvent::StateUpdate(StateUpdate::SessionCreated {
@@ -1379,7 +1379,7 @@ impl App {
                 let session_manager = self.session_manager.clone();
                 let tx = self.event_loop.sender();
                 tokio::spawn(async move {
-                    match session_manager.finalize_session(&session_id).await {
+                    match session_manager.finalize_session(&session_id, None).await {
                         Ok(sid) => {
                             let _ = tx
                                 .send(AppEvent::StateUpdate(StateUpdate::SessionCreated {
@@ -1459,7 +1459,7 @@ impl App {
                 let session_manager = self.session_manager.clone();
                 let tx = self.event_loop.sender();
                 tokio::spawn(async move {
-                    match session_manager.finalize_session(&session_id).await {
+                    match session_manager.finalize_session(&session_id, None).await {
                         Ok(sid) => {
                             let _ = tx
                                 .send(AppEvent::StateUpdate(StateUpdate::SessionCreated {

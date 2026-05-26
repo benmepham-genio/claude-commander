@@ -46,8 +46,17 @@ impl GitBackend {
         let repo =
             gix::discover(path).map_err(|_e| GitError::NotARepository(path.to_path_buf()))?;
 
-        let repo_path = repo
-            .path()
+        // Use `common_dir()` instead of `path()` because `path()` returns
+        // `.git/worktrees/<name>` for linked worktrees, while `common_dir()`
+        // always returns the main `.git` directory. `.parent()` then gives
+        // the actual repository root in both cases.
+        //
+        // `common_dir()` may contain unresolved `../..` segments (e.g.
+        // `.git/worktrees/foo/../..`), so we canonicalize before taking
+        // the parent to get a clean path.
+        let common = std::fs::canonicalize(repo.common_dir())
+            .unwrap_or_else(|_| repo.common_dir().to_path_buf());
+        let repo_path = common
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| path.to_path_buf());
@@ -299,5 +308,47 @@ mod tests {
     fn test_ref_exists_false_without_remote() {
         let (_temp, backend) = init_test_repo();
         assert!(!backend.ref_exists("refs/remotes/origin/main").unwrap());
+    }
+
+    #[test]
+    fn test_discover_from_worktree_resolves_to_main_repo() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_path = temp_dir.path();
+
+        // Initialize repo with an initial commit (required for worktree add)
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+
+        // Create a linked worktree
+        let wt_path = temp_dir.path().join("my-worktree");
+        std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                wt_path.to_str().unwrap(),
+                "-b",
+                "wt-branch",
+            ])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        assert!(wt_path.exists(), "worktree should have been created");
+
+        // Discover from the worktree path — should resolve to the main repo root
+        let backend = GitBackend::discover(&wt_path).unwrap();
+        let canonical_repo = std::fs::canonicalize(repo_path).unwrap();
+        let canonical_discovered = std::fs::canonicalize(backend.path()).unwrap();
+        assert_eq!(
+            canonical_discovered, canonical_repo,
+            "discover() from a worktree should resolve to the main repo root"
+        );
     }
 }

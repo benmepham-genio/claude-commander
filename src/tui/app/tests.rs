@@ -424,6 +424,110 @@ fn test_adjust_list_scroll_short_list_stays_at_top() {
 }
 
 // ---------------------------------------------------------------------------
+// ViewMode toggle
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_view_mode_default_is_project_grouped() {
+    let s = AppUiState::default();
+    assert_eq!(s.view_mode, ViewMode::ProjectGrouped);
+}
+
+#[test]
+fn test_toggle_view_mode_always_available_in_palette() {
+    let s = AppUiState::default();
+    assert!(s.is_command_available(BindableAction::ToggleViewMode));
+}
+
+// ---------------------------------------------------------------------------
+// Stack chain info in Info pane
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_info_view_renders_stack_chain() {
+    use crate::tui::widgets::{InfoContent, InfoSessionData, InfoView};
+
+    let theme = crate::tui::theme::Theme::basic();
+    let diff = crate::git::DiffInfo::empty();
+    let chain = vec![
+        StackChainEntry {
+            title: "base".into(),
+            status: SessionStatus::Running,
+            is_current: false,
+        },
+        StackChainEntry {
+            title: "child".into(),
+            status: SessionStatus::Running,
+            is_current: true,
+        },
+    ];
+    let data = InfoSessionData {
+        title: "child".into(),
+        branch: "child-br".into(),
+        created_at: "now".into(),
+        status: SessionStatus::Running,
+        program: "claude".into(),
+        worktree_path: "/tmp".into(),
+        diff_info: &diff,
+        pr_number: None,
+        pr_url: None,
+        pr_merged: false,
+        enriched_pr: None,
+        ai_summary: None,
+        summary_key_hint: None,
+        stack_chain: &chain,
+    };
+    let view = InfoView::new(InfoContent::Session(data), &theme);
+    let lines = view.build_lines();
+    let text: String = lines
+        .iter()
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("Stack (2 sessions)"),
+        "should show stack header"
+    );
+    assert!(text.contains("base"), "should list base session");
+    assert!(text.contains("← current"), "should mark current session");
+}
+
+#[test]
+fn test_info_view_no_stack_section_for_unstacked() {
+    use crate::tui::widgets::{InfoContent, InfoSessionData, InfoView};
+
+    let theme = crate::tui::theme::Theme::basic();
+    let diff = crate::git::DiffInfo::empty();
+    let data = InfoSessionData {
+        title: "solo".into(),
+        branch: "solo-br".into(),
+        created_at: "now".into(),
+        status: SessionStatus::Running,
+        program: "claude".into(),
+        worktree_path: "/tmp".into(),
+        diff_info: &diff,
+        pr_number: None,
+        pr_url: None,
+        pr_merged: false,
+        enriched_pr: None,
+        ai_summary: None,
+        summary_key_hint: None,
+        stack_chain: &[],
+    };
+    let view = InfoView::new(InfoContent::Session(data), &theme);
+    let lines = view.build_lines();
+    let text: String = lines
+        .iter()
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !text.contains("Stack"),
+        "unstacked session should not show stack section"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Settings: build_settings_rows + apply_settings_edit for worktrees_dir
 // ---------------------------------------------------------------------------
 

@@ -258,6 +258,7 @@ impl App {
                     enriched_pr,
                     ai_summary,
                     summary_key_hint,
+                    stack_chain: &self.ui_state.stack_chain,
                 })
             } else {
                 InfoContent::Empty

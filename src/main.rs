@@ -56,6 +56,22 @@ enum Commands {
         /// Project path (default: current directory)
         #[arg(short = 'd', long)]
         path: Option<std::path::PathBuf>,
+
+        /// Initial prompt to send to the Claude agent
+        #[arg(short = 'i', long)]
+        initial_prompt: Option<String>,
+
+        /// Claude effort level
+        #[arg(short, long)]
+        effort: Option<String>,
+
+        /// Claude permission mode
+        #[arg(short, long)]
+        mode: Option<String>,
+
+        /// Branch to fork from (default: origin/main)
+        #[arg(short = 'b', long)]
+        base_branch: Option<String>,
     },
 
     /// Attach to an existing session
@@ -71,7 +87,7 @@ enum Commands {
         init: bool,
     },
 
-    /// Show the in-session session picker (used by Ctrl+O inside an attached
+    /// Show the in-session session picker (used by Ctrl+Space inside an attached
     /// session via `tmux display-popup`). Writes the chosen tmux session name
     /// to `--out` on selection; writes nothing on cancel.
     #[command(hide = true)]
@@ -286,12 +302,19 @@ async fn main() -> Result<()> {
             name,
             program,
             path,
+            initial_prompt,
+            effort,
+            mode,
+            base_branch,
         }) => {
             setup_logging(cli.debug, false)?;
 
             let path = path.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-            use claude_commander::session::SessionManager;
+            use claude_commander::git::GitBackend;
+            use claude_commander::session::{
+                SessionManager, program_is_claude, program_with_claude_flags,
+            };
             use claude_commander::tui::theme::Theme;
             use std::sync::Arc;
 
@@ -299,7 +322,7 @@ async fn main() -> Result<()> {
             let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
             let store = Arc::new(StateStore::new(app_state)?);
             let manager = SessionManager::new(
-                config_store,
+                config_store.clone(),
                 store.clone(),
                 Theme::default().tmux_status_style(),
             );
@@ -307,7 +330,32 @@ async fn main() -> Result<()> {
             // Check tmux
             manager.check_tmux().await?;
 
-            // First, try to find or add the project
+            // Build program string with Claude-specific flags
+            let base_program =
+                program.unwrap_or_else(|| config_store.read().default_program.clone());
+            if !program_is_claude(&base_program)
+                && (effort.is_some() || mode.is_some() || initial_prompt.is_some())
+            {
+                clap::Error::raw(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    format!(
+                        "--effort, --mode, and --initial-prompt are only supported \
+                         when the program is claude (got {:?})\n",
+                        base_program
+                    ),
+                )
+                .exit();
+            }
+            let program =
+                program_with_claude_flags(&base_program, mode.as_deref(), effort.as_deref());
+
+            // Resolve path to repo root (handles worktrees, subdirectories, symlinks)
+            let path = {
+                let backend = GitBackend::discover(&path)?;
+                backend.path().to_path_buf()
+            };
+
+            // Find or add the project
             let project_id = {
                 let state = store.read().await;
                 state
@@ -325,11 +373,35 @@ async fn main() -> Result<()> {
                 }
             };
 
+            // When base_branch matches an existing session's branch, don't
+            // pass it to prepare_session — the child needs its own branch
+            // (generated from the title). The fork point is handled by
+            // link_stack_parent_by_branch + finalize_session instead.
+            let is_stacked = if let Some(ref base) = base_branch {
+                let state = store.read().await;
+                state
+                    .sessions
+                    .values()
+                    .any(|s| s.project_id == project_id && s.branch == *base)
+            } else {
+                false
+            };
+            let branch_for_prepare = if is_stacked {
+                None
+            } else {
+                base_branch.clone()
+            };
+
             println!("Creating session '{}'...", name);
             let session_id = manager
-                .prepare_session(&project_id, name, program, None)
+                .prepare_session(&project_id, name, Some(program), branch_for_prepare)
                 .await?;
-            manager.finalize_session(&session_id).await?;
+            manager
+                .link_stack_parent_by_branch(&session_id, base_branch.as_deref())
+                .await?;
+            manager
+                .finalize_session(&session_id, initial_prompt)
+                .await?;
 
             println!("Session created: {}", session_id);
             println!();

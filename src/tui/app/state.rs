@@ -438,28 +438,75 @@ impl App {
     }
 
     pub(super) async fn refresh_list_items(&mut self) {
+        // Guard: if view mode is SectionGrouped but sections were removed from
+        // config (hot-reload), fall back to ProjectGrouped.
+        if self.ui_state.view_mode == ViewMode::SectionGrouped && self.config.sections.is_empty() {
+            self.ui_state.view_mode = ViewMode::ProjectGrouped;
+        }
+
         let state = self.store.read().await;
 
-        let items = if self.config.sections.is_empty() {
-            build_project_grouped_items(&state, &self.ui_state.agent_states)
-        } else {
-            build_section_grouped_items(
+        let items = match self.ui_state.view_mode {
+            ViewMode::ProjectGrouped => {
+                build_project_grouped_items(&state, &self.ui_state.agent_states)
+            }
+            ViewMode::SectionGrouped => build_section_grouped_items(
                 &state,
                 &self.config.sections,
                 &self.ui_state.agent_states,
                 &self.ui_state.collapsed_sections,
-            )
+            ),
         };
 
         let selectable: Vec<bool> = items.iter().map(|i| i.is_selectable()).collect();
         self.ui_state.list_items = items;
         self.ui_state.cascade_paused = state.cascade_paused_at.is_some();
-        if self.config.sections.is_empty() {
+        if self.ui_state.view_mode == ViewMode::ProjectGrouped {
             self.ui_state
                 .list_state
                 .set_item_count(self.ui_state.list_items.len());
         } else {
             self.ui_state.list_state.set_selectable(selectable);
+        }
+
+        // Pre-compute stack chain for the selected session
+        self.ui_state.stack_chain.clear();
+        if let Some(session_id) = self.ui_state.selected_session_id
+            && let Some(session) = state.sessions.get(&session_id)
+        {
+            let project_sessions: Vec<&WorktreeSession> = state
+                .projects
+                .get(&session.project_id)
+                .map(|p| {
+                    p.worktrees
+                        .iter()
+                        .filter_map(|sid| state.sessions.get(sid))
+                        .collect()
+                })
+                .unwrap_or_default();
+            // Walk up to the stack base
+            let mut base = session_id;
+            for _ in 0..project_sessions.len() {
+                let base_session = project_sessions.iter().find(|s| s.id == base);
+                match base_session
+                    .and_then(|s| crate::session::resolve_stack_parent(s, &project_sessions))
+                {
+                    Some(parent) => base = parent,
+                    None => break,
+                }
+            }
+            let chain = crate::session::stack_chain_from_base(base, &project_sessions);
+            if chain.len() > 1 {
+                for &sid in &chain {
+                    if let Some(s) = state.sessions.get(&sid) {
+                        self.ui_state.stack_chain.push(StackChainEntry {
+                            title: s.title.clone(),
+                            status: s.status,
+                            is_current: sid == session_id,
+                        });
+                    }
+                }
+            }
         }
     }
 

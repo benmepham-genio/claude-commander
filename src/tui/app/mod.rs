@@ -95,6 +95,22 @@ pub enum RightPaneView {
     Shell,
 }
 
+/// Which list view mode is active
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewMode {
+    #[default]
+    ProjectGrouped,
+    SectionGrouped,
+}
+
+/// A single entry in the pre-computed stack chain for the Info pane.
+#[derive(Debug, Clone)]
+pub struct StackChainEntry {
+    pub title: String,
+    pub status: SessionStatus,
+    pub is_current: bool,
+}
+
 /// Modal dialog state
 #[derive(Debug, Clone)]
 pub enum Modal {
@@ -474,6 +490,10 @@ pub struct AppUiState {
     /// Last left-mouse click on a session-list row: (list index, timestamp).
     /// Used to detect double-click on the same row within `DOUBLE_CLICK_WINDOW`.
     pub last_left_click: Option<(usize, Instant)>,
+    /// Current list view mode (project-grouped vs section-grouped).
+    pub view_mode: ViewMode,
+    /// Pre-computed stack chain for the selected session (empty if not stacked).
+    pub stack_chain: Vec<StackChainEntry>,
 }
 
 impl Default for AppUiState {
@@ -512,6 +532,8 @@ impl Default for AppUiState {
             cascade_paused: false,
             collapsed_sections: std::collections::HashSet::new(),
             last_left_click: None,
+            view_mode: ViewMode::default(),
+            stack_chain: Vec::new(),
         }
     }
 }
@@ -734,6 +756,11 @@ impl App {
                     }
                 }
             });
+        }
+
+        // Set initial view mode based on whether sections are configured
+        if !self.config.sections.is_empty() {
+            self.ui_state.view_mode = ViewMode::SectionGrouped;
         }
 
         // Restore last selection from persisted state

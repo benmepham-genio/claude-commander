@@ -32,6 +32,7 @@ mod shell;
 mod worktree_sync;
 
 pub use cascade::{CascadeOutcome, PushStackOutcome};
+pub use lifecycle::{program_is_claude, program_with_claude_flags};
 
 #[cfg(test)]
 mod tests;
