@@ -184,6 +184,27 @@ fn test_display_branch_hides_when_title_equals_branch() {
     assert_eq!(display_branch("user/JIRA-123", "user/JIRA-123"), None);
 }
 
+#[tokio::test]
+async fn test_remove_creating_session_clears_session() {
+    let (_cdir, config_store) = test_config_store(Config::default());
+    let (_dir, store) = test_store();
+    let manager = SessionManager::new(config_store, store.clone(), "");
+
+    // Seed a session stuck in `Creating` state, as `prepare_session` would
+    // leave it if a later step (link/finalize) fails.
+    let session = WorktreeSession::new_creating(ProjectId::new(), "Zombie", "zombie", "claude");
+    let session_id = session.id;
+    store
+        .mutate(move |state| state.add_session(session))
+        .await
+        .unwrap();
+    assert!(store.read().await.get_session(&session_id).is_some());
+
+    // Cleanup on the CLI failure path must remove the zombie record.
+    manager.remove_creating_session(&session_id).await.unwrap();
+    assert!(store.read().await.get_session(&session_id).is_none());
+}
+
 #[test]
 fn test_generate_branch_name_empty_prefix() {
     let (_cdir, config_store) = test_config_store(Config::default());

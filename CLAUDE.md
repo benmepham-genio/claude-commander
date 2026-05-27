@@ -16,7 +16,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Minimise duplication: extract shared logic into helpers or existing utility functions rather than repeating code across modules
 - Use idiomatic Rust patterns: leverage the type system, enums, pattern matching, iterators, and the `?` operator; prefer `impl Into<T>` / `AsRef<T>` over concrete types in function signatures where it improves ergonomics
 - Follow the existing error handling style: `thiserror` derive macros for error enums, `Result<T>` alias from `error.rs`
+- When several fallible steps share the same cleanup-on-error (e.g. removing a half-created session), group them in a single `?`-scoped `async` block and handle the error once, rather than repeating the cleanup after each call. Adding a step then inherits the cleanup automatically. Note: clippy/rust-analyzer cannot catch this duplication — it is a review-time check.
 - Use `tracing` macros (`info!`, `debug!`, `warn!`) for logging, not `println!` or `eprintln!` (except in CLI output paths in `main.rs`)
+- Keep `main.rs` thin: it should wire CLI args to library calls and print output. Any logic worth testing belongs in `SessionManager`/library code where unit tests can reach it, not inline in `main.rs` (which is untestable without spawning the binary)
 
 ## Architecture
 
@@ -105,5 +107,6 @@ The `cargo fmt` hook auto-fixes formatting. If `cargo clippy` fails, fix the war
 - Never skip GPG commit signing
 - Precommit hooks may autoformat files while failing the commit; these changes will need to be restaged and the commit reattempted.
 - Before committing, always ensure `cargo clippy` and `cargo build` pass with no warnings or errors. Fix any issues before creating the commit.
+- Bug fixes need a regression test too, not just features: follow the red-green TDD rule under [Testing](#testing) — add a test that fails without the fix and passes with it. If the fix lives somewhere untestable (e.g. `main.rs`), push the logic down into testable library code rather than skipping the test.
 - Cutting a release: `cargo release {patch,minor,major} --execute` (see README). Never bump `Cargo.toml` manually.
 
