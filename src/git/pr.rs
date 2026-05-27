@@ -112,6 +112,16 @@ pub enum ReviewDecision {
     ChangesRequested,
 }
 
+impl std::fmt::Display for ReviewDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReviewRequired => write!(f, "Review required"),
+            Self::Approved => write!(f, "Approved"),
+            Self::ChangesRequested => write!(f, "Changes requested"),
+        }
+    }
+}
+
 impl std::fmt::Display for PrState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

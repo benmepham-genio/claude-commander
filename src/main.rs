@@ -42,6 +42,20 @@ enum Commands {
         /// Show all sessions including stopped ones
         #[arg(short, long)]
         all: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show detailed status of a session
+    Status {
+        /// Session name or ID prefix
+        session: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Dump recent terminal output from a session
@@ -254,57 +268,117 @@ async fn main() -> Result<()> {
             app.run().await?;
         }
 
-        Some(Commands::List { all }) => {
+        Some(Commands::List { all, json }) => {
             setup_logging(cli.debug, false)?;
 
             let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
 
-            println!("Sessions:");
-            println!();
+            if json {
+                let entries = claude_commander::cli::build_session_list(&app_state, all);
+                println!("{}", serde_json::to_string_pretty(&entries)?);
+            } else {
+                println!("Sessions:");
+                println!();
 
-            if app_state.projects.is_empty() {
-                println!("  No projects. Use 'claude-commander' to add one.");
-                return Ok(());
-            }
+                if app_state.projects.is_empty() {
+                    println!("  No projects. Use 'claude-commander' to add one.");
+                    return Ok(());
+                }
 
-            for project in app_state.projects.values() {
-                println!("  {} ({})", project.name, project.main_branch);
+                for project in app_state.projects.values() {
+                    println!("  {} ({})", project.name, project.main_branch);
 
-                let sessions: Vec<_> = project
-                    .worktrees
-                    .iter()
-                    .filter_map(|id| app_state.sessions.get(id))
-                    .filter(|s| all || s.status.is_active())
-                    .collect();
+                    let sessions: Vec<_> = project
+                        .worktrees
+                        .iter()
+                        .filter_map(|id| app_state.sessions.get(id))
+                        .filter(|s| all || s.status.is_active())
+                        .collect();
 
-                if sessions.is_empty() {
-                    println!("    (no sessions)");
-                } else {
-                    for session in sessions {
-                        let status_icon = match session.status {
-                            claude_commander::SessionStatus::Creating
-                            | claude_commander::SessionStatus::Merging
-                            | claude_commander::SessionStatus::Pushing => "⠋",
-                            claude_commander::SessionStatus::Running => "●",
-                            claude_commander::SessionStatus::Stopped => "○",
-                            claude_commander::SessionStatus::CascadePaused => "⏸",
-                        };
-                        match claude_commander::session::display_branch(
-                            &session.title,
-                            &session.branch,
-                        ) {
-                            Some(shown_branch) => println!(
-                                "    {} {} [{}] ({})",
-                                status_icon, session.title, shown_branch, session.program
-                            ),
-                            None => println!(
-                                "    {} {} ({})",
-                                status_icon, session.title, session.program
-                            ),
+                    if sessions.is_empty() {
+                        println!("    (no sessions)");
+                    } else {
+                        for session in sessions {
+                            let status_icon = match session.status {
+                                claude_commander::SessionStatus::Creating
+                                | claude_commander::SessionStatus::Merging
+                                | claude_commander::SessionStatus::Pushing => "⠋",
+                                claude_commander::SessionStatus::Running => "●",
+                                claude_commander::SessionStatus::Stopped => "○",
+                                claude_commander::SessionStatus::CascadePaused => "⏸",
+                            };
+                            match claude_commander::session::display_branch(
+                                &session.title,
+                                &session.branch,
+                            ) {
+                                Some(shown_branch) => println!(
+                                    "    {} {} [{}] ({})",
+                                    status_icon, session.title, shown_branch, session.program
+                                ),
+                                None => println!(
+                                    "    {} {} ({})",
+                                    status_icon, session.title, session.program
+                                ),
+                            }
                         }
                     }
+                    println!();
                 }
-                println!();
+            }
+        }
+
+        Some(Commands::Status { session, json }) => {
+            setup_logging(cli.debug, false)?;
+
+            let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
+
+            let found = match claude_commander::cli::find_session(&app_state, &session) {
+                Some(s) => s.clone(),
+                None => {
+                    eprintln!("Session not found: {}", session);
+                    eprintln!("Use 'claude-commander list' to see available sessions.");
+                    std::process::exit(1);
+                }
+            };
+
+            let project_name = app_state
+                .projects
+                .get(&found.project_id)
+                .map(|p| p.name.as_str())
+                .unwrap_or("unknown");
+
+            // Detect live agent state
+            let agent_state = if found.status.is_active() {
+                use claude_commander::tmux::{AgentStateDetector, TmuxExecutor};
+                use std::time::Duration;
+
+                let executor = TmuxExecutor::new();
+                let mut detector = AgentStateDetector::new(executor, Duration::ZERO);
+                detector.detect(&found.tmux_session_name).await
+            } else {
+                claude_commander::AgentState::Unknown
+            };
+
+            // Get diff stat — diff against base_commit (branch fork point) when
+            // available, otherwise fall back to HEAD for uncommitted changes.
+            let diff_stat = if found.worktree_path.exists() {
+                let diff_base = found.base_commit.as_deref().unwrap_or("HEAD");
+                claude_commander::git::diff_stat_summary(&found.worktree_path, diff_base).await
+            } else {
+                None
+            };
+
+            let entry = claude_commander::cli::StatusJsonEntry::from_session(
+                &found,
+                project_name,
+                agent_state,
+                diff_stat,
+            );
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&entry)?);
+            } else {
+                println!("{}", claude_commander::cli::format_status_human(&entry));
             }
         }
 
@@ -445,35 +519,32 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // When base_branch matches an existing session's branch, don't
-            // pass it to prepare_session — the child needs its own branch
-            // (generated from the title). The fork point is handled by
-            // link_stack_parent_by_branch + finalize_session instead.
-            let is_stacked = if let Some(ref base) = base_branch {
-                let state = store.read().await;
-                state
-                    .sessions
-                    .values()
-                    .any(|s| s.project_id == project_id && s.branch == *base)
-            } else {
-                false
-            };
-            let branch_for_prepare = if is_stacked {
-                None
-            } else {
-                base_branch.clone()
-            };
-
+            // `--base-branch` means "fork the new session off this branch",
+            // never "reuse this branch as the session's own branch". So the
+            // session always gets a freshly generated branch (None below); the
+            // base is applied as the fork point in finalize_session. When the
+            // base happens to be another session's branch,
+            // link_stack_parent_by_branch additionally records the stack link.
             println!("Creating session '{}'...", name);
             let session_id = manager
-                .prepare_session(&project_id, name, Some(program), branch_for_prepare)
+                .prepare_session(&project_id, name, Some(program), None)
                 .await?;
-            manager
-                .link_stack_parent_by_branch(&session_id, base_branch.as_deref())
-                .await?;
-            manager
-                .finalize_session(&session_id, initial_prompt)
-                .await?;
+
+            let result = async {
+                manager
+                    .link_stack_parent_by_branch(&session_id, base_branch.as_deref())
+                    .await?;
+                manager
+                    .finalize_session(&session_id, initial_prompt, base_branch)
+                    .await?;
+                Ok::<(), claude_commander::Error>(())
+            }
+            .await;
+
+            if let Err(e) = result {
+                let _ = manager.remove_creating_session(&session_id).await;
+                return Err(e.into());
+            }
 
             println!("Session created: {}", session_id);
             println!();

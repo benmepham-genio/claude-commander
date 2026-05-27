@@ -79,6 +79,39 @@ async fn create_test_repo() -> (TempDir, PathBuf) {
     (temp_dir, repo_path)
 }
 
+/// Run a git command in `dir`, asserting it succeeds.
+async fn run_git(dir: &std::path::Path, args: &[&str]) {
+    let output = tokio::process::Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Run a git command in `dir` and return its trimmed stdout.
+async fn git_stdout(dir: &std::path::Path, args: &[&str]) -> String {
+    let output = tokio::process::Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
 /// Helper to check if tmux is available
 async fn tmux_available() -> bool {
     tokio::process::Command::new("tmux")
@@ -195,7 +228,7 @@ async fn test_session_manager_create_session() {
         .await
         .expect("prepare_session should succeed");
 
-    let result = manager.finalize_session(&session_id, None).await;
+    let result = manager.finalize_session(&session_id, None, None).await;
 
     if let Err(e) = &result {
         eprintln!("Error finalizing session: {}", e);
@@ -256,7 +289,10 @@ async fn test_session_manager_restart() {
         )
         .await
         .unwrap();
-    manager.finalize_session(&session_id, None).await.unwrap();
+    manager
+        .finalize_session(&session_id, None, None)
+        .await
+        .unwrap();
 
     // Verify initial status is Running
     {
@@ -541,7 +577,7 @@ async fn test_create_session_no_remote_falls_back() {
         .await
         .expect("prepare_session should succeed");
 
-    let result = manager.finalize_session(&session_id, None).await;
+    let result = manager.finalize_session(&session_id, None, None).await;
 
     assert!(
         result.is_ok(),
@@ -591,7 +627,10 @@ async fn test_base_branch_links_stack_parent_when_session_matches() {
         )
         .await
         .unwrap();
-    manager.finalize_session(&parent_id, None).await.unwrap();
+    manager
+        .finalize_session(&parent_id, None, None)
+        .await
+        .unwrap();
 
     let parent_branch = {
         let state = store.read().await;
@@ -612,7 +651,10 @@ async fn test_base_branch_links_stack_parent_when_session_matches() {
         .link_stack_parent_by_branch(&child_id, Some(&parent_branch))
         .await
         .unwrap();
-    manager.finalize_session(&child_id, None).await.unwrap();
+    manager
+        .finalize_session(&child_id, None, None)
+        .await
+        .unwrap();
 
     // Verify the child is linked to the parent
     {
@@ -671,7 +713,10 @@ async fn test_base_branch_no_link_when_no_session_matches() {
         .link_stack_parent_by_branch(&session_id, Some("develop"))
         .await
         .unwrap();
-    manager.finalize_session(&session_id, None).await.unwrap();
+    manager
+        .finalize_session(&session_id, None, None)
+        .await
+        .unwrap();
 
     // Verify no stack link
     {
@@ -682,6 +727,91 @@ async fn test_base_branch_no_link_when_no_session_matches() {
             "session should not be linked when base_branch doesn't match any session"
         );
     }
+
+    let _ = manager.kill_session(&session_id, true).await;
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
+}
+
+/// `--base-branch <branch>` for a plain branch not owned by any session (e.g.
+/// `develop`) must create a NEW branch for the session, forked off the base —
+/// not reuse the base branch as the session's own branch. Replicates the
+/// corrected main.rs CLI flow: generate a fresh branch (None to
+/// prepare_session), attempt a (no-op) stack link, then fork off the base in
+/// finalize_session.
+#[tokio::test]
+async fn test_base_branch_forks_new_branch_off_base() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+
+    // Create a `develop` branch with a commit that is NOT on the default
+    // branch, so we can prove the new worktree was forked from develop's tip.
+    let default_branch = git_stdout(&repo_path, &["rev-parse", "--abbrev-ref", "HEAD"]).await;
+    run_git(&repo_path, &["checkout", "-b", "develop"]).await;
+    tokio::fs::write(repo_path.join("develop.txt"), "develop\n")
+        .await
+        .unwrap();
+    run_git(&repo_path, &["add", "develop.txt"]).await;
+    run_git(&repo_path, &["commit", "-m", "develop commit"]).await;
+    let develop_tip = git_stdout(&repo_path, &["rev-parse", "HEAD"]).await;
+    // Leave develop un-checked-out so it can't be confused with the session's
+    // own branch.
+    run_git(&repo_path, &["checkout", &default_branch]).await;
+
+    let state_temp_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+    let config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        ..Config::default()
+    };
+
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    let store = create_isolated_store(&state_temp_dir);
+    let manager = SessionManager::new(config_store, store.clone(), "");
+
+    let project_id = manager.add_project(repo_path.clone()).await.unwrap();
+
+    let session_id = manager
+        .prepare_session(
+            &project_id,
+            "my-feature".to_string(),
+            Some("bash".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+    manager
+        .link_stack_parent_by_branch(&session_id, Some("develop"))
+        .await
+        .unwrap();
+    manager
+        .finalize_session(&session_id, None, Some("develop".to_string()))
+        .await
+        .unwrap();
+
+    let (branch, worktree_path) = {
+        let state = store.read().await;
+        let s = state.get_session(&session_id).unwrap();
+        (s.branch.clone(), s.worktree_path.clone())
+    };
+
+    // The session must get its own generated branch, not reuse "develop".
+    assert_ne!(
+        branch, "develop",
+        "session should get its own generated branch, not the base branch"
+    );
+
+    // The new branch must be forked from develop's tip (not the default branch).
+    let worktree_tip = git_stdout(&worktree_path, &["rev-parse", "HEAD"]).await;
+    assert_eq!(
+        worktree_tip, develop_tip,
+        "new session branch should be forked from the base branch (develop) tip"
+    );
 
     let _ = manager.kill_session(&session_id, true).await;
     drop(repo_temp_dir);
@@ -724,7 +854,10 @@ async fn test_stacked_session_gets_own_branch_not_parents() {
         )
         .await
         .unwrap();
-    manager.finalize_session(&parent_id, None).await.unwrap();
+    manager
+        .finalize_session(&parent_id, None, None)
+        .await
+        .unwrap();
 
     let parent_branch = {
         let state = store.read().await;
@@ -766,7 +899,10 @@ async fn test_stacked_session_gets_own_branch_not_parents() {
 
     // This would fail with "branch already used by worktree" if we had
     // passed the parent's branch to prepare_session
-    manager.finalize_session(&child_id, None).await.unwrap();
+    manager
+        .finalize_session(&child_id, None, None)
+        .await
+        .unwrap();
 
     // Verify child has its own branch, not the parent's
     {

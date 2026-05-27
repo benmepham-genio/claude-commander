@@ -91,7 +91,7 @@ claude-commander
 ### Commands
 
 ```bash
-# List active sessions (add --all to include stopped)
+# List active sessions (add --all to include stopped, --json for machine-readable output)
 claude-commander list
 
 # Create a new session

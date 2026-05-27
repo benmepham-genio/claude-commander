@@ -92,11 +92,17 @@ impl SessionManager {
     ///
     /// Performs the heavy work: git fetch, worktree creation, tmux session
     /// setup. On success, transitions the session from `Creating` to `Running`.
+    ///
+    /// When `base_branch` is `Some`, the session's (freshly generated) branch
+    /// is forked off that base branch rather than `origin/<main>`. This backs
+    /// the CLI `--base-branch` flag. For stacked sessions the fork point is
+    /// derived from the stack parent instead and takes precedence.
     #[instrument(skip(self))]
     pub async fn finalize_session(
         &self,
         session_id: &SessionId,
         initial_prompt: Option<String>,
+        base_branch: Option<String>,
     ) -> Result<SessionId> {
         // Read session and project info, plus stack parent's branch if any so
         // we know to fork from it below.
@@ -181,13 +187,27 @@ impl SessionManager {
         let (branch_exists, start_point) = {
             let backend = GitBackend::open(&repo_path)?;
             let exists = backend.branch_exists(&branch_name)?;
-            // For a stacked session we fork the new branch off the parent
-            // session's local branch (which exists on disk thanks to its own
-            // worktree). This overrides the usual origin/<branch>/origin/<main>
-            // fallback so the stack topology is preserved.
-            let sp = if let Some(parent_branch) = stack_parent_branch.as_deref() {
-                if !exists && backend.branch_exists(parent_branch)? {
-                    Some(parent_branch.to_string())
+            // Fork point for the new branch. A stacked parent's branch takes
+            // precedence (it exists locally thanks to its own worktree);
+            // otherwise honour the CLI `--base-branch` value. Both mean "create
+            // the new branch off this base", overriding the origin/<main>
+            // fallback below.
+            let fork_base = stack_parent_branch.as_deref().or(base_branch.as_deref());
+            let sp = if exists {
+                // The branch already exists locally — `git worktree add` will
+                // just check it out, so no explicit start point is needed.
+                None
+            } else if let Some(base) = fork_base {
+                // Fork off the base branch, preferring the local branch and
+                // falling back to its remote tracking ref, then origin/<main>.
+                let base_remote_ref = format!("refs/remotes/origin/{}", base);
+                let main_remote_ref = format!("refs/remotes/origin/{}", main_branch);
+                if backend.branch_exists(base)? {
+                    Some(base.to_string())
+                } else if backend.ref_exists(&base_remote_ref)? {
+                    Some(format!("origin/{}", base))
+                } else if backend.ref_exists(&main_remote_ref)? {
+                    Some(format!("origin/{}", main_branch))
                 } else {
                     None
                 }
@@ -198,7 +218,7 @@ impl SessionManager {
                 // back to origin/<main_branch> when creating a fresh branch.
                 let branch_remote_ref = format!("refs/remotes/origin/{}", branch_name);
                 let main_remote_ref = format!("refs/remotes/origin/{}", main_branch);
-                if !exists && backend.ref_exists(&branch_remote_ref)? {
+                if backend.ref_exists(&branch_remote_ref)? {
                     Some(format!("origin/{}", branch_name))
                 } else if backend.ref_exists(&main_remote_ref)? {
                     Some(format!("origin/{}", main_branch))
