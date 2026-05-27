@@ -318,9 +318,187 @@ fn parse_diff_stat(output: &str) -> (usize, usize, usize) {
     (files_changed, lines_added, lines_removed)
 }
 
+/// Render parsed diff counts as a git-style one-line summary, e.g.
+/// `"3 files changed, 10 insertions(+), 5 deletions(-)"`. Insertion/deletion
+/// clauses are omitted when zero, matching `git diff --stat` output.
+fn format_diff_stat_summary(files: usize, added: usize, removed: usize) -> String {
+    let mut summary = format!(
+        "{files} {} changed",
+        if files == 1 { "file" } else { "files" }
+    );
+    if added > 0 {
+        summary.push_str(&format!(
+            ", {added} {}(+)",
+            if added == 1 {
+                "insertion"
+            } else {
+                "insertions"
+            }
+        ));
+    }
+    if removed > 0 {
+        summary.push_str(&format!(
+            ", {removed} {}(-)",
+            if removed == 1 {
+                "deletion"
+            } else {
+                "deletions"
+            }
+        ));
+    }
+    summary
+}
+
+/// Compute a one-line diff-stat summary for the worktree at `path` relative to
+/// `base` (a commit-ish such as a session's fork-point commit, or `HEAD`).
+///
+/// Untracked files are counted toward the file total so the figure matches the
+/// diff view rendered in the TUI (see [`compute_diff_for_path`]). Returns `None` when
+/// there are no changes, or when git cannot be run.
+pub async fn diff_stat_summary(path: &Path, base: &str) -> Option<String> {
+    let (stat_output, untracked_output) = tokio::join!(
+        Command::new("git")
+            .current_dir(path)
+            .args(["diff", "--stat", base])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output(),
+        Command::new("git")
+            .current_dir(path)
+            .args(["ls-files", "--others", "--exclude-standard"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output(),
+    );
+
+    let stat_output = stat_output.ok().filter(|o| o.status.success())?;
+    let (mut files, added, removed) =
+        parse_diff_stat(&String::from_utf8_lossy(&stat_output.stdout));
+
+    // Count untracked files into the total, mirroring `compute_diff`.
+    if let Ok(out) = untracked_output
+        && out.status.success()
+    {
+        files += String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .count();
+    }
+
+    if files == 0 {
+        return None;
+    }
+
+    Some(format_diff_stat_summary(files, added, removed))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_format_diff_stat_summary_pluralization() {
+        assert_eq!(
+            format_diff_stat_summary(1, 1, 1),
+            "1 file changed, 1 insertion(+), 1 deletion(-)"
+        );
+        assert_eq!(
+            format_diff_stat_summary(3, 10, 5),
+            "3 files changed, 10 insertions(+), 5 deletions(-)"
+        );
+    }
+
+    #[test]
+    fn test_format_diff_stat_summary_omits_zero_clauses() {
+        assert_eq!(format_diff_stat_summary(2, 0, 0), "2 files changed");
+        assert_eq!(
+            format_diff_stat_summary(1, 4, 0),
+            "1 file changed, 4 insertions(+)"
+        );
+        assert_eq!(
+            format_diff_stat_summary(1, 0, 4),
+            "1 file changed, 4 deletions(-)"
+        );
+    }
+
+    /// End-to-end check against a real git repo: a tracked modification plus an
+    /// untracked file should both be reflected in the summary.
+    #[tokio::test]
+    async fn test_diff_stat_summary_counts_tracked_and_untracked() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        async fn git(dir: &Path, args: &[&str]) {
+            let status = Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await
+                .expect("git command runs");
+            assert!(status.success(), "git {args:?} failed");
+        }
+
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path();
+        git(path, &["init", "-q"]).await;
+        git(path, &["config", "user.email", "test@example.com"]).await;
+        git(path, &["config", "user.name", "Test"]).await;
+
+        fs::write(path.join("tracked.txt"), "line one\n").unwrap();
+        git(path, &["add", "."]).await;
+        git(path, &["commit", "-q", "-m", "initial"]).await;
+
+        // Modify the tracked file and add an untracked one.
+        fs::write(path.join("tracked.txt"), "line one changed\n").unwrap();
+        fs::write(path.join("untracked.txt"), "new\n").unwrap();
+
+        let summary = diff_stat_summary(path, "HEAD")
+            .await
+            .expect("summary present");
+        // 1 tracked modification + 1 untracked file = 2 files.
+        assert!(
+            summary.starts_with("2 files changed"),
+            "unexpected summary: {summary}"
+        );
+        assert!(
+            summary.contains("insertion"),
+            "unexpected summary: {summary}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_diff_stat_summary_none_when_clean() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        async fn git(dir: &Path, args: &[&str]) {
+            Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await
+                .expect("git command runs");
+        }
+
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path();
+        git(path, &["init", "-q"]).await;
+        git(path, &["config", "user.email", "test@example.com"]).await;
+        git(path, &["config", "user.name", "Test"]).await;
+        fs::write(path.join("f.txt"), "x\n").unwrap();
+        git(path, &["add", "."]).await;
+        git(path, &["commit", "-q", "-m", "initial"]).await;
+
+        assert!(diff_stat_summary(path, "HEAD").await.is_none());
+    }
 
     #[test]
     fn test_parse_diff_stat() {

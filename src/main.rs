@@ -353,21 +353,7 @@ async fn main() -> Result<()> {
             // available, otherwise fall back to HEAD for uncommitted changes.
             let diff_stat = if found.worktree_path.exists() {
                 let diff_base = found.base_commit.as_deref().unwrap_or("HEAD");
-                let output = tokio::process::Command::new("git")
-                    .args(["diff", "--stat", diff_base])
-                    .current_dir(&found.worktree_path)
-                    .output()
-                    .await;
-                output.ok().filter(|o| o.status.success()).and_then(|o| {
-                    let s = String::from_utf8_lossy(&o.stdout);
-                    let trimmed = s.trim();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        // Take the summary line (last line of --stat)
-                        trimmed.lines().last().map(|l| l.trim().to_string())
-                    }
-                })
+                claude_commander::git::diff_stat_summary(&found.worktree_path, diff_base).await
             } else {
                 None
             };

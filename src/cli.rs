@@ -162,8 +162,8 @@ pub fn format_status_human(entry: &StatusJsonEntry) -> String {
             if entry.pr_draft { "draft" } else { "ready" },
             url,
         ));
-        if let Some(ref decision) = entry.review_decision {
-            lines.push(format!("Review:  {:?}", decision));
+        if let Some(decision) = entry.review_decision {
+            lines.push(format!("Review:  {}", decision));
         }
         if !entry.pr_reviewers.is_empty() {
             lines.push(format!("Reviewers: {}", entry.pr_reviewers.join(", ")));
@@ -477,7 +477,7 @@ mod tests {
         assert!(output.contains("https://example.com/pull/42"));
         assert!(output.contains("bug"));
         assert!(output.contains("alice"));
-        assert!(output.contains("ChangesRequested"));
+        assert!(output.contains("Changes requested"));
     }
 
     #[test]
