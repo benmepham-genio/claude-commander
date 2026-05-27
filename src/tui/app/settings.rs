@@ -87,6 +87,18 @@ impl App {
                         color_swatch: None,
                     },
                     SettingsRow {
+                        label: "Project Pull Enabled".into(),
+                        value: c.project_pull_enabled.to_string(),
+                        field_key: "project_pull_enabled".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "Project Pull Interval (s)".into(),
+                        value: c.project_pull_interval_secs.to_string(),
+                        field_key: "project_pull_interval_secs".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
                         label: "Max Concurrent Tmux".into(),
                         value: c.max_concurrent_tmux.to_string(),
                         field_key: "max_concurrent_tmux".into(),
@@ -776,6 +788,23 @@ impl App {
                         self.config.pr_check_interval_secs = v;
                     }
                 }
+                "project_pull_enabled" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.project_pull_enabled = b;
+                    }
+                }
+                "project_pull_interval_secs" => match value.parse::<u64>() {
+                    Ok(v) if v >= 60 => {
+                        self.config.project_pull_interval_secs = v;
+                    }
+                    Ok(_) => {
+                        self.ui_state.status_message = Some((
+                            "Project Pull Interval must be at least 60 seconds".into(),
+                            std::time::Instant::now() + std::time::Duration::from_secs(4),
+                        ));
+                    }
+                    Err(_) => {}
+                },
                 "max_concurrent_tmux" => {
                     if let Ok(v) = value.parse::<usize>() {
                         self.config.max_concurrent_tmux = v;

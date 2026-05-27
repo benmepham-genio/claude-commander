@@ -270,6 +270,36 @@ impl App {
             StateUpdate::PushStackFinished { result } => {
                 self.handle_push_stack_finished(result).await;
             }
+            StateUpdate::ProjectPullFinished {
+                project_id,
+                outcome,
+            } => {
+                self.ui_state.project_pull_in_flight.remove(&project_id);
+                self.ui_state
+                    .last_project_pull
+                    .insert(project_id, Instant::now());
+                match outcome {
+                    PullOutcome::Advanced => {
+                        debug!("project pull: {} advanced", project_id);
+                        self.ui_state.project_pull_blocked.remove(&project_id);
+                        self.refresh_list_items().await;
+                    }
+                    PullOutcome::UpToDate => {
+                        self.ui_state.project_pull_blocked.remove(&project_id);
+                    }
+                    PullOutcome::Blocked(reason) => {
+                        debug!("project pull: {} blocked ({})", project_id, reason.as_str());
+                        self.ui_state
+                            .project_pull_blocked
+                            .insert(project_id, reason);
+                    }
+                    PullOutcome::SoftFail => {
+                        // Leave any existing blocked state alone: a fetch
+                        // failure doesn't tell us anything new about the
+                        // branch relation.
+                    }
+                }
+            }
             _ => {}
         }
     }

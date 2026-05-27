@@ -73,12 +73,20 @@ impl App {
             Paragraph::new(Line::styled(" Sessions:", heading_style)).style(heading_style);
         frame.render_widget(heading, chunks[0]);
 
+        let blocked: std::collections::HashMap<ProjectId, &str> = self
+            .ui_state
+            .project_pull_blocked
+            .iter()
+            .map(|(id, r)| (*id, r.as_str()))
+            .collect();
+
         let tree_list = TreeList::new(&self.ui_state.list_items, &self.theme)
             .tick(self.ui_state.tick_count)
             .highlight_style(self.theme.selection().add_modifier(Modifier::BOLD))
             .review_labels(&self.config.pr_review_labels)
             .invert_pr_label_color(self.config.invert_pr_label_color)
-            .show_session_program(self.config.show_session_program);
+            .show_session_program(self.config.show_session_program)
+            .pull_blocked_projects(blocked);
 
         frame.render_stateful_widget(
             tree_list,
@@ -288,10 +296,16 @@ impl App {
             });
 
             if let Some((name, repo_path, main_branch)) = project_data {
+                let pull_blocked = self
+                    .ui_state
+                    .project_pull_blocked
+                    .get(&project_id)
+                    .map(|r| r.as_str().to_string());
                 InfoContent::Project(InfoProjectData {
                     name,
                     repo_path,
                     main_branch,
+                    pull_blocked,
                 })
             } else {
                 InfoContent::Empty

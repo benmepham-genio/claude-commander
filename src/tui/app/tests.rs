@@ -593,3 +593,52 @@ fn test_apply_worktrees_dir_default_sentinel_clears_to_none() {
     app.apply_settings_edit(SettingsTab::General, "worktrees_dir", "(default)");
     assert_eq!(app.config.worktrees_dir, None);
 }
+
+#[test]
+fn test_project_pull_rows_present_in_general_tab() {
+    let app = make_test_app();
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let enabled = rows
+        .iter()
+        .find(|r| r.field_key == "project_pull_enabled")
+        .expect("project_pull_enabled row missing");
+    assert_eq!(enabled.value, "false");
+    let interval = rows
+        .iter()
+        .find(|r| r.field_key == "project_pull_interval_secs")
+        .expect("project_pull_interval_secs row missing");
+    assert_eq!(interval.value, "3600");
+}
+
+#[test]
+fn test_apply_project_pull_enabled_round_trip() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(SettingsTab::General, "project_pull_enabled", "true");
+    assert!(app.config.project_pull_enabled);
+    app.apply_settings_edit(SettingsTab::General, "project_pull_enabled", "false");
+    assert!(!app.config.project_pull_enabled);
+}
+
+#[test]
+fn test_apply_project_pull_interval_accepts_60_and_above() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(SettingsTab::General, "project_pull_interval_secs", "120");
+    assert_eq!(app.config.project_pull_interval_secs, 120);
+    app.apply_settings_edit(SettingsTab::General, "project_pull_interval_secs", "60");
+    assert_eq!(app.config.project_pull_interval_secs, 60);
+}
+
+#[test]
+fn test_apply_project_pull_interval_rejects_below_60() {
+    let mut app = make_test_app();
+    app.config.project_pull_interval_secs = 3600;
+    app.apply_settings_edit(SettingsTab::General, "project_pull_interval_secs", "30");
+    assert_eq!(
+        app.config.project_pull_interval_secs, 3600,
+        "values below 60 must be rejected"
+    );
+    assert!(
+        app.ui_state.status_message.is_some(),
+        "rejection should surface a status message"
+    );
+}

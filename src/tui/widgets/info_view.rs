@@ -40,6 +40,9 @@ pub struct InfoProjectData {
     pub name: String,
     pub repo_path: String,
     pub main_branch: String,
+    /// When set, the background project-branch pull is currently held back
+    /// for this project. Displayed as a "Pull: " line in the Info pane.
+    pub pull_blocked: Option<String>,
 }
 
 /// Info pane content — either session or project data.
@@ -365,7 +368,7 @@ impl<'a> InfoView<'a> {
         let label = self.label_style();
         let value = self.value_style();
 
-        vec![
+        let mut lines = vec![
             Line::from(vec![
                 Span::styled(" Project: ", label),
                 Span::styled(data.name.clone(), value),
@@ -378,7 +381,17 @@ impl<'a> InfoView<'a> {
                 Span::styled(" Branch:  ", label),
                 Span::styled(data.main_branch.clone(), value),
             ]),
-        ]
+        ];
+        if let Some(reason) = &data.pull_blocked {
+            lines.push(Line::from(vec![
+                Span::styled(" Pull:    ", label),
+                Span::styled(
+                    format!("⚠ blocked — {reason}"),
+                    Style::default().fg(self.theme.agent_waiting),
+                ),
+            ]));
+        }
+        lines
     }
 
     fn label_style(&self) -> Style {
@@ -549,10 +562,25 @@ mod tests {
             name: "my-project".into(),
             repo_path: "/home/user/projects/my-project".into(),
             main_branch: "main".into(),
+            pull_blocked: None,
         };
         let view = InfoView::new(InfoContent::Project(data), &theme);
         let lines = view.build_lines();
         assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn test_info_view_project_pull_blocked() {
+        let theme = test_theme();
+        let data = InfoProjectData {
+            name: "my-project".into(),
+            repo_path: "/home/user/projects/my-project".into(),
+            main_branch: "main".into(),
+            pull_blocked: Some("Working tree dirty".into()),
+        };
+        let view = InfoView::new(InfoContent::Project(data), &theme);
+        let lines = view.build_lines();
+        assert_eq!(lines.len(), 4);
     }
 
     #[test]
