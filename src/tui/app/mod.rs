@@ -43,8 +43,9 @@ use super::widgets::{
 use crate::config::{BindableAction, Config, ConfigStore, StateStore};
 use crate::error::{Result, TuiError};
 use crate::git::{
-    AiSummary, DiffInfo, EnrichedPrInfo, PrCheckResult, check_pr_for_branch, diff_hash,
-    fetch_branch_summary, fetch_enriched_pr, is_gh_available,
+    AiSummary, BlockReason, DiffInfo, EnrichedPrInfo, PrCheckResult, PullOutcome,
+    check_pr_for_branch, diff_hash, fetch_branch_summary, fetch_enriched_pr, is_gh_available,
+    run_project_pull,
 };
 use crate::session::{
     AgentState, ProjectId, SessionId, SessionListItem, SessionManager, SessionStatus,
@@ -494,6 +495,21 @@ pub struct AppUiState {
     pub view_mode: ViewMode,
     /// Pre-computed stack chain for the selected session (empty if not stacked).
     pub stack_chain: Vec<StackChainEntry>,
+    /// When each project last completed a background pull attempt
+    /// (success or block). Drives the per-project interval scheduler.
+    pub last_project_pull: HashMap<ProjectId, Instant>,
+    /// Projects whose most recent pull was held back, with the reason.
+    /// Cleared when a subsequent attempt advances or finds nothing to do.
+    pub project_pull_blocked: HashMap<ProjectId, BlockReason>,
+    /// Projects with a pull task currently in flight, so we don't double-spawn.
+    pub project_pull_in_flight: std::collections::HashSet<ProjectId>,
+    /// When the app launched. Used to give the background pull task a short
+    /// grace period before its first fire after startup.
+    pub started_at: Instant,
+    /// When the project-pull scheduler last swept the project list. A cheap
+    /// global throttle so the per-tick check doesn't acquire the state lock
+    /// and clone the project list on every render frame.
+    pub last_project_pull_sweep: Option<Instant>,
 }
 
 impl Default for AppUiState {
@@ -534,6 +550,11 @@ impl Default for AppUiState {
             last_left_click: None,
             view_mode: ViewMode::default(),
             stack_chain: Vec::new(),
+            last_project_pull: HashMap::new(),
+            project_pull_blocked: HashMap::new(),
+            project_pull_in_flight: std::collections::HashSet::new(),
+            started_at: Instant::now(),
+            last_project_pull_sweep: None,
         }
     }
 }

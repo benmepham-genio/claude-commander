@@ -288,6 +288,20 @@ ui_refresh_fps = 30
 # Interval in seconds between GitHub PR checks (0 = disabled)
 pr_check_interval_secs = 120
 
+# Periodically fast-forward each project's main branch from origin.
+# When enabled, runs `git fetch origin <main>` and advances the local
+# `<main>` ref whenever a fast-forward is possible. If `<main>` is the
+# currently checked-out branch in the project repo, `git merge --ff-only`
+# is used when the working tree is clean. The pull is held back (and the
+# project row shows a ⚠ badge) when the working tree is dirty, the branch
+# has diverged from origin, or `<main>` is checked out in another worktree.
+# Default: enabled.
+project_pull_enabled = true
+
+# Interval in seconds between project-branch pulls. Minimum 60.
+# Default: 3600 (one hour).
+project_pull_interval_secs = 3600
+
 # Use rounded border corners (╭╮╰╯) instead of square (┌┐└┘)
 rounded_borders = false
 

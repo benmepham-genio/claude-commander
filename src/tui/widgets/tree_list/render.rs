@@ -58,6 +58,7 @@ impl<'a> TreeList<'a> {
             .iter()
             .map(|item| match item {
                 SessionListItem::Project {
+                    id,
                     name,
                     main_branch,
                     worktree_count,
@@ -79,7 +80,7 @@ impl<'a> TreeList<'a> {
                     // SectionHeader > Project > Worktree.
                     let pad = if *nested { "   " } else { " " };
 
-                    let line = Line::from(vec![
+                    let mut spans: Vec<Span<'static>> = vec![
                         Span::raw(pad),
                         Span::styled(
                             name.clone(),
@@ -90,9 +91,15 @@ impl<'a> TreeList<'a> {
                             Style::default().fg(self.theme.text_accent),
                         ),
                         Span::styled(count_str, Style::default().fg(self.theme.text_secondary)),
-                    ]);
+                    ];
+                    if self.project_is_pull_blocked(id) {
+                        spans.push(Span::styled(
+                            " ⚠".to_string(),
+                            Style::default().fg(self.theme.agent_waiting),
+                        ));
+                    }
 
-                    ListItem::new(line)
+                    ListItem::new(Line::from(spans))
                 }
                 SessionListItem::Spacer => {
                     let rule: String = "─".repeat(20);

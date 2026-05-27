@@ -59,6 +59,11 @@ impl App {
                         self.spawn_pr_status_check();
                     }
                 }
+
+                // Periodic project-branch pull
+                if self.config.project_pull_enabled && self.config.project_pull_interval_secs > 0 {
+                    self.maybe_spawn_project_pulls().await;
+                }
             }
 
             if self.ui_state.should_quit {

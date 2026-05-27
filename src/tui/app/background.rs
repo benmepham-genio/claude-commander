@@ -9,6 +9,10 @@ use super::*;
 /// EMFILE under the macOS launchd 256-FD default.
 const PR_FANOUT_CONCURRENCY: usize = 8;
 
+/// Cap concurrent project-branch pulls so a user with many projects
+/// doesn't spawn one `git fetch` per project at the same instant.
+const PROJECT_PULL_FANOUT_CONCURRENCY: usize = 4;
+
 impl App {
     /// Spawn a background task to fetch preview/diff/shell data.
     ///
@@ -166,6 +170,86 @@ impl App {
                     .await;
             });
         }
+    }
+
+    /// Walk the project list, decide which projects are due for a pull
+    /// this tick (respecting the `project_pull_interval_secs` cadence,
+    /// a 5s startup grace, and the in-flight set), and dispatch them via
+    /// `spawn_project_pulls`.
+    pub(super) async fn maybe_spawn_project_pulls(&mut self) {
+        // Honour a small grace period after startup so the first tick after
+        // launch doesn't immediately hammer every project.
+        const STARTUP_GRACE: Duration = Duration::from_secs(5);
+        if self.ui_state.started_at.elapsed() < STARTUP_GRACE {
+            return;
+        }
+
+        let interval = Duration::from_secs(self.config.project_pull_interval_secs);
+
+        // Cheap global throttle: a project can become due at most once per
+        // `interval`, so sweeping the project list (state lock + clone) more
+        // often than that on every render tick is wasted work. The per-project
+        // `last_project_pull` cadence still governs which projects actually run.
+        if let Some(last) = self.ui_state.last_project_pull_sweep
+            && last.elapsed() < interval
+        {
+            return;
+        }
+        self.ui_state.last_project_pull_sweep = Some(Instant::now());
+
+        let projects: Vec<(ProjectId, std::path::PathBuf, String)> = {
+            let state = self.store.read().await;
+            state
+                .projects
+                .values()
+                .map(|p| (p.id, p.repo_path.clone(), p.main_branch.clone()))
+                .collect()
+        };
+
+        let mut due: Vec<(ProjectId, std::path::PathBuf, String)> = Vec::new();
+        for (id, path, main) in projects {
+            if self.ui_state.project_pull_in_flight.contains(&id) {
+                continue;
+            }
+            let is_due = match self.ui_state.last_project_pull.get(&id) {
+                Some(t) => t.elapsed() >= interval,
+                None => true,
+            };
+            if is_due {
+                self.ui_state.project_pull_in_flight.insert(id);
+                due.push((id, path, main));
+            }
+        }
+
+        self.spawn_project_pulls(due);
+    }
+
+    /// Spawn background fast-forward pulls for each project listed in
+    /// `due`. Sends one `ProjectPullFinished` event per project as work
+    /// completes. The caller is responsible for marking the projects as
+    /// in-flight in `UiState` so we don't double-spawn.
+    pub(super) fn spawn_project_pulls(&self, due: Vec<(ProjectId, std::path::PathBuf, String)>) {
+        if due.is_empty() {
+            return;
+        }
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            futures::stream::iter(due.into_iter().map(|(project_id, repo_path, main_branch)| {
+                let tx = tx.clone();
+                async move {
+                    let outcome = run_project_pull(&repo_path, &main_branch).await;
+                    let _ = tx
+                        .send(AppEvent::StateUpdate(StateUpdate::ProjectPullFinished {
+                            project_id,
+                            outcome,
+                        }))
+                        .await;
+                }
+            }))
+            .buffer_unordered(PROJECT_PULL_FANOUT_CONCURRENCY)
+            .for_each(|_| async {})
+            .await;
+        });
     }
 
     /// Spawn AI summary generation for the given session.

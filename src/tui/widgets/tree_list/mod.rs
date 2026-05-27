@@ -7,7 +7,9 @@ use ratatui::{
     widgets::{Block, ListItem},
 };
 
-use crate::session::{AgentState, SessionListItem, SessionStatus};
+use std::collections::HashMap;
+
+use crate::session::{AgentState, ProjectId, SessionListItem, SessionStatus};
 use crate::tui::theme::Theme;
 
 pub(crate) mod pr_colors;
@@ -50,6 +52,9 @@ pub struct TreeList<'a> {
     /// When true (default), show the running program as a `(program)`
     /// suffix on session rows when sessions use more than one program.
     show_session_program: bool,
+    /// Projects whose most recent auto-pull was held back, with a short
+    /// reason string. A small ⚠ badge is rendered on each blocked row.
+    pull_blocked_projects: HashMap<ProjectId, &'a str>,
 }
 
 impl<'a> TreeList<'a> {
@@ -64,7 +69,20 @@ impl<'a> TreeList<'a> {
             review_labels: &[],
             invert_pr_label_color: false,
             show_session_program: true,
+            pull_blocked_projects: HashMap::new(),
         }
+    }
+
+    /// Mark a set of projects as having a held-back background pull.
+    /// Renders a ⚠ badge on each matching project row.
+    pub fn pull_blocked_projects(mut self, blocked: HashMap<ProjectId, &'a str>) -> Self {
+        self.pull_blocked_projects = blocked;
+        self
+    }
+
+    /// Whether a project row should display the FF-blocked badge.
+    pub(crate) fn project_is_pull_blocked(&self, id: &ProjectId) -> bool {
+        self.pull_blocked_projects.contains_key(id)
     }
 
     /// When false, never show the `(program)` suffix. When true (default),

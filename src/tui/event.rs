@@ -127,6 +127,11 @@ pub enum StateUpdate {
     PushStackFinished {
         result: std::result::Result<crate::session::PushStackOutcome, String>,
     },
+    /// Background project-branch pull finished for one project.
+    ProjectPullFinished {
+        project_id: ProjectId,
+        outcome: crate::git::PullOutcome,
+    },
 }
 
 /// User commands triggered by input
