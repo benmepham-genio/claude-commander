@@ -172,12 +172,17 @@ impl<'a> TreeList<'a> {
         for item in self.items {
             if let SessionListItem::Worktree { program, .. } = item {
                 match first {
-                    None => first = Some(program.as_str()),
-                    Some(p) if p != program => return true,
+                    None => first = Some(program_name(program)),
+                    Some(p) if p != program_name(program) => return true,
                     _ => {}
                 }
             }
         }
         false
     }
+}
+
+/// The base program name, excluding any arguments (e.g. "claude --mode auto" -> "claude").
+pub(super) fn program_name(program: &str) -> &str {
+    program.split_whitespace().next().unwrap_or(program)
 }

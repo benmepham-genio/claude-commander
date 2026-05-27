@@ -817,6 +817,48 @@ fn test_program_suffix_hidden_when_programs_uniform() {
     );
 }
 
+#[test]
+fn test_program_suffix_hidden_when_only_args_differ() {
+    // Same base program with differing args is not "mixed": no suffix shown.
+    let items = vec![
+        make_project("proj", 2),
+        make_worktree_with_program("sess-a", "claude"),
+        make_worktree_with_program("sess-b", "claude --mode auto"),
+    ];
+    let lines = render_tree(&items, 60, 4);
+    assert!(
+        !lines[1].contains("(claude)"),
+        "args-only difference should not render suffix: {:?}",
+        lines[1]
+    );
+    assert!(
+        !lines[2].contains("(claude"),
+        "args-only difference should not render suffix: {:?}",
+        lines[2]
+    );
+}
+
+#[test]
+fn test_program_suffix_shows_base_name_only_when_mixed() {
+    // Different base programs trigger the suffix, but args are stripped from display.
+    let items = vec![
+        make_project("proj", 2),
+        make_worktree_with_program("sess-a", "codex"),
+        make_worktree_with_program("sess-b", "claude --mode auto"),
+    ];
+    let lines = render_tree(&items, 60, 4);
+    assert!(
+        lines[1].contains("(codex)"),
+        "expected base program suffix: {:?}",
+        lines[1]
+    );
+    assert!(
+        lines[2].contains("(claude)") && !lines[2].contains("--mode"),
+        "expected base name only, no args: {:?}",
+        lines[2]
+    );
+}
+
 // -- TreeListState boundary tests (cargo-mutants gap closure) --
 
 #[test]
