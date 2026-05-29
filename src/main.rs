@@ -96,6 +96,10 @@ enum Commands {
         /// Branch to fork from (default: origin/main)
         #[arg(short = 'b', long)]
         base_branch: Option<String>,
+
+        /// Place session in a specific section
+        #[arg(short = 's', long)]
+        section: Option<String>,
     },
 
     /// Attach to an existing session
@@ -452,6 +456,7 @@ async fn main() -> Result<()> {
             effort,
             mode,
             base_branch,
+            section,
         }) => {
             setup_logging(cli.debug, false)?;
 
@@ -529,6 +534,16 @@ async fn main() -> Result<()> {
             let session_id = manager
                 .prepare_session(&project_id, name, Some(program), None)
                 .await?;
+
+            if let Some(section) = section {
+                store
+                    .mutate(move |state| {
+                        if let Some(session) = state.sessions.get_mut(&session_id) {
+                            session.section_override = Some(section);
+                        }
+                    })
+                    .await?;
+            }
 
             let result = async {
                 manager
