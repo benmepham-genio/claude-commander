@@ -1010,7 +1010,10 @@ impl App {
                         // Restart the input reader after detach
                         info!("Returned from attach, restarting input reader");
                         self.event_loop.restart_input();
-                        // Loop continues, TUI resumes with state preserved
+                        // Discard cached agent states so queued AgentStatesUpdated
+                        // events from during attach can't trigger false
+                        // Working→Idle transitions that re-mark sessions unread.
+                        self.ui_state.agent_states.clear();
                     }
                     None => {
                         // Save selection before quitting

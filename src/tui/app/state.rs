@@ -179,15 +179,7 @@ impl App {
                 self.ui_state.modal = Modal::Error { message };
             }
             StateUpdate::AgentStatesUpdated { states } => {
-                // Detect Working → Idle transitions and mark sessions as unread
-                let mut unread_ids = Vec::new();
-                for (session_id, new_state) in &states {
-                    if *new_state == AgentState::Idle
-                        && self.ui_state.agent_states.get(session_id) == Some(&AgentState::Working)
-                    {
-                        unread_ids.push(*session_id);
-                    }
-                }
+                let unread_ids = detect_unread_transitions(&self.ui_state.agent_states, &states);
                 if !unread_ids.is_empty() {
                     let _ = self
                         .store
@@ -778,6 +770,61 @@ fn build_section_grouped_items(
         }
     }
     items
+}
+
+fn detect_unread_transitions(
+    prev: &HashMap<SessionId, AgentState>,
+    new: &HashMap<SessionId, AgentState>,
+) -> Vec<SessionId> {
+    let mut ids = Vec::new();
+    for (session_id, new_state) in new {
+        if *new_state == AgentState::Idle && prev.get(session_id) == Some(&AgentState::Working) {
+            ids.push(*session_id);
+        }
+    }
+    ids
+}
+
+#[cfg(test)]
+mod unread_transition_tests {
+    use super::*;
+    use crate::session::SessionId;
+    use std::collections::HashMap;
+
+    #[test]
+    fn working_to_idle_marks_unread() {
+        let sid = SessionId::new();
+        let prev = HashMap::from([(sid, AgentState::Working)]);
+        let new = HashMap::from([(sid, AgentState::Idle)]);
+        assert_eq!(detect_unread_transitions(&prev, &new), vec![sid]);
+    }
+
+    #[test]
+    fn idle_to_idle_no_transition() {
+        let sid = SessionId::new();
+        let prev = HashMap::from([(sid, AgentState::Idle)]);
+        let new = HashMap::from([(sid, AgentState::Idle)]);
+        assert!(detect_unread_transitions(&prev, &new).is_empty());
+    }
+
+    #[test]
+    fn empty_cache_no_transition() {
+        let sid = SessionId::new();
+        let prev = HashMap::new();
+        let new = HashMap::from([(sid, AgentState::Idle)]);
+        assert!(
+            detect_unread_transitions(&prev, &new).is_empty(),
+            "cleared cache after attach must not trigger false unread"
+        );
+    }
+
+    #[test]
+    fn empty_cache_working_no_transition() {
+        let sid = SessionId::new();
+        let prev = HashMap::new();
+        let new = HashMap::from([(sid, AgentState::Working)]);
+        assert!(detect_unread_transitions(&prev, &new).is_empty());
+    }
 }
 
 #[cfg(test)]
