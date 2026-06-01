@@ -516,6 +516,62 @@ fn test_info_view_renders_stack_chain() {
 }
 
 #[test]
+fn test_info_view_stack_section_renders_above_pr_section() {
+    // The stack tells the user where this session sits in the PR graph,
+    // which they typically scan before getting into PR-specific details
+    // (state, labels, CI, body). Order in the rendered lines should be
+    // Stack → PR, not the other way around.
+    use crate::tui::widgets::{InfoContent, InfoSessionData, InfoView};
+
+    let theme = crate::tui::theme::Theme::basic();
+    let diff = crate::git::DiffInfo::empty();
+    let chain = vec![
+        StackChainEntry {
+            title: "base".into(),
+            status: SessionStatus::Running,
+            is_current: false,
+        },
+        StackChainEntry {
+            title: "child".into(),
+            status: SessionStatus::Running,
+            is_current: true,
+        },
+    ];
+    let data = InfoSessionData {
+        title: "child".into(),
+        branch: "child-br".into(),
+        created_at: "now".into(),
+        status: SessionStatus::Running,
+        program: "claude".into(),
+        worktree_path: "/tmp".into(),
+        diff_info: &diff,
+        pr_number: Some(7),
+        pr_url: Some("https://example.com/pr/7".into()),
+        pr_merged: false,
+        enriched_pr: None,
+        ai_summary: None,
+        summary_key_hint: None,
+        stack_chain: &chain,
+    };
+    let view = InfoView::new(InfoContent::Session(data), &theme);
+    let lines = view.build_lines();
+    let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+
+    let stack_idx = text
+        .iter()
+        .position(|l| l.contains("Stack (2 sessions)"))
+        .expect("stack header should be present");
+    let pr_idx = text
+        .iter()
+        .position(|l| l.contains("PR #7"))
+        .expect("PR header should be present");
+    assert!(
+        stack_idx < pr_idx,
+        "stack section (line {stack_idx}) should appear before PR section (line {pr_idx})"
+    );
+}
+
+#[test]
 fn test_info_view_no_stack_section_for_unstacked() {
     use crate::tui::widgets::{InfoContent, InfoSessionData, InfoView};
 
