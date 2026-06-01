@@ -22,6 +22,12 @@ pub enum ViewMode {
     #[default]
     ProjectGrouped,
     SectionGrouped,
+    // Accept the pre-rename variant name so state.json files written by
+    // an earlier build of this branch (when the variant was called
+    // `SectionGroupedWithStacks`) still parse. Without this alias,
+    // deserialization fails and `main.rs` falls back to a fresh empty
+    // AppState — making it look like every project has been wiped.
+    #[serde(alias = "SectionGroupedWithStacks")]
     SectionStacks,
 }
 

@@ -78,6 +78,41 @@ impl AppState {
         Self::load_from(&path)
     }
 
+    /// Load state, or print a clear refusal to stderr and exit non-zero
+    /// when the state file exists but cannot be parsed. Use this from CLI
+    /// entry points instead of `.unwrap_or_else(|_| AppState::new())`,
+    /// which silently drops the user's projects into a fresh empty state
+    /// and then risks overwriting the real file on the next save.
+    ///
+    /// "File doesn't exist" is not an error — `load_from` already returns
+    /// a fresh `AppState` in that case.
+    pub fn load_or_exit() -> Self {
+        let path = match Config::state_file_path() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Failed to determine state file path: {}", e);
+                std::process::exit(2);
+            }
+        };
+        match Self::load_from(&path) {
+            Ok(state) => state,
+            Err(e) => {
+                eprintln!(
+                    "Refusing to start: state file exists but failed to load.\n\
+                     Path: {}\n\
+                     Error: {}\n\
+                     \n\
+                     Your data is still on disk. To investigate, open the file\n\
+                     above; to start fresh, move it aside (e.g. `mv … ….bak`)\n\
+                     and relaunch.",
+                    path.display(),
+                    e,
+                );
+                std::process::exit(2);
+            }
+        }
+    }
+
     /// Load state from a specific path
     pub fn load_from(path: &PathBuf) -> Result<Self> {
         if !path.exists() {
@@ -336,6 +371,21 @@ mod tests {
         state.view_mode = Some(ViewMode::SectionStacks);
         state.save_to(&state_path).unwrap();
 
+        let loaded = AppState::load_from(&state_path).unwrap();
+        assert_eq!(loaded.view_mode, Some(ViewMode::SectionStacks));
+    }
+
+    #[test]
+    fn test_view_mode_legacy_section_grouped_with_stacks_alias_loads_as_section_stacks() {
+        // Earlier on this branch the variant was called
+        // `SectionGroupedWithStacks`. Any state.json written by that build
+        // must still parse — otherwise main.rs's `load().unwrap_or_else(|_|
+        // AppState::new())` drops the user's whole project list. Keep this
+        // alias as long as those files might exist in the wild.
+        use super::super::ViewMode;
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+        std::fs::write(&state_path, r#"{"view_mode": "SectionGroupedWithStacks"}"#).unwrap();
         let loaded = AppState::load_from(&state_path).unwrap();
         assert_eq!(loaded.view_mode, Some(ViewMode::SectionStacks));
     }
