@@ -40,6 +40,7 @@ use super::widgets::{
     InfoContent, InfoProjectData, InfoSessionData, InfoView, InfoViewState, Preview, PreviewState,
     TreeList, TreeListState,
 };
+use crate::api::CommanderService;
 use crate::config::{BindableAction, Config, ConfigStore, StateStore};
 use crate::error::{Result, TuiError};
 use crate::git::{
@@ -644,12 +645,8 @@ impl AppUiState {
 pub struct App {
     /// Local config cache — refreshed from config_store on tick when file changes
     config: Config,
-    /// Shared config store (hot-reloaded from disk)
-    config_store: Arc<ConfigStore>,
-    /// Concurrent-safe persistent state store
-    store: Arc<StateStore>,
-    /// Session manager
-    session_manager: SessionManager,
+    /// Unified service layer — owns SessionManager, StateStore, and ConfigStore
+    service: CommanderService,
     /// UI state
     ui_state: AppUiState,
     /// Event loop
@@ -667,12 +664,7 @@ impl App {
     /// Create a new application
     pub fn new(config_store: Arc<ConfigStore>, store: Arc<StateStore>) -> Self {
         let config = config_store.read().clone();
-        let theme = Theme::default();
-        let session_manager = SessionManager::new(
-            config_store.clone(),
-            store.clone(),
-            theme.tmux_status_style(),
-        );
+        let service = CommanderService::new(config_store, store);
 
         let base = config
             .theme
@@ -685,9 +677,7 @@ impl App {
 
         Self {
             config,
-            config_store,
-            store,
-            session_manager,
+            service,
             ui_state: AppUiState::default(),
             event_loop: EventLoop::new(),
             theme,
@@ -699,7 +689,7 @@ impl App {
     /// Run the application
     pub async fn run(&mut self) -> Result<()> {
         // Check tmux is available
-        self.session_manager.check_tmux().await?;
+        self.service.check_tmux().await?;
 
         // One-time setup
         self.cleanup_stale_creating_sessions().await;
@@ -720,7 +710,7 @@ impl App {
 
         // Start background state sync for cross-instance changes
         if self.config.state_sync_interval_ms > 0 {
-            let store = self.store.clone();
+            let store = self.service.store().clone();
             let tx = self.event_loop.sender();
             let interval_ms = self.config.state_sync_interval_ms;
             tokio::spawn(async move {
@@ -744,10 +734,10 @@ impl App {
 
         // Start background agent state polling
         if self.config.agent_state_poll_interval_ms > 0 {
-            let store = self.store.clone();
+            let store = self.service.store().clone();
             let tx = self.event_loop.sender();
             let interval_ms = self.config.agent_state_poll_interval_ms;
-            let tmux = self.session_manager.tmux.clone();
+            let tmux = self.service.session_manager().tmux.clone();
             tokio::spawn(async move {
                 let cache_ttl = Duration::from_millis(interval_ms.saturating_sub(500).max(500));
                 let mut detector = AgentStateDetector::new(tmux, cache_ttl);
@@ -855,7 +845,8 @@ impl App {
                                 // switcher can sort Alt+Tab-style by MRU.
                                 let to_stamp = current_session.clone();
                                 if let Err(e) = self
-                                    .store
+                                    .service
+                                    .store()
                                     .mutate(move |state| {
                                         if let Some(session) = state
                                             .sessions
@@ -963,7 +954,8 @@ impl App {
                                         if is_claude_session && consecutive_ends < 3 {
                                             consecutive_ends += 1;
                                             match self
-                                                .session_manager
+                                                .service
+                                                .session_manager()
                                                 .restart_session_fresh_by_tmux_name(
                                                     &current_session,
                                                 )

@@ -30,7 +30,7 @@ impl App {
 
         let session_id = self.ui_state.selected_session_id;
         let project_id = self.ui_state.selected_project_id;
-        let mgr = self.session_manager.clone();
+        let mgr = self.service.session_manager().clone();
         let tx = self.event_loop.sender();
 
         self.ui_state.preview_update_spawned_at = Some(Instant::now());
@@ -66,7 +66,7 @@ impl App {
     pub(super) fn spawn_pr_status_check(&mut self) {
         self.ui_state.last_pr_check = Some(Instant::now());
 
-        let store = self.store.clone();
+        let store = self.service.store().clone();
         let tx = self.event_loop.sender();
 
         tokio::spawn(async move {
@@ -142,7 +142,7 @@ impl App {
             .is_some_and(|(sid, _)| *sid == session_id);
 
         if needs_enriched && self.ui_state.gh_available {
-            let store = self.store.clone();
+            let store = self.service.store().clone();
             let tx = self.event_loop.sender();
 
             tokio::spawn(async move {
@@ -198,7 +198,7 @@ impl App {
         self.ui_state.last_project_pull_sweep = Some(Instant::now());
 
         let projects: Vec<(ProjectId, std::path::PathBuf, String)> = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             state
                 .projects
                 .values()
@@ -274,7 +274,7 @@ impl App {
             .ai_summaries
             .insert(session_id, AiSummary::Loading);
 
-        let store = self.store.clone();
+        let store = self.service.store().clone();
         let model = self.config.ai_summary_model.clone();
         let tx = self.event_loop.sender();
 

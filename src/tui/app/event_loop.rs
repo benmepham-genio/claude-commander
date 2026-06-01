@@ -125,10 +125,10 @@ impl App {
 
     /// Check if `config.toml` has been modified externally and refresh the local cache.
     pub(super) fn check_config_reload(&mut self) {
-        match self.config_store.reload_if_changed() {
+        match self.service.config_store().reload_if_changed() {
             Ok(true) => {
                 debug!("Config hot-reloaded from disk");
-                self.config = self.config_store.read().clone();
+                self.config = self.service.config_store().read().clone();
                 let base = self
                     .config
                     .theme

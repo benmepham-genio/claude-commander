@@ -977,7 +977,7 @@ impl App {
 
         // Persist config via the store (updates mtime so hot-reload won't re-read our own write)
         let updated = self.config.clone();
-        if let Err(e) = self.config_store.mutate(|c| *c = updated) {
+        if let Err(e) = self.service.config_store().mutate(|c| *c = updated) {
             warn!("Failed to save config: {}", e);
         }
     }
@@ -1443,7 +1443,7 @@ impl App {
     /// Persist the current sections config to disk and reconcile session assignments.
     async fn save_sections_config(&mut self) {
         let updated = self.config.clone();
-        if let Err(e) = self.config_store.mutate(|c| *c = updated) {
+        if let Err(e) = self.service.config_store().mutate(|c| *c = updated) {
             warn!("Failed to save sections config: {}", e);
         }
         self.reconcile_section_assignments().await;

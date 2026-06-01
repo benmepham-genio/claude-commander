@@ -386,7 +386,7 @@ impl App {
             None
         };
 
-        let restart_needed = self.config_store.restart_required();
+        let restart_needed = self.service.config_store().restart_required();
 
         let session_count = self
             .ui_state
