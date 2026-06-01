@@ -594,6 +594,29 @@ fn test_apply_worktrees_dir_default_sentinel_clears_to_none() {
     assert_eq!(app.config.worktrees_dir, None);
 }
 
+#[tokio::test]
+async fn ctrl_space_opens_quick_switch_in_tree() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = make_test_app();
+    assert!(matches!(app.ui_state.modal, Modal::None));
+
+    let key = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
+    app.handle_input(InputEvent::Key(key)).await;
+
+    assert!(
+        matches!(
+            app.ui_state.modal,
+            Modal::QuickSwitch {
+                mode: PaletteMode::Unified,
+                ..
+            }
+        ),
+        "Ctrl+Space should open the unified quick-switch palette, got {:?}",
+        app.ui_state.modal
+    );
+}
+
 #[test]
 fn test_project_pull_rows_present_in_general_tab() {
     let app = make_test_app();

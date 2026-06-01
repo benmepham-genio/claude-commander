@@ -150,6 +150,16 @@ impl App {
                     return;
                 }
 
+                // Ctrl+Space always opens the quick-switch palette, mirroring
+                // the in-session switcher (see `tmux/attach.rs`) so the same
+                // physical shortcut works whether attached or in the tree.
+                if key.code == crossterm::event::KeyCode::Char(' ')
+                    && key.modifiers == crossterm::event::KeyModifiers::CONTROL
+                {
+                    self.open_quick_switch_with_mode(PaletteMode::Unified).await;
+                    return;
+                }
+
                 // Number-jump: intercept digit keys to select by session number.
                 if let crossterm::event::KeyCode::Char(c @ '0'..='9') = key.code
                     && key.modifiers.is_empty()

@@ -197,6 +197,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 |-----|--------|
 | `j/k` or `↑/↓` or `Ctrl-n/p` | Navigate session list |
 | `Space` | Quick-switch palette (sessions and commands) |
+| `Ctrl-Space` | Quick-switch palette (same shortcut as the in-session switcher) |
 | `Shift+Space` | Command palette (commands only) |
 | `>` (as first char in palette) | Filter palette to commands only |
 | `Enter` | Attach to selected session |

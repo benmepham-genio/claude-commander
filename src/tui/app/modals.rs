@@ -557,6 +557,11 @@ impl App {
             width = key_col_width,
         )));
         lines.push(Line::from(format!(
+            "  {:<width$}Quick switch (same as in-session switcher)",
+            "Ctrl+Space",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
             "  {:<width$}Command palette (commands only)",
             format!("Shift+{leader_display}"),
             width = key_col_width,
