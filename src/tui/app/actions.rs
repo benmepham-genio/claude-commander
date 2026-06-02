@@ -1311,7 +1311,10 @@ impl App {
     }
 
     /// Apply a manual section move chosen in the picker palette.
-    /// `target = Some(name)` sets the override; `target = None` clears it.
+    /// `target = Some(name)` sets the override; `target = None` is the
+    /// "Auto" entry, which must fully re-evaluate from the predicates
+    /// rather than honour the forward-only rule that `apply_assignment`
+    /// uses for the background poller.
     pub(super) async fn apply_section_move(
         &mut self,
         session_id: SessionId,
@@ -1324,8 +1327,15 @@ impl App {
             .store()
             .mutate(move |state| {
                 if let Some(session) = state.get_session_mut(&session_id) {
-                    session.section_override = target;
-                    crate::session::apply_assignment(session, &sections, now);
+                    match target {
+                        Some(name) => {
+                            session.section_override = Some(name);
+                            crate::session::apply_assignment(session, &sections, now);
+                        }
+                        None => {
+                            crate::session::clear_override_and_reassign(session, &sections, now);
+                        }
+                    }
                 }
             })
             .await;

@@ -12,6 +12,6 @@ mod types;
 pub use manager::*;
 pub use section::{
     IN_PROGRESS, RenderedSection, SectionAssignment, SectionConfig, apply_assignment,
-    assign_section, build_sections,
+    assign_section, build_sections, clear_override_and_reassign,
 };
 pub use types::*;
