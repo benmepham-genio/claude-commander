@@ -347,6 +347,9 @@ pub struct WorktreeSession {
     /// `None` for sessions never attached since adopting the field.
     #[serde(default)]
     pub last_attached_at: Option<DateTime<Utc>>,
+    /// Free-form user notes for this session. Edited inline in the Notes tab.
+    #[serde(default)]
+    pub notes: String,
 }
 
 impl WorktreeSession {
@@ -393,6 +396,7 @@ impl WorktreeSession {
             current_section: None,
             entered_section_at: now,
             last_attached_at: None,
+            notes: String::new(),
         }
     }
 
@@ -439,6 +443,7 @@ impl WorktreeSession {
             current_section: None,
             entered_section_at: now,
             last_attached_at: None,
+            notes: String::new(),
         }
     }
 

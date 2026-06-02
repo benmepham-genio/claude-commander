@@ -39,6 +39,16 @@ impl App {
             }
         }
 
+        // If we were editing notes and the selection has moved, persist the
+        // draft to the *previous* session before the new render reads the new
+        // session's notes.
+        if self.ui_state.notes_editing
+            && let Some(prev) = old_session
+            && self.ui_state.selected_session_id != Some(prev)
+        {
+            self.spawn_commit_notes_if_active(prev);
+        }
+
         let now_on_project = self.ui_state.selected_session_id.is_none()
             && self.ui_state.selected_project_id.is_some();
 
@@ -67,6 +77,7 @@ impl App {
             RightPaneView::Preview => &mut self.ui_state.preview_state,
             RightPaneView::Info => &mut self.ui_state.info_state,
             RightPaneView::Shell => &mut self.ui_state.shell_state,
+            RightPaneView::Notes => &mut self.ui_state.notes_state,
         }
     }
 

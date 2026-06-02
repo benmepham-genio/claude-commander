@@ -460,3 +460,121 @@ fn test_adjust_list_scroll_short_list_stays_at_top() {
     assert_eq!(adjust_list_scroll(2, 0, 10), 0);
     assert_eq!(adjust_list_scroll(0, 0, 10), 0);
 }
+
+// ---------------------------------------------------------------------------
+// Notes tab: pane cycling and active-pane scroll dispatch
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_next_pane_session_cycle_includes_notes() {
+    use super::notes::next_pane;
+    // Session cycle: Preview → Info → Shell → Notes → Preview
+    assert_eq!(
+        next_pane(RightPaneView::Preview, false),
+        RightPaneView::Info
+    );
+    assert_eq!(next_pane(RightPaneView::Info, false), RightPaneView::Shell);
+    assert_eq!(next_pane(RightPaneView::Shell, false), RightPaneView::Notes);
+    assert_eq!(
+        next_pane(RightPaneView::Notes, false),
+        RightPaneView::Preview
+    );
+}
+
+#[test]
+fn test_prev_pane_session_cycle_includes_notes() {
+    use super::notes::prev_pane;
+    // Reverse cycle: Preview → Notes → Shell → Info → Preview
+    assert_eq!(
+        prev_pane(RightPaneView::Preview, false),
+        RightPaneView::Notes
+    );
+    assert_eq!(prev_pane(RightPaneView::Notes, false), RightPaneView::Shell);
+    assert_eq!(prev_pane(RightPaneView::Shell, false), RightPaneView::Info);
+    assert_eq!(
+        prev_pane(RightPaneView::Info, false),
+        RightPaneView::Preview
+    );
+}
+
+#[test]
+fn test_pane_cycle_on_project_skips_preview_and_notes() {
+    use super::notes::{next_pane, prev_pane};
+    // Project cycle is just Shell ↔ Info — Preview and Notes don't apply
+    // (they get mapped to Shell as a fallback).
+    assert_eq!(next_pane(RightPaneView::Shell, true), RightPaneView::Info);
+    assert_eq!(next_pane(RightPaneView::Info, true), RightPaneView::Shell);
+    assert_eq!(
+        next_pane(RightPaneView::Preview, true),
+        RightPaneView::Shell
+    );
+    assert_eq!(next_pane(RightPaneView::Notes, true), RightPaneView::Shell);
+    assert_eq!(prev_pane(RightPaneView::Shell, true), RightPaneView::Info);
+    assert_eq!(prev_pane(RightPaneView::Info, true), RightPaneView::Shell);
+}
+
+#[test]
+fn test_pane_cycle_forward_then_reverse_is_identity_on_session() {
+    use super::notes::{next_pane, prev_pane};
+    for v in [
+        RightPaneView::Preview,
+        RightPaneView::Info,
+        RightPaneView::Shell,
+        RightPaneView::Notes,
+    ] {
+        assert_eq!(
+            prev_pane(next_pane(v, false), false),
+            v,
+            "reverse should undo forward for {v:?}"
+        );
+    }
+}
+
+#[test]
+fn test_worktree_session_has_empty_notes_by_default() {
+    use crate::session::WorktreeSession;
+    let session = WorktreeSession::new(
+        ProjectId::new(),
+        "title",
+        "branch",
+        std::path::PathBuf::from("/tmp/test"),
+        "claude",
+    );
+    assert_eq!(session.notes, "");
+}
+
+#[test]
+fn test_worktree_session_notes_serde_roundtrip() {
+    use crate::session::WorktreeSession;
+    let mut session = WorktreeSession::new(
+        ProjectId::new(),
+        "title",
+        "branch",
+        std::path::PathBuf::from("/tmp/test"),
+        "claude",
+    );
+    session.notes = "line one\nline two".to_string();
+    let json = serde_json::to_string(&session).expect("serialize");
+    let parsed: WorktreeSession = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(parsed.notes, "line one\nline two");
+}
+
+#[test]
+fn test_worktree_session_notes_deserializes_when_absent() {
+    // Legacy state.json blobs won't have a `notes` field — must default to "".
+    let json = r#"{
+        "id": "00000000-0000-0000-0000-000000000001",
+        "project_id": "00000000-0000-0000-0000-000000000002",
+        "title": "old",
+        "branch": "main",
+        "worktree_path": "/tmp/old",
+        "status": "running",
+        "program": "claude",
+        "created_at": "2024-01-01T00:00:00Z",
+        "last_active_at": "2024-01-01T00:00:00Z",
+        "tmux_session_name": "cc-old"
+    }"#;
+    let parsed: crate::session::WorktreeSession =
+        serde_json::from_str(json).expect("legacy deserialize");
+    assert_eq!(parsed.notes, "");
+}

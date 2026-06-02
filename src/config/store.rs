@@ -79,6 +79,15 @@ impl StateStore {
         self.state.read().await
     }
 
+    /// Non-blocking read of the in-memory state.
+    ///
+    /// Returns `None` if a writer currently holds the lock. Use from
+    /// synchronous render paths where awaiting isn't possible — callers
+    /// must tolerate a missed frame on contention.
+    pub fn try_read(&self) -> Option<tokio::sync::RwLockReadGuard<'_, AppState>> {
+        self.state.try_read().ok()
+    }
+
     /// Apply a mutation to the persisted state.
     ///
     /// Acquires an exclusive file lock, re-reads the current state from disk
