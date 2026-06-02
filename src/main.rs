@@ -266,7 +266,7 @@ async fn main() -> Result<()> {
             info!("Starting Claude Commander TUI v{}", VERSION);
 
             let config_store = std::sync::Arc::new(ConfigStore::new(config.clone())?);
-            let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
+            let app_state = AppState::load_or_exit();
             let store = std::sync::Arc::new(StateStore::new(app_state)?);
             let mut app = App::new(config_store, store);
             app.run().await?;
@@ -284,7 +284,7 @@ async fn main() -> Result<()> {
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&entries)?);
             } else {
-                let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
+                let app_state = AppState::load_or_exit();
 
                 println!("Sessions:");
                 println!();
@@ -425,7 +425,7 @@ async fn main() -> Result<()> {
         Some(Commands::Attach { session }) => {
             setup_logging(cli.debug, false)?;
 
-            let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
+            let app_state = AppState::load_or_exit();
 
             match claude_commander::cli::find_session(&app_state, &session) {
                 Some(s) => {

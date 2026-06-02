@@ -213,7 +213,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `o` | Open PR in browser (when the session has a PR) |
 | `S` | Scan directory for git repos and add them as projects |
 | `s` | Open shell in worktree |
-| `v` | Toggle project/section view (requires `[[sections]]` config) |
+| `v` | Cycle session list view: Project → Sections → Section Stacks (requires `[[sections]]` config) |
 | palette only | Collapse/expand section (press on any item in the section, or `Enter` on the section header) |
 | palette only | Move session to section (manual override; see [Session List Sections](#session-list-sections)) |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |

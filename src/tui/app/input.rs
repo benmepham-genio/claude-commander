@@ -775,10 +775,22 @@ impl App {
                 if self.config.sections.is_empty() {
                     return;
                 }
-                self.ui_state.view_mode = match self.ui_state.view_mode {
-                    ViewMode::ProjectGrouped => ViewMode::SectionGrouped,
-                    ViewMode::SectionGrouped => ViewMode::ProjectGrouped,
-                };
+                let new_view = self.ui_state.view_mode.next();
+                self.ui_state.view_mode = new_view;
+                // Persist the chosen view so it survives restarts. We don't
+                // care if this fails (disk full, locked file) — the runtime
+                // behaviour is correct either way and the user will just see
+                // the default view on the next launch.
+                if let Err(err) = self
+                    .service
+                    .store()
+                    .mutate(move |state| {
+                        state.view_mode = Some(new_view);
+                    })
+                    .await
+                {
+                    warn!("Failed to persist view_mode: {}", err);
+                }
                 let selected_session = self.ui_state.selected_session_id;
                 let selected_project = self.ui_state.selected_project_id;
                 self.refresh_list_items().await;

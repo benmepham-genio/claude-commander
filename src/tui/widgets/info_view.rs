@@ -164,51 +164,26 @@ impl<'a> InfoView<'a> {
             ]));
         }
 
-        // Separator
+        // Stack first — where this session sits in the PR graph is the
+        // higher-level orientation; PR specifics come after.
+        let separator = || {
+            Line::from(Span::styled(
+                " ─────────────────────────────────",
+                self.secondary_style(),
+            ))
+        };
+
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            " ─────────────────────────────────",
-            self.secondary_style(),
-        )));
+        lines.push(separator());
+
+        if !data.stack_chain.is_empty() {
+            self.build_stack_chain_lines(data, &mut lines);
+            lines.push(Line::from(""));
+            lines.push(separator());
+        }
 
         // PR section
         self.build_pr_lines(data, &mut lines);
-
-        // Stack chain section
-        if !data.stack_chain.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                " ─────────────────────────────────",
-                self.secondary_style(),
-            )));
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                format!(" Stack ({} sessions)", data.stack_chain.len()),
-                label,
-            )));
-            for entry in data.stack_chain {
-                let (icon, color) = match entry.status {
-                    SessionStatus::Running => ("●", self.theme.status_running),
-                    SessionStatus::Stopped => ("○", self.theme.status_stopped),
-                    SessionStatus::Creating => ("…", self.theme.status_creating),
-                    SessionStatus::Merging => ("⟳", self.theme.status_creating),
-                    SessionStatus::CascadePaused => ("⏸", self.theme.agent_waiting),
-                    SessionStatus::Pushing => ("↑", self.theme.status_creating),
-                };
-                let mut spans = vec![
-                    Span::styled("   ", value),
-                    Span::styled(icon, Style::default().fg(color)),
-                    Span::styled(format!(" {}", entry.title), value),
-                ];
-                if entry.is_current {
-                    spans.push(Span::styled(
-                        "  ← current",
-                        Style::default().fg(self.theme.text_accent),
-                    ));
-                }
-                lines.push(Line::from(spans));
-            }
-        }
 
         // AI summary section (only when AI is enabled, i.e. key hint is present)
         if let Some(ref key_hint) = data.summary_key_hint {
@@ -233,6 +208,38 @@ impl<'a> InfoView<'a> {
         }
 
         lines
+    }
+
+    fn build_stack_chain_lines(&self, data: &InfoSessionData<'_>, lines: &mut Vec<Line<'static>>) {
+        let label = self.label_style();
+        let value = self.value_style();
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(" Stack ({} sessions)", data.stack_chain.len()),
+            label,
+        )));
+        for entry in data.stack_chain {
+            let (icon, color) = match entry.status {
+                SessionStatus::Running => ("●", self.theme.status_running),
+                SessionStatus::Stopped => ("○", self.theme.status_stopped),
+                SessionStatus::Creating => ("…", self.theme.status_creating),
+                SessionStatus::Merging => ("⟳", self.theme.status_creating),
+                SessionStatus::CascadePaused => ("⏸", self.theme.agent_waiting),
+                SessionStatus::Pushing => ("↑", self.theme.status_creating),
+            };
+            let mut spans = vec![
+                Span::styled("   ", value),
+                Span::styled(icon, Style::default().fg(color)),
+                Span::styled(format!(" {}", entry.title), value),
+            ];
+            if entry.is_current {
+                spans.push(Span::styled(
+                    "  ← current",
+                    Style::default().fg(self.theme.text_accent),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
     }
 
     fn build_pr_lines(&self, data: &InfoSessionData<'_>, lines: &mut Vec<Line<'static>>) {

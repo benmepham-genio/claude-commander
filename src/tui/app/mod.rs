@@ -97,13 +97,10 @@ pub enum RightPaneView {
     Shell,
 }
 
-/// Which list view mode is active
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ViewMode {
-    #[default]
-    ProjectGrouped,
-    SectionGrouped,
-}
+// `ViewMode` lives in `crate::config` so that `AppState` can persist it.
+// Re-exported here so existing call sites in this module's submodules
+// (which all do `use super::*;`) keep compiling unchanged.
+pub use crate::config::ViewMode;
 
 /// A single entry in the pre-computed stack chain for the Info pane.
 #[derive(Debug, Clone)]
@@ -769,10 +766,17 @@ impl App {
             });
         }
 
-        // Set initial view mode based on whether sections are configured
-        if !self.config.sections.is_empty() {
-            self.ui_state.view_mode = ViewMode::SectionGrouped;
-        }
+        // Restore the last-selected view if the user has previously chosen
+        // one. If they haven't, fall back to the section-aware default:
+        // SectionGrouped when sections are configured, else ProjectGrouped.
+        // Any section view falls back to ProjectGrouped at refresh time if
+        // sections have since been removed from config.
+        let persisted_view = self.service.store().read().await.view_mode;
+        self.ui_state.view_mode = match persisted_view {
+            Some(view) => view,
+            None if !self.config.sections.is_empty() => ViewMode::SectionGrouped,
+            None => ViewMode::ProjectGrouped,
+        };
 
         // Restore last selection from persisted state
         self.refresh_list_items().await;

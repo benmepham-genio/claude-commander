@@ -247,6 +247,36 @@ fn test_next_wraps_to_first() {
 }
 
 #[test]
+fn test_set_item_count_clears_stale_selectable_mask() {
+    // Regression: cycling view modes used to leave the previous view's
+    // per-index selectable mask in place. When the next view called
+    // `set_item_count` (i.e. "no mask, just count — treat all rows as
+    // selectable"), the stale mask still drove `is_selectable`, so some
+    // Worktree rows in the project-grouped view became unreachable with
+    // up/down navigation.
+    let mut state = TreeListState::new();
+    state.set_selectable(vec![true, false, true, false, true]);
+    // Move to a row the mask still allows.
+    state.select(Some(0));
+
+    // Switching to "no mask" mode (what ProjectGrouped does).
+    state.set_item_count(5);
+
+    // Every index in [0, 5) should now be selectable, so `next()` from
+    // 0 must land on 1, not skip to 2.
+    state.next();
+    assert_eq!(
+        state.selected(),
+        Some(1),
+        "set_item_count should clear the prior set_selectable mask"
+    );
+    state.next();
+    assert_eq!(state.selected(), Some(2));
+    state.next();
+    assert_eq!(state.selected(), Some(3));
+}
+
+#[test]
 fn test_set_item_count_clamps_selection() {
     let mut state = TreeListState::new();
     state.set_item_count(10);

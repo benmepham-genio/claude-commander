@@ -262,6 +262,40 @@ pub fn apply_assignment(
     true
 }
 
+/// User-initiated "Auto" / clear-override action from the section picker.
+///
+/// Unlike [`apply_assignment`] — which is forward-only because the background
+/// PR-status poller calls it on every refresh and must not bounce sessions
+/// between sections — this explicitly resets `current_section` to `None`
+/// before re-running the predicate scan. Without the reset, scanning starts
+/// at the old section's config index, so a session pinned to a *later*
+/// section (e.g. "Drafts" at the end of the list) whose predicates no longer
+/// match would just stay there forever after Auto cleared the override.
+///
+/// Returns `true` if anything visible to the user changed — either an
+/// override was cleared, or `current_section` moved.
+pub fn clear_override_and_reassign(
+    session: &mut WorktreeSession,
+    sections: &[SectionConfig],
+    now: DateTime<Utc>,
+) -> bool {
+    let had_override = session.section_override.is_some();
+    let prior_section = session.current_section.clone();
+    session.section_override = None;
+    session.current_section = None;
+    apply_assignment(session, sections, now);
+    let changed = had_override || session.current_section != prior_section;
+    if changed {
+        // `apply_assignment` only stamps on section-name change. When the
+        // re-evaluation lands in the InProgress catch-all (current_section
+        // = None both before and after), the stamp wouldn't update, but
+        // from the user's perspective the session was just re-placed and
+        // should sort as freshly arrived in its new bucket.
+        session.entered_section_at = now;
+    }
+    changed
+}
+
 fn section_matches(session: &WorktreeSession, section: &SectionConfig) -> bool {
     if let Some(state_pred) = &section.pr_state
         && !state_pred.matches(session.pr_state)
@@ -890,6 +924,86 @@ mod tests {
             assign_section(&session, &sections),
             SectionAssignment::Matched("Open".into())
         );
+    }
+
+    #[test]
+    fn clear_override_and_reassign_moves_session_out_of_stale_section() {
+        // Real-world scenario: a session was manually pinned to the last
+        // configured section ("Drafts") back when it actually was a draft.
+        // Time passed, the PR is no longer a draft, and the user picks
+        // "Auto (clear override)". Forward-only `apply_assignment` alone
+        // would keep `current_section = Drafts` because the scan starts
+        // at Drafts' index and finds nothing past it. The Auto path must
+        // reset `current_section` so the rescan starts at index 0.
+        let sections = vec![
+            SectionConfig {
+                name: "Needs Review".into(),
+                has_label: Some(LabelPredicate::One("dev-review-required".into())),
+                ..Default::default()
+            },
+            SectionConfig {
+                name: "In Review".into(),
+                pr_state: Some(StatePredicate::One(PrState::Open)),
+                has_reviewer: Some(ReviewerPredicate::Bool(true)),
+                ..Default::default()
+            },
+            SectionConfig {
+                name: "Drafts".into(),
+                is_draft: Some(true),
+                ..Default::default()
+            },
+        ];
+
+        let mut session = make_session();
+        session.pr_state = Some(PrState::Open);
+        session.pr_draft = false; // no longer a draft
+        session.section_override = Some("Drafts".into());
+        session.current_section = Some("Drafts".into());
+        let original_stamp = session.entered_section_at;
+        let now = original_stamp + Duration::minutes(1);
+
+        let changed = clear_override_and_reassign(&mut session, &sections, now);
+
+        assert!(changed, "session should leave Drafts after Auto");
+        assert!(
+            session.section_override.is_none(),
+            "override should be cleared"
+        );
+        assert_eq!(
+            session.current_section, None,
+            "no predicate matches → InProgress catch-all (None)"
+        );
+        assert_eq!(session.entered_section_at, now);
+    }
+
+    #[test]
+    fn clear_override_and_reassign_relands_in_matching_predicate_section() {
+        // Same Auto path, but this time another section's predicate does
+        // match, so the session lands there rather than InProgress.
+        let sections = vec![
+            SectionConfig {
+                name: "Open".into(),
+                pr_state: Some(StatePredicate::One(PrState::Open)),
+                ..Default::default()
+            },
+            SectionConfig {
+                name: "Drafts".into(),
+                is_draft: Some(true),
+                ..Default::default()
+            },
+        ];
+        let mut session = make_session();
+        session.pr_state = Some(PrState::Open);
+        session.pr_draft = false;
+        session.section_override = Some("Drafts".into());
+        session.current_section = Some("Drafts".into());
+        let now = session.entered_section_at + Duration::minutes(1);
+
+        let changed = clear_override_and_reassign(&mut session, &sections, now);
+
+        assert!(changed);
+        assert_eq!(session.section_override, None);
+        assert_eq!(session.current_section.as_deref(), Some("Open"));
     }
 
     #[test]

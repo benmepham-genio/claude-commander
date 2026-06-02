@@ -135,11 +135,11 @@ impl App {
         };
 
         // Spawn enriched PR fetch if not already cached for this session
-        let needs_enriched = !self
+        let needs_enriched = self
             .ui_state
             .enriched_pr
             .as_ref()
-            .is_some_and(|(sid, _)| *sid == session_id);
+            .is_none_or(|(sid, _)| *sid != session_id);
 
         if needs_enriched && self.ui_state.gh_available {
             let store = self.service.store().clone();

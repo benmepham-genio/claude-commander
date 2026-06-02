@@ -178,7 +178,7 @@ impl BindableAction {
             Self::ScanDirectory => "Scan directory for repos",
             Self::MoveToSection => "Move session to section…",
             Self::ToggleSection => "Collapse/expand section",
-            Self::ToggleViewMode => "Toggle project/section view",
+            Self::ToggleViewMode => "Cycle project / sections / section stacks view",
         }
     }
 

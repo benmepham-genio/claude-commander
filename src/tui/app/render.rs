@@ -67,10 +67,14 @@ impl App {
             .constraints([Constraint::Length(1), Constraint::Min(0)])
             .split(area);
 
-        // Full-width heading bar with dark grey background
+        // Full-width heading bar with dark grey background. The label reflects
+        // the active view so the user can see at a glance which mode is on.
         let heading_style = self.theme.status_bar();
-        let heading =
-            Paragraph::new(Line::styled(" Sessions:", heading_style)).style(heading_style);
+        let heading = Paragraph::new(Line::styled(
+            self.ui_state.view_mode.heading_label(),
+            heading_style,
+        ))
+        .style(heading_style);
         frame.render_widget(heading, chunks[0]);
 
         let blocked: std::collections::HashMap<ProjectId, &str> = self
