@@ -1685,12 +1685,7 @@ impl App {
                 }
             }
             ConfirmAction::RestartSession { session_id } => {
-                match self
-                    .service
-                    .session_manager()
-                    .restart_session(&session_id)
-                    .await
-                {
+                match self.service.restart_session(&session_id).await {
                     Ok(_) => {
                         self.ui_state.status_message = Some((
                             "Session restarted".to_string(),
