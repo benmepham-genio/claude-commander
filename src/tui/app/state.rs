@@ -1082,8 +1082,7 @@ mod unread_transition_tests {
         let b = SessionId::new();
 
         // Pre-attach baseline: both working.
-        let mut agent_states =
-            HashMap::from([(a, AgentState::Working), (b, AgentState::Working)]);
+        let mut agent_states = HashMap::from([(a, AgentState::Working), (b, AgentState::Working)]);
 
         // Detach refreshes only the viewed session, now observed idle.
         apply_viewed_session_refresh(&mut agent_states, HashMap::from([(a, AgentState::Idle)]));

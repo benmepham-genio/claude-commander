@@ -1035,13 +1035,9 @@ impl App {
                                     .values()
                                     .filter(|s| s.status == SessionStatus::Running)
                                     .filter(|s| {
-                                        viewed_sessions
-                                            .iter()
-                                            .any(|name| s.matches_tmux_name(name))
+                                        viewed_sessions.iter().any(|name| s.matches_tmux_name(name))
                                     })
-                                    .map(|s| {
-                                        (s.id, s.tmux_session_name.clone(), s.program.clone())
-                                    })
+                                    .map(|s| (s.id, s.tmux_session_name.clone(), s.program.clone()))
                                     .collect()
                             };
                             if !targets.is_empty() {
