@@ -45,6 +45,9 @@ pub enum SessionError {
     #[error("Session {0} is in invalid state for this operation")]
     InvalidState(SessionId),
 
+    #[error("Invalid program: {0}")]
+    InvalidProgram(String),
+
     #[error("Failed to create session: {0}")]
     CreationFailed(String),
 

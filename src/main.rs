@@ -42,6 +42,30 @@ enum Commands {
         /// Show all sessions including stopped ones
         #[arg(short, long)]
         all: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show detailed status of a session
+    Status {
+        /// Session name or ID prefix
+        session: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Dump recent terminal output from a session
+    Log {
+        /// Session name or ID prefix
+        session: String,
+
+        /// Number of scrollback lines to capture (default: 100, max: 10000)
+        #[arg(short, long, default_value_t = 100)]
+        lines: usize,
     },
 
     /// Create a new session
@@ -56,6 +80,26 @@ enum Commands {
         /// Project path (default: current directory)
         #[arg(short = 'd', long)]
         path: Option<std::path::PathBuf>,
+
+        /// Initial prompt to send to the Claude agent
+        #[arg(short = 'i', long)]
+        initial_prompt: Option<String>,
+
+        /// Claude effort level
+        #[arg(short, long)]
+        effort: Option<String>,
+
+        /// Claude permission mode
+        #[arg(short, long)]
+        mode: Option<String>,
+
+        /// Branch to fork from (default: origin/main)
+        #[arg(short = 'b', long)]
+        base_branch: Option<String>,
+
+        /// Place session in a specific section
+        #[arg(short = 's', long)]
+        section: Option<String>,
     },
 
     /// Attach to an existing session
@@ -222,63 +266,115 @@ async fn main() -> Result<()> {
             info!("Starting Claude Commander TUI v{}", VERSION);
 
             let config_store = std::sync::Arc::new(ConfigStore::new(config.clone())?);
-            let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
+            let app_state = AppState::load_or_exit();
             let store = std::sync::Arc::new(StateStore::new(app_state)?);
             let mut app = App::new(config_store, store);
             app.run().await?;
         }
 
-        Some(Commands::List { all }) => {
+        Some(Commands::List { all, json }) => {
             setup_logging(cli.debug, false)?;
 
-            let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
-
-            println!("Sessions:");
-            println!();
-
-            if app_state.projects.is_empty() {
-                println!("  No projects. Use 'claude-commander' to add one.");
-                return Ok(());
-            }
-
-            for project in app_state.projects.values() {
-                println!("  {} ({})", project.name, project.main_branch);
-
-                let sessions: Vec<_> = project
-                    .worktrees
+            if json {
+                let service = claude_commander::api::CommanderService::for_cli(config)?;
+                let sessions = service.list_sessions(all).await?;
+                let entries: Vec<_> = sessions
                     .iter()
-                    .filter_map(|id| app_state.sessions.get(id))
-                    .filter(|s| all || s.status.is_active())
+                    .map(claude_commander::cli::SessionJsonEntry::from_info)
                     .collect();
+                println!("{}", serde_json::to_string_pretty(&entries)?);
+            } else {
+                let app_state = AppState::load_or_exit();
 
-                if sessions.is_empty() {
-                    println!("    (no sessions)");
-                } else {
-                    for session in sessions {
-                        let status_icon = match session.status {
-                            claude_commander::SessionStatus::Creating
-                            | claude_commander::SessionStatus::Merging
-                            | claude_commander::SessionStatus::Pushing => "⠋",
-                            claude_commander::SessionStatus::Running => "●",
-                            claude_commander::SessionStatus::Stopped => "○",
-                            claude_commander::SessionStatus::CascadePaused => "⏸",
-                        };
-                        match claude_commander::session::display_branch(
-                            &session.title,
-                            &session.branch,
-                        ) {
-                            Some(shown_branch) => println!(
-                                "    {} {} [{}] ({})",
-                                status_icon, session.title, shown_branch, session.program
-                            ),
-                            None => println!(
-                                "    {} {} ({})",
-                                status_icon, session.title, session.program
-                            ),
+                println!("Sessions:");
+                println!();
+
+                if app_state.projects.is_empty() {
+                    println!("  No projects. Use 'claude-commander' to add one.");
+                    return Ok(());
+                }
+
+                for project in app_state.projects.values() {
+                    println!("  {} ({})", project.name, project.main_branch);
+
+                    let sessions: Vec<_> = project
+                        .worktrees
+                        .iter()
+                        .filter_map(|id| app_state.sessions.get(id))
+                        .filter(|s| all || s.status.is_active())
+                        .collect();
+
+                    if sessions.is_empty() {
+                        println!("    (no sessions)");
+                    } else {
+                        for session in sessions {
+                            let status_icon = match session.status {
+                                claude_commander::SessionStatus::Creating
+                                | claude_commander::SessionStatus::Merging
+                                | claude_commander::SessionStatus::Pushing => "⠋",
+                                claude_commander::SessionStatus::Running => "●",
+                                claude_commander::SessionStatus::Stopped => "○",
+                                claude_commander::SessionStatus::CascadePaused => "⏸",
+                            };
+                            match claude_commander::session::display_branch(
+                                &session.title,
+                                &session.branch,
+                            ) {
+                                Some(shown_branch) => println!(
+                                    "    {} {} [{}] ({})",
+                                    status_icon, session.title, shown_branch, session.program
+                                ),
+                                None => println!(
+                                    "    {} {} ({})",
+                                    status_icon, session.title, session.program
+                                ),
+                            }
                         }
                     }
+                    println!();
                 }
-                println!();
+            }
+        }
+
+        Some(Commands::Status { session, json }) => {
+            setup_logging(cli.debug, false)?;
+
+            let service = claude_commander::api::CommanderService::for_cli(config)?;
+            let detail = match service.get_session_detail(&session, None).await? {
+                Some(d) => d,
+                None => {
+                    eprintln!("Session not found: {}", session);
+                    eprintln!("Use 'claude-commander list' to see available sessions.");
+                    std::process::exit(1);
+                }
+            };
+
+            let entry = claude_commander::cli::StatusJsonEntry::from_detail(&detail);
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&entry)?);
+            } else {
+                println!("{}", claude_commander::cli::format_status_human(&entry));
+            }
+        }
+
+        Some(Commands::Log { session, lines }) => {
+            setup_logging(cli.debug, false)?;
+
+            let service = claude_commander::api::CommanderService::for_cli(config)?;
+            match service.get_pane_content(&session, Some(lines)).await? {
+                Some(content) => {
+                    if content.ends_with('\n') {
+                        print!("{}", content);
+                    } else {
+                        println!("{}", content);
+                    }
+                }
+                None => {
+                    eprintln!("Session not found or has no live tmux session: {}", session);
+                    eprintln!("Use 'claude-commander list' to see available sessions.");
+                    std::process::exit(1);
+                }
             }
         }
 
@@ -286,50 +382,40 @@ async fn main() -> Result<()> {
             name,
             program,
             path,
+            initial_prompt,
+            effort,
+            mode,
+            base_branch,
+            section,
         }) => {
             setup_logging(cli.debug, false)?;
 
-            let path = path.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-            use claude_commander::session::SessionManager;
-            use claude_commander::tui::theme::Theme;
-            use std::sync::Arc;
-
-            let config_store = Arc::new(ConfigStore::new(config)?);
-            let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
-            let store = Arc::new(StateStore::new(app_state)?);
-            let manager = SessionManager::new(
-                config_store,
-                store.clone(),
-                Theme::default().tmux_status_style(),
-            );
-
-            // Check tmux
-            manager.check_tmux().await?;
-
-            // First, try to find or add the project
-            let project_id = {
-                let state = store.read().await;
-                state
-                    .projects
-                    .values()
-                    .find(|p| p.repo_path == path)
-                    .map(|p| p.id)
-            };
-
-            let project_id = match project_id {
-                Some(id) => id,
-                None => {
-                    println!("Adding project from {:?}...", path);
-                    manager.add_project(path).await?
-                }
-            };
+            let service = claude_commander::api::CommanderService::for_cli(config)?;
 
             println!("Creating session '{}'...", name);
-            let session_id = manager
-                .prepare_session(&project_id, name, program, None)
-                .await?;
-            manager.finalize_session(&session_id).await?;
+            let session_id = match service
+                .create_session(claude_commander::api::CreateSessionOpts {
+                    project_path: path
+                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
+                    title: name,
+                    program,
+                    initial_prompt,
+                    effort,
+                    mode,
+                    base_branch,
+                    section,
+                })
+                .await
+            {
+                Ok(id) => id,
+                Err(claude_commander::Error::Session(
+                    claude_commander::error::SessionError::InvalidProgram(msg),
+                )) => {
+                    clap::Error::raw(clap::error::ErrorKind::ArgumentConflict, format!("{msg}\n"))
+                        .exit();
+                }
+                Err(e) => return Err(e.into()),
+            };
 
             println!("Session created: {}", session_id);
             println!();
@@ -339,22 +425,12 @@ async fn main() -> Result<()> {
         Some(Commands::Attach { session }) => {
             setup_logging(cli.debug, false)?;
 
-            let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
+            let app_state = AppState::load_or_exit();
 
-            // Find session by name or ID prefix
-            let tmux_name = app_state
-                .sessions
-                .iter()
-                .find(|(id, s)| {
-                    s.title.to_lowercase() == session.to_lowercase()
-                        || id.to_string().starts_with(&session)
-                })
-                .map(|(_, s)| s.tmux_session_name.clone());
-
-            match tmux_name {
-                Some(name) => {
+            match claude_commander::cli::find_session(&app_state, &session) {
+                Some(s) => {
                     let triggers = claude_commander::editor_trigger_bytes(&config.keybindings);
-                    execute_attach(&name, triggers).await;
+                    execute_attach(&s.tmux_session_name, triggers).await;
                 }
                 None => {
                     eprintln!("Session not found: {}", session);

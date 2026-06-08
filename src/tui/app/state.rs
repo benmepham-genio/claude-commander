@@ -58,7 +58,8 @@ impl App {
                 let sections = self.config.sections.clone();
                 let now = chrono::Utc::now();
                 let _ = self
-                    .store
+                    .service
+                    .store()
                     .mutate(move |state| {
                         for (session_id, result) in &results {
                             let Some(session) = state.get_session_mut(session_id) else {
@@ -104,18 +105,26 @@ impl App {
                     })
                     .await;
 
-                // Update tmux status bars for running sessions with PR info
-                {
-                    let state = self.store.read().await;
-                    for session in state.sessions.values() {
-                        if session.status == SessionStatus::Running {
-                            let info = self.session_manager.status_bar_info(session, &state);
-                            self.session_manager
-                                .tmux
-                                .configure_status_bar(&session.tmux_session_name, &info)
-                                .await;
-                        }
-                    }
+                // Update tmux status bars for running sessions with PR info.
+                // Snapshot under the lock, then release before async tmux I/O.
+                let status_bar_updates: Vec<_> = {
+                    let state = self.service.store().read().await;
+                    state
+                        .sessions
+                        .values()
+                        .filter(|s| s.status == SessionStatus::Running)
+                        .map(|s| {
+                            let info = self.service.status_bar_info(s, &state);
+                            (s.tmux_session_name.clone(), info)
+                        })
+                        .collect()
+                };
+                for (tmux_name, info) in &status_bar_updates {
+                    self.service
+                        .session_manager()
+                        .tmux
+                        .configure_status_bar(tmux_name, info)
+                        .await;
                 }
 
                 self.refresh_list_items().await;
@@ -172,25 +181,19 @@ impl App {
             } => {
                 debug!("Session creation failed: {}", message);
                 let _ = self
-                    .session_manager
+                    .service
+                    .session_manager()
                     .remove_creating_session(&session_id)
                     .await;
                 self.refresh_list_items().await;
                 self.ui_state.modal = Modal::Error { message };
             }
             StateUpdate::AgentStatesUpdated { states } => {
-                // Detect Working → Idle transitions and mark sessions as unread
-                let mut unread_ids = Vec::new();
-                for (session_id, new_state) in &states {
-                    if *new_state == AgentState::Idle
-                        && self.ui_state.agent_states.get(session_id) == Some(&AgentState::Working)
-                    {
-                        unread_ids.push(*session_id);
-                    }
-                }
+                let unread_ids = detect_unread_transitions(&self.ui_state.agent_states, &states);
                 if !unread_ids.is_empty() {
                     let _ = self
-                        .store
+                        .service
+                        .store()
                         .mutate(move |state| {
                             for sid in &unread_ids {
                                 if let Some(session) = state.get_session_mut(sid) {
@@ -280,7 +283,8 @@ impl App {
             } => {
                 debug!("Multi-repo session creation failed: {}", message);
                 let _ = self
-                    .session_manager
+                    .service
+                    .session_manager()
                     .remove_creating_multi_repo_session(&session_id)
                     .await;
                 self.refresh_list_items().await;
@@ -299,13 +303,43 @@ impl App {
             StateUpdate::PushStackFinished { result } => {
                 self.handle_push_stack_finished(result).await;
             }
+            StateUpdate::ProjectPullFinished {
+                project_id,
+                outcome,
+            } => {
+                self.ui_state.project_pull_in_flight.remove(&project_id);
+                self.ui_state
+                    .last_project_pull
+                    .insert(project_id, Instant::now());
+                match outcome {
+                    PullOutcome::Advanced => {
+                        debug!("project pull: {} advanced", project_id);
+                        self.ui_state.project_pull_blocked.remove(&project_id);
+                        self.refresh_list_items().await;
+                    }
+                    PullOutcome::UpToDate => {
+                        self.ui_state.project_pull_blocked.remove(&project_id);
+                    }
+                    PullOutcome::Blocked(reason) => {
+                        debug!("project pull: {} blocked ({})", project_id, reason.as_str());
+                        self.ui_state
+                            .project_pull_blocked
+                            .insert(project_id, reason);
+                    }
+                    PullOutcome::SoftFail => {
+                        // Leave any existing blocked state alone: a fetch
+                        // failure doesn't tell us anything new about the
+                        // branch relation.
+                    }
+                }
+            }
             _ => {}
         }
     }
 
     pub(super) async fn cleanup_stale_creating_sessions(&self) {
         let creating_ids: Vec<SessionId> = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             state
                 .sessions
                 .values()
@@ -320,7 +354,8 @@ impl App {
                 creating_ids.len()
             );
             let _ = self
-                .store
+                .service
+                .store()
                 .mutate(move |state| {
                     for sid in &creating_ids {
                         state.remove_session(sid);
@@ -341,7 +376,7 @@ impl App {
     /// `cascade_paused_at`.
     pub(super) async fn cleanup_stale_merging_sessions(&self) {
         let stale_ids: Vec<SessionId> = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             state
                 .sessions
                 .values()
@@ -356,7 +391,8 @@ impl App {
                 stale_ids.len()
             );
             let _ = self
-                .store
+                .service
+                .store()
                 .mutate(move |state| {
                     for sid in &stale_ids {
                         if let Some(session) = state.get_session_mut(sid) {
@@ -374,7 +410,7 @@ impl App {
     /// if the corresponding tmux session no longer exists or the pane is dead.
     pub(super) async fn sync_session_states(&self) {
         let session_ids: Vec<(SessionId, String)> = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             state
                 .sessions
                 .values()
@@ -384,28 +420,40 @@ impl App {
         };
 
         for (session_id, tmux_name) in session_ids {
-            let should_mark_stopped =
-                if let Ok(exists) = self.session_manager.tmux.session_exists(&tmux_name).await {
-                    if !exists {
-                        true
-                    } else {
-                        // Session exists, but check if pane is dead (program exited)
-                        self.session_manager
-                            .tmux
-                            .is_pane_dead(&tmux_name)
-                            .await
-                            .unwrap_or(false)
-                    }
+            let should_mark_stopped = if let Ok(exists) = self
+                .service
+                .session_manager()
+                .tmux
+                .session_exists(&tmux_name)
+                .await
+            {
+                if !exists {
+                    true
                 } else {
-                    false
-                };
+                    // Session exists, but check if pane is dead (program exited)
+                    self.service
+                        .session_manager()
+                        .tmux
+                        .is_pane_dead(&tmux_name)
+                        .await
+                        .unwrap_or(false)
+                }
+            } else {
+                false
+            };
 
             if should_mark_stopped {
                 // Kill the tmux session if it exists but pane is dead
-                let _ = self.session_manager.tmux.kill_session(&tmux_name).await;
+                let _ = self
+                    .service
+                    .session_manager()
+                    .tmux
+                    .kill_session(&tmux_name)
+                    .await;
 
                 let _ = self
-                    .store
+                    .service
+                    .store()
                     .mutate(move |state| {
                         if let Some(session) = state.get_session_mut(&session_id) {
                             session.set_status(SessionStatus::Stopped);
@@ -417,11 +465,16 @@ impl App {
 
         // Sync unmanaged worktrees for all projects
         let project_ids: Vec<ProjectId> = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             state.projects.keys().copied().collect()
         };
         for project_id in project_ids {
-            if let Err(e) = self.session_manager.sync_worktrees(&project_id).await {
+            if let Err(e) = self
+                .service
+                .session_manager()
+                .sync_worktrees(&project_id)
+                .await
+            {
                 debug!("Failed to sync worktrees for project {}: {}", project_id, e);
             }
         }
@@ -434,7 +487,8 @@ impl App {
         let sections = self.config.sections.clone();
         let now = chrono::Utc::now();
         let _ = self
-            .store
+            .service
+            .store()
             .mutate(move |state| {
                 if sections.is_empty()
                     && state.sessions.values().all(|s| s.current_section.is_none())
@@ -457,7 +511,8 @@ impl App {
         let sections = self.config.sections.clone();
         let now = chrono::Utc::now();
         let _ = self
-            .store
+            .service
+            .store()
             .mutate(move |state| {
                 if let Some(session) = state.get_session_mut(&session_id) {
                     crate::session::apply_assignment(session, &sections, now);
@@ -467,32 +522,89 @@ impl App {
     }
 
     pub(super) async fn refresh_list_items(&mut self) {
-        let state = self.store.read().await;
+        // Guard: if a section view is active but sections were removed from
+        // config (hot-reload), fall back to ProjectGrouped.
+        if matches!(
+            self.ui_state.view_mode,
+            ViewMode::SectionGrouped | ViewMode::SectionStacks
+        ) && self.config.sections.is_empty()
+        {
+            self.ui_state.view_mode = ViewMode::ProjectGrouped;
+        }
+
+        let state = self.service.store().read().await;
 
         // Multi-repo sessions section (shown first if any exist)
         let mut items = build_multi_repo_items(&state);
 
-        let grouped = if self.config.sections.is_empty() {
-            build_project_grouped_items(&state, &self.ui_state.agent_states)
-        } else {
-            build_section_grouped_items(
+        let grouped = match self.ui_state.view_mode {
+            ViewMode::ProjectGrouped => {
+                build_project_grouped_items(&state, &self.ui_state.agent_states)
+            }
+            ViewMode::SectionGrouped => build_section_grouped_items(
                 &state,
                 &self.config.sections,
                 &self.ui_state.agent_states,
                 &self.ui_state.collapsed_sections,
-            )
+            ),
+            ViewMode::SectionStacks => build_stacked_section_items(
+                &state,
+                &self.config.sections,
+                &self.ui_state.agent_states,
+                &self.ui_state.collapsed_sections,
+            ),
         };
         items.extend(grouped);
 
         let selectable: Vec<bool> = items.iter().map(|i| i.is_selectable()).collect();
         self.ui_state.list_items = items;
         self.ui_state.cascade_paused = state.cascade_paused_at.is_some();
-        if self.config.sections.is_empty() {
+        if matches!(self.ui_state.view_mode, ViewMode::ProjectGrouped) {
             self.ui_state
                 .list_state
                 .set_item_count(self.ui_state.list_items.len());
         } else {
             self.ui_state.list_state.set_selectable(selectable);
+        }
+
+        // Pre-compute stack chain for the selected session
+        self.ui_state.stack_chain.clear();
+        if let Some(session_id) = self.ui_state.selected_session_id
+            && let Some(session) = state.sessions.get(&session_id)
+        {
+            let project_sessions: Vec<&WorktreeSession> = state
+                .projects
+                .get(&session.project_id)
+                .map(|p| {
+                    p.worktrees
+                        .iter()
+                        .filter_map(|sid| state.sessions.get(sid))
+                        .collect()
+                })
+                .unwrap_or_default();
+            // Walk up to the stack base
+            let mut base = session_id;
+            for _ in 0..project_sessions.len() {
+                let base_session = project_sessions.iter().find(|s| s.id == base);
+                match base_session
+                    .and_then(|s| crate::session::resolve_stack_parent(s, &project_sessions))
+                {
+                    Some(parent) => base = parent,
+                    None => break,
+                }
+            }
+            let chain = crate::session::stack_chain_from_base(base, &project_sessions);
+            if chain.len() > 1 {
+                for &sid in &chain {
+                    if let Some(s) = state.sessions.get(&sid) {
+                        self.ui_state.stack_chain.push(StackChainEntry {
+                            title: s.title.clone(),
+                            status: s.status,
+                            is_current: sid == session_id,
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -501,7 +613,8 @@ impl App {
         let session_id = self.ui_state.selected_session_id;
         let project_id = self.ui_state.selected_project_id;
         let _ = self
-            .store
+            .service
+            .store()
             .mutate(move |state| {
                 state.last_selected_session = session_id;
                 state.last_selected_project = project_id;
@@ -513,7 +626,8 @@ impl App {
     pub(super) async fn save_left_pane_pct(&self) {
         let pct = self.ui_state.left_pane_pct;
         let _ = self
-            .store
+            .service
+            .store()
             .mutate(move |state| {
                 state.left_pane_pct = Some(pct);
             })
@@ -523,7 +637,7 @@ impl App {
     /// Restore selection and UI preferences from persisted state
     pub(super) async fn restore_selection(&mut self) {
         let (last_session, last_project, left_pane_pct) = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             (
                 state.last_selected_session,
                 state.last_selected_project,
@@ -767,6 +881,291 @@ fn build_section_grouped_items(
     items
 }
 
+/// Like `build_section_grouped_items` but treats each PR stack as one unit:
+/// the whole stack lands in the section chosen by its newest leaf (with
+/// `section_override` walked closest-to-leaf-first), and stack indentation is
+/// preserved via `stacked_child: true` on non-root members.
+fn build_stacked_section_items(
+    state: &crate::config::AppState,
+    sections: &[crate::session::SectionConfig],
+    agent_states: &HashMap<SessionId, AgentState>,
+    collapsed_sections: &std::collections::HashSet<String>,
+) -> Vec<SessionListItem> {
+    use chrono::{DateTime, Utc};
+
+    #[derive(Clone)]
+    struct GroupRender {
+        sort_key: DateTime<Utc>,
+        // Tiebreaker for groups whose leaves share an entered_section_at —
+        // common when one apply_assignment pass stamps multiple sessions
+        // with the same `now`. Without a stable tiebreaker, HashMap-
+        // randomised insertion order leaks into the sort and the UI
+        // appears to churn on every refresh.
+        leaf_id: SessionId,
+        order: Vec<(SessionId, bool)>,
+    }
+
+    // Stable project order. Ties on `name` (unusual but possible) fall
+    // back to project id so we never depend on HashMap iteration order.
+    let mut projects: Vec<_> = state.projects.values().collect();
+    projects.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+
+    // section_name → project_id → Vec<GroupRender>
+    let mut by_section: std::collections::HashMap<
+        String,
+        std::collections::HashMap<crate::session::ProjectId, Vec<GroupRender>>,
+    > = std::collections::HashMap::new();
+    let valid_section =
+        |name: &str| name == crate::session::IN_PROGRESS || sections.iter().any(|s| s.name == name);
+
+    for project in &projects {
+        // Sort by (created_at, id) so any downstream max_by_key on this
+        // slice (e.g. fan-out children with identical created_at in
+        // `stack_top`) picks a deterministic winner.
+        let mut project_sessions: Vec<&WorktreeSession> = state
+            .sessions
+            .values()
+            .filter(|s| s.project_id == project.id)
+            .collect();
+        if project_sessions.is_empty() {
+            continue;
+        }
+        project_sessions.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+
+        // Bucket every session by its stack root (returns self for
+        // unstacked). Track first-encounter root order so we iterate
+        // groups deterministically below without leaking
+        // HashMap-iteration order into the output.
+        let mut groups: std::collections::HashMap<SessionId, Vec<&WorktreeSession>> =
+            std::collections::HashMap::new();
+        let mut group_roots: Vec<SessionId> = Vec::new();
+        for s in &project_sessions {
+            let root_id = crate::session::stack_root(s.id, &project_sessions);
+            if !groups.contains_key(&root_id) {
+                group_roots.push(root_id);
+            }
+            groups.entry(root_id).or_default().push(s);
+        }
+
+        for root_id in group_roots {
+            let members = groups.remove(&root_id).unwrap_or_default();
+            // Pick the leaf in the whole subgraph; its section drives placement.
+            let leaf_id = crate::session::stack_top(root_id, &project_sessions);
+            let Some(leaf) = members.iter().find(|s| s.id == leaf_id).copied() else {
+                continue;
+            };
+
+            // Walk leaf → root. First section_override encountered wins;
+            // overrides on off-path siblings are not considered.
+            let mut effective: Option<String> = None;
+            let mut cursor = leaf.id;
+            for _ in 0..project_sessions.len() {
+                let Some(cur) = project_sessions.iter().find(|s| s.id == cursor).copied() else {
+                    break;
+                };
+                if let Some(ovr) = &cur.section_override {
+                    effective = Some(ovr.clone());
+                    break;
+                }
+                match crate::session::resolve_stack_parent(cur, &project_sessions) {
+                    Some(parent) => cursor = parent,
+                    None => break,
+                }
+            }
+            let section_name = effective
+                .or_else(|| leaf.current_section.clone())
+                .filter(|n| valid_section(n))
+                .unwrap_or_else(|| crate::session::IN_PROGRESS.to_string());
+
+            // Order within the group: stack-aware (root first, children
+            // indented). build_session_order resolves parents only against
+            // the slice it's given, so passing just the group's members
+            // keeps the root flat and descendants indented even when the
+            // subgraph fans out.
+            let order = build_session_order(&members);
+
+            by_section
+                .entry(section_name)
+                .or_default()
+                .entry(project.id)
+                .or_default()
+                .push(GroupRender {
+                    sort_key: leaf.entered_section_at,
+                    leaf_id,
+                    order,
+                });
+        }
+    }
+
+    // Emit IN_PROGRESS first, then user sections in declared order — same
+    // overall layout the plain section view uses.
+    let section_order: Vec<String> = std::iter::once(crate::session::IN_PROGRESS.to_string())
+        .chain(sections.iter().map(|s| s.name.clone()))
+        .collect();
+
+    let mut items = Vec::new();
+    for (idx, section_name) in section_order.iter().enumerate() {
+        if idx > 0 {
+            items.push(SessionListItem::Spacer);
+        }
+
+        let project_groups = by_section.get(section_name);
+        let total_count: usize = project_groups
+            .map(|m| {
+                m.values()
+                    .flat_map(|g| g.iter())
+                    .map(|g| g.order.len())
+                    .sum()
+            })
+            .unwrap_or(0);
+
+        let collapsed = collapsed_sections.contains(section_name);
+        items.push(SessionListItem::SectionHeader {
+            name: section_name.clone(),
+            count: total_count,
+            collapsed,
+        });
+        if collapsed {
+            continue;
+        }
+
+        let is_in_progress = section_name == crate::session::IN_PROGRESS;
+        for project in &projects {
+            let mut groups_in_proj = project_groups
+                .and_then(|m| m.get(&project.id))
+                .cloned()
+                .unwrap_or_default();
+            let project_count: usize = groups_in_proj.iter().map(|g| g.order.len()).sum();
+            if !is_in_progress && project_count == 0 {
+                continue;
+            }
+            items.push(SessionListItem::Project {
+                id: project.id,
+                name: project.name.clone(),
+                repo_path: project.repo_path.clone(),
+                main_branch: project.main_branch.clone(),
+                worktree_count: project_count,
+                nested: true,
+            });
+
+            // Stacks within a section sort by their leaf's
+            // entered_section_at, with leaf_id as a stable tiebreaker so
+            // batched apply_assignment calls (which stamp many sessions
+            // with the same `now`) don't make the view churn.
+            groups_in_proj
+                .sort_by(|a, b| a.sort_key.cmp(&b.sort_key).then(a.leaf_id.cmp(&b.leaf_id)));
+            for group in groups_in_proj {
+                for (sid, stacked_child) in group.order {
+                    if let Some(session) = state.sessions.get(&sid) {
+                        items.push(worktree_item(session, agent_states, None, stacked_child));
+                    }
+                }
+            }
+        }
+    }
+    items
+}
+
+fn detect_unread_transitions(
+    prev: &HashMap<SessionId, AgentState>,
+    new: &HashMap<SessionId, AgentState>,
+) -> Vec<SessionId> {
+    let mut ids = Vec::new();
+    for (session_id, new_state) in new {
+        if *new_state == AgentState::Idle && prev.get(session_id) == Some(&AgentState::Working) {
+            ids.push(*session_id);
+        }
+    }
+    ids
+}
+
+/// Apply freshly-detected agent states for the sessions just viewed during an
+/// attach, leaving every other session's entry untouched.
+///
+/// Returning from an attach must not blank the whole tree (which happens if the
+/// agent-state map is cleared wholesale) nor drop genuine background
+/// `Working → Idle` notifications. Only the sessions the user actually saw get
+/// their state overwritten here; because the user was watching them, the
+/// refreshed state is applied directly without running unread detection, so
+/// their own transitions are never re-flagged as unread. Every other session
+/// keeps its prior state, preserving the baseline a later poll diffs against.
+pub(super) fn apply_viewed_session_refresh(
+    agent_states: &mut HashMap<SessionId, AgentState>,
+    refreshed: HashMap<SessionId, AgentState>,
+) {
+    agent_states.extend(refreshed);
+}
+
+#[cfg(test)]
+mod unread_transition_tests {
+    use super::*;
+    use crate::session::SessionId;
+    use std::collections::HashMap;
+
+    #[test]
+    fn working_to_idle_marks_unread() {
+        let sid = SessionId::new();
+        let prev = HashMap::from([(sid, AgentState::Working)]);
+        let new = HashMap::from([(sid, AgentState::Idle)]);
+        assert_eq!(detect_unread_transitions(&prev, &new), vec![sid]);
+    }
+
+    #[test]
+    fn idle_to_idle_no_transition() {
+        let sid = SessionId::new();
+        let prev = HashMap::from([(sid, AgentState::Idle)]);
+        let new = HashMap::from([(sid, AgentState::Idle)]);
+        assert!(detect_unread_transitions(&prev, &new).is_empty());
+    }
+
+    #[test]
+    fn empty_cache_no_transition() {
+        let sid = SessionId::new();
+        let prev = HashMap::new();
+        let new = HashMap::from([(sid, AgentState::Idle)]);
+        assert!(
+            detect_unread_transitions(&prev, &new).is_empty(),
+            "cleared cache after attach must not trigger false unread"
+        );
+    }
+
+    #[test]
+    fn empty_cache_working_no_transition() {
+        let sid = SessionId::new();
+        let prev = HashMap::new();
+        let new = HashMap::from([(sid, AgentState::Working)]);
+        assert!(detect_unread_transitions(&prev, &new).is_empty());
+    }
+
+    #[test]
+    fn viewed_refresh_preserves_background_unread() {
+        // Scenario: attached to session A while a background session B is also
+        // running. Both finish (Working → Idle) during the attach. On detach we
+        // refresh only the viewed session (A). A subsequent poll must still flag
+        // B as unread (we never saw it finish) while leaving A alone.
+        let a = SessionId::new();
+        let b = SessionId::new();
+
+        // Pre-attach baseline: both working.
+        let mut agent_states = HashMap::from([(a, AgentState::Working), (b, AgentState::Working)]);
+
+        // Detach refreshes only the viewed session, now observed idle.
+        apply_viewed_session_refresh(&mut agent_states, HashMap::from([(a, AgentState::Idle)]));
+
+        // A reflects its observed state; B's baseline is untouched (not wiped).
+        assert_eq!(agent_states.get(&a), Some(&AgentState::Idle));
+        assert_eq!(agent_states.get(&b), Some(&AgentState::Working));
+
+        // Next background poll reports both idle.
+        let poll = HashMap::from([(a, AgentState::Idle), (b, AgentState::Idle)]);
+        let unread = detect_unread_transitions(&agent_states, &poll);
+
+        // Only B is flagged: A's finish was watched, B's was not. A wholesale
+        // clear() on detach would have dropped B's notification entirely.
+        assert_eq!(unread, vec![b]);
+    }
+}
+
 #[cfg(test)]
 mod stack_order_tests {
     use super::*;
@@ -885,6 +1284,402 @@ mod stack_order_tests {
         child.pr_base_branch = Some("base-br".to_string());
         let order = build_session_order(&[&base, &child]);
         assert_eq!(order, vec![(base.id, false), (child.id, true)]);
+    }
+
+    fn make_session_in_section(
+        title: &str,
+        branch: &str,
+        created_offset_secs: i64,
+        current_section: &str,
+    ) -> WorktreeSession {
+        let mut s = make_session(title, branch, created_offset_secs);
+        s.current_section = Some(current_section.to_string());
+        // Stamp section-entry time to mirror the created offset so the leaf's
+        // entered_section_at uniquely identifies the group's sort position.
+        s.entered_section_at = Utc::now() + ChronoDuration::seconds(created_offset_secs);
+        s
+    }
+
+    fn section_named(name: &str) -> crate::session::SectionConfig {
+        crate::session::SectionConfig {
+            name: name.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn appstate_from(sessions: Vec<WorktreeSession>) -> crate::config::AppState {
+        let mut state = crate::config::AppState::default();
+        // Group sessions by their project_id so projects with multiple
+        // worktrees stay linked correctly.
+        let mut project_titles: std::collections::HashMap<ProjectId, String> = Default::default();
+        for s in &sessions {
+            project_titles
+                .entry(s.project_id)
+                .or_insert_with(|| format!("p-{}", &s.project_id.to_string()));
+        }
+        for (pid, name) in project_titles {
+            let mut project = crate::session::Project::new(&name, PathBuf::from("/tmp"), "main");
+            project.id = pid;
+            state.projects.insert(pid, project);
+        }
+        for s in sessions {
+            let pid = s.project_id;
+            state.projects.get_mut(&pid).unwrap().add_worktree(s.id);
+            state.sessions.insert(s.id, s);
+        }
+        state
+    }
+
+    #[test]
+    fn stacked_sections_group_whole_stack_under_leaf_section() {
+        // base.current_section = "Review" (older), child.current_section = "Open" (leaf).
+        // In the new stacked-section view the whole stack should appear under
+        // "Open" (the leaf's section), with `child` indented beneath `base`.
+        let project_id = ProjectId::new();
+        let mut base = make_session_in_section("base", "base", 0, "Review");
+        base.project_id = project_id;
+        let mut child = make_session_in_section("child", "child", 10, "Open");
+        child.project_id = project_id;
+        child.stack_parent_session_id = Some(base.id);
+
+        let state = appstate_from(vec![base.clone(), child.clone()]);
+        let sections = vec![section_named("Open"), section_named("Review")];
+        let agent_states = HashMap::new();
+        let collapsed = std::collections::HashSet::new();
+
+        let items = build_stacked_section_items(&state, &sections, &agent_states, &collapsed);
+
+        // Walk items: find the "Open" header, then base+child should follow.
+        let found_open = items.iter().any(
+            |item| matches!(item, SessionListItem::SectionHeader { name, .. } if name == "Open"),
+        );
+        assert!(
+            found_open,
+            "Open section header should be present: {items:?}"
+        );
+
+        // After the Open header, expect: Project → base (stacked_child:false) → child (stacked_child:true)
+        let after = items
+            .iter()
+            .skip_while(
+                |i| !matches!(i, SessionListItem::SectionHeader { name, .. } if name == "Open"),
+            )
+            .skip(1)
+            .collect::<Vec<_>>();
+        let session_rows: Vec<_> = after
+            .iter()
+            .filter_map(|i| match i {
+                SessionListItem::Worktree {
+                    id, stacked_child, ..
+                } => Some((*id, *stacked_child)),
+                _ => None,
+            })
+            .take_while(|_| true)
+            .collect();
+        assert_eq!(
+            session_rows,
+            vec![(base.id, false), (child.id, true)],
+            "stack should render under leaf's section with indentation preserved"
+        );
+
+        // And there should be no Worktree row under "Review".
+        let review_rows: Vec<_> = items
+            .iter()
+            .skip_while(
+                |i| !matches!(i, SessionListItem::SectionHeader { name, .. } if name == "Review"),
+            )
+            .skip(1)
+            .take_while(|i| {
+                !matches!(
+                    i,
+                    SessionListItem::SectionHeader { .. } | SessionListItem::Spacer
+                )
+            })
+            .filter(|i| matches!(i, SessionListItem::Worktree { .. }))
+            .collect();
+        assert!(
+            review_rows.is_empty(),
+            "stack-base should have moved out of Review section: {review_rows:?}"
+        );
+    }
+
+    #[test]
+    fn stacked_sections_override_closest_to_leaf_wins() {
+        // base has section_override = "Pinned"; child (leaf) has no override.
+        // Whole stack lands in "Pinned".
+        let project_id = ProjectId::new();
+        let mut base = make_session_in_section("base", "base", 0, "Review");
+        base.project_id = project_id;
+        base.section_override = Some("Pinned".to_string());
+        let mut child = make_session_in_section("child", "child", 10, "Open");
+        child.project_id = project_id;
+        child.stack_parent_session_id = Some(base.id);
+
+        let state = appstate_from(vec![base.clone(), child.clone()]);
+        let sections = vec![
+            section_named("Open"),
+            section_named("Review"),
+            section_named("Pinned"),
+        ];
+        let items = build_stacked_section_items(
+            &state,
+            &sections,
+            &HashMap::new(),
+            &std::collections::HashSet::new(),
+        );
+
+        let pinned_rows: Vec<_> = items
+            .iter()
+            .skip_while(
+                |i| !matches!(i, SessionListItem::SectionHeader { name, .. } if name == "Pinned"),
+            )
+            .skip(1)
+            .take_while(|i| {
+                !matches!(
+                    i,
+                    SessionListItem::SectionHeader { .. } | SessionListItem::Spacer
+                )
+            })
+            .filter_map(|i| match i {
+                SessionListItem::Worktree {
+                    id, stacked_child, ..
+                } => Some((*id, *stacked_child)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            pinned_rows,
+            vec![(base.id, false), (child.id, true)],
+            "whole stack should land in the closest-to-leaf overridden section"
+        );
+    }
+
+    #[test]
+    fn stacked_sections_fan_out_groups_share_root_and_use_newest_leaf() {
+        // Fan-out: base has two children, B (older) and C (newer).
+        // C is the newest leaf in the subgraph, so the whole stack (base+B+C)
+        // appears under C's current_section.
+        let project_id = ProjectId::new();
+        let mut base = make_session_in_section("base", "base", 0, "Review");
+        base.project_id = project_id;
+        let mut b = make_session_in_section("b", "b", 5, "Review");
+        b.project_id = project_id;
+        b.stack_parent_session_id = Some(base.id);
+        let mut c = make_session_in_section("c", "c", 20, "Open");
+        c.project_id = project_id;
+        c.stack_parent_session_id = Some(base.id);
+
+        let state = appstate_from(vec![base.clone(), b.clone(), c.clone()]);
+        let sections = vec![section_named("Open"), section_named("Review")];
+        let items = build_stacked_section_items(
+            &state,
+            &sections,
+            &HashMap::new(),
+            &std::collections::HashSet::new(),
+        );
+
+        let open_session_ids: Vec<_> = items
+            .iter()
+            .skip_while(
+                |i| !matches!(i, SessionListItem::SectionHeader { name, .. } if name == "Open"),
+            )
+            .skip(1)
+            .take_while(|i| {
+                !matches!(
+                    i,
+                    SessionListItem::SectionHeader { .. } | SessionListItem::Spacer
+                )
+            })
+            .filter_map(|i| match i {
+                SessionListItem::Worktree { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            open_session_ids.contains(&base.id)
+                && open_session_ids.contains(&b.id)
+                && open_session_ids.contains(&c.id),
+            "all three subgraph members should appear under Open: {open_session_ids:?}"
+        );
+
+        let review_session_count = items
+            .iter()
+            .skip_while(
+                |i| !matches!(i, SessionListItem::SectionHeader { name, .. } if name == "Review"),
+            )
+            .skip(1)
+            .take_while(|i| {
+                !matches!(
+                    i,
+                    SessionListItem::SectionHeader { .. } | SessionListItem::Spacer
+                )
+            })
+            .filter(|i| matches!(i, SessionListItem::Worktree { .. }))
+            .count();
+        assert_eq!(
+            review_session_count, 0,
+            "Review should be empty because B follows the stack into Open"
+        );
+    }
+
+    #[test]
+    fn stacked_sections_sibling_override_off_leaf_path_is_ignored() {
+        // base ← B (override "Pinned"), base ← C (newer leaf, no override).
+        // The chosen leaf is C; walking C → base, B is off-path so its
+        // override doesn't count. Stack goes to C's current_section.
+        let project_id = ProjectId::new();
+        let mut base = make_session_in_section("base", "base", 0, "Review");
+        base.project_id = project_id;
+        let mut b = make_session_in_section("b", "b", 5, "Review");
+        b.project_id = project_id;
+        b.stack_parent_session_id = Some(base.id);
+        b.section_override = Some("Pinned".to_string());
+        let mut c = make_session_in_section("c", "c", 20, "Open");
+        c.project_id = project_id;
+        c.stack_parent_session_id = Some(base.id);
+
+        let state = appstate_from(vec![base.clone(), b.clone(), c.clone()]);
+        let sections = vec![
+            section_named("Open"),
+            section_named("Review"),
+            section_named("Pinned"),
+        ];
+        let items = build_stacked_section_items(
+            &state,
+            &sections,
+            &HashMap::new(),
+            &std::collections::HashSet::new(),
+        );
+
+        let pinned_count = items
+            .iter()
+            .skip_while(
+                |i| !matches!(i, SessionListItem::SectionHeader { name, .. } if name == "Pinned"),
+            )
+            .skip(1)
+            .take_while(|i| {
+                !matches!(
+                    i,
+                    SessionListItem::SectionHeader { .. } | SessionListItem::Spacer
+                )
+            })
+            .filter(|i| matches!(i, SessionListItem::Worktree { .. }))
+            .count();
+        assert_eq!(
+            pinned_count, 0,
+            "off-leaf-path overrides should not pull the stack into their section"
+        );
+
+        let open_count = items
+            .iter()
+            .skip_while(
+                |i| !matches!(i, SessionListItem::SectionHeader { name, .. } if name == "Open"),
+            )
+            .skip(1)
+            .take_while(|i| {
+                !matches!(
+                    i,
+                    SessionListItem::SectionHeader { .. } | SessionListItem::Spacer
+                )
+            })
+            .filter(|i| matches!(i, SessionListItem::Worktree { .. }))
+            .count();
+        assert_eq!(
+            open_count, 3,
+            "all three subgraph members should appear under Open: {items:?}"
+        );
+    }
+
+    #[test]
+    fn stacked_sections_output_stable_across_repeated_calls_with_tied_timestamps() {
+        // Two stacks whose leaves both entered the section at the same
+        // instant (apply_assignment uses one `now` for the whole batch).
+        // Output must be deterministic between calls or the UI churns on
+        // every refresh.
+        let project_id = ProjectId::new();
+        let same_ts = Utc::now();
+        let mk = |title: &str, branch: &str| {
+            let mut s = make_session_in_section(title, branch, 0, "Open");
+            s.project_id = project_id;
+            s.entered_section_at = same_ts;
+            s
+        };
+        let mut base_a = mk("base-a", "base-a");
+        base_a.created_at = same_ts;
+        let mut child_a = mk("child-a", "child-a");
+        child_a.created_at = same_ts;
+        child_a.stack_parent_session_id = Some(base_a.id);
+        let mut base_b = mk("base-b", "base-b");
+        base_b.created_at = same_ts;
+        let mut child_b = mk("child-b", "child-b");
+        child_b.created_at = same_ts;
+        child_b.stack_parent_session_id = Some(base_b.id);
+
+        let state = appstate_from(vec![
+            base_a.clone(),
+            child_a.clone(),
+            base_b.clone(),
+            child_b.clone(),
+        ]);
+        let sections = vec![section_named("Open")];
+        let collapsed = std::collections::HashSet::new();
+
+        let first = build_stacked_section_items(&state, &sections, &HashMap::new(), &collapsed);
+        // Call many times — every iteration constructs fresh internal
+        // HashMaps with a new RandomState, so any non-determinism shows up
+        // here. 32 calls is well past the birthday-paradox threshold.
+        for _ in 0..32 {
+            let again = build_stacked_section_items(&state, &sections, &HashMap::new(), &collapsed);
+            assert_eq!(
+                again, first,
+                "build_stacked_section_items must produce identical output on every call"
+            );
+        }
+    }
+
+    #[test]
+    fn stacked_sections_sort_groups_by_leaf_entered_section_at() {
+        // Two unstacked sessions both in "Open"; the newer one's
+        // entered_section_at should sort it... wait — build_sections sorts
+        // oldest-first within a section. The newer leaf has a later
+        // entered_section_at and therefore appears AFTER the older one.
+        let project_id = ProjectId::new();
+        let mut older = make_session_in_section("older", "older", 0, "Open");
+        older.project_id = project_id;
+        let mut newer = make_session_in_section("newer", "newer", 20, "Open");
+        newer.project_id = project_id;
+
+        let state = appstate_from(vec![older.clone(), newer.clone()]);
+        let sections = vec![section_named("Open")];
+        let items = build_stacked_section_items(
+            &state,
+            &sections,
+            &HashMap::new(),
+            &std::collections::HashSet::new(),
+        );
+
+        let open_session_order: Vec<_> = items
+            .iter()
+            .skip_while(
+                |i| !matches!(i, SessionListItem::SectionHeader { name, .. } if name == "Open"),
+            )
+            .skip(1)
+            .take_while(|i| {
+                !matches!(
+                    i,
+                    SessionListItem::SectionHeader { .. } | SessionListItem::Spacer
+                )
+            })
+            .filter_map(|i| match i {
+                SessionListItem::Worktree { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            open_session_order,
+            vec![older.id, newer.id],
+            "Open section should be sorted by entered_section_at (oldest first)"
+        );
     }
 
     #[test]

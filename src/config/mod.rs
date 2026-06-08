@@ -11,6 +11,7 @@ mod settings;
 pub mod storage;
 mod store;
 pub mod theme;
+mod view_mode;
 
 pub use config_store::ConfigStore;
 pub use keybindings::{BindableAction, KeyBinding, KeyBindings};
@@ -18,3 +19,4 @@ pub use settings::*;
 pub use storage::*;
 pub use store::StateStore;
 pub use theme::{ColorValue, ThemeOverrides};
+pub use view_mode::ViewMode;

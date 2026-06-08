@@ -247,6 +247,36 @@ fn test_next_wraps_to_first() {
 }
 
 #[test]
+fn test_set_item_count_clears_stale_selectable_mask() {
+    // Regression: cycling view modes used to leave the previous view's
+    // per-index selectable mask in place. When the next view called
+    // `set_item_count` (i.e. "no mask, just count — treat all rows as
+    // selectable"), the stale mask still drove `is_selectable`, so some
+    // Worktree rows in the project-grouped view became unreachable with
+    // up/down navigation.
+    let mut state = TreeListState::new();
+    state.set_selectable(vec![true, false, true, false, true]);
+    // Move to a row the mask still allows.
+    state.select(Some(0));
+
+    // Switching to "no mask" mode (what ProjectGrouped does).
+    state.set_item_count(5);
+
+    // Every index in [0, 5) should now be selectable, so `next()` from
+    // 0 must land on 1, not skip to 2.
+    state.next();
+    assert_eq!(
+        state.selected(),
+        Some(1),
+        "set_item_count should clear the prior set_selectable mask"
+    );
+    state.next();
+    assert_eq!(state.selected(), Some(2));
+    state.next();
+    assert_eq!(state.selected(), Some(3));
+}
+
+#[test]
 fn test_set_item_count_clamps_selection() {
     let mut state = TreeListState::new();
     state.set_item_count(10);
@@ -814,6 +844,48 @@ fn test_program_suffix_hidden_when_programs_uniform() {
         !lines[1].contains("(claude)"),
         "uniform programs should not render suffix: {:?}",
         lines[1]
+    );
+}
+
+#[test]
+fn test_program_suffix_hidden_when_only_args_differ() {
+    // Same base program with differing args is not "mixed": no suffix shown.
+    let items = vec![
+        make_project("proj", 2),
+        make_worktree_with_program("sess-a", "claude"),
+        make_worktree_with_program("sess-b", "claude --mode auto"),
+    ];
+    let lines = render_tree(&items, 60, 4);
+    assert!(
+        !lines[1].contains("(claude)"),
+        "args-only difference should not render suffix: {:?}",
+        lines[1]
+    );
+    assert!(
+        !lines[2].contains("(claude"),
+        "args-only difference should not render suffix: {:?}",
+        lines[2]
+    );
+}
+
+#[test]
+fn test_program_suffix_shows_base_name_only_when_mixed() {
+    // Different base programs trigger the suffix, but args are stripped from display.
+    let items = vec![
+        make_project("proj", 2),
+        make_worktree_with_program("sess-a", "codex"),
+        make_worktree_with_program("sess-b", "claude --mode auto"),
+    ];
+    let lines = render_tree(&items, 60, 4);
+    assert!(
+        lines[1].contains("(codex)"),
+        "expected base program suffix: {:?}",
+        lines[1]
+    );
+    assert!(
+        lines[2].contains("(claude)") && !lines[2].contains("--mode"),
+        "expected base name only, no args: {:?}",
+        lines[2]
     );
 }
 

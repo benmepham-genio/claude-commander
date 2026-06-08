@@ -50,6 +50,14 @@ pub struct Config {
     /// Interval in seconds between GitHub PR checks (0 = disabled)
     pub pr_check_interval_secs: u64,
 
+    /// Enable periodic fast-forward of each project's main branch from origin.
+    /// When disabled (default) no background fetch/FF runs on project branches.
+    pub project_pull_enabled: bool,
+
+    /// Interval in seconds between project-branch pulls. Minimum enforced
+    /// at 60s by the settings UI to avoid thrashing.
+    pub project_pull_interval_secs: u64,
+
     /// Label names that mark an open PR as awaiting reviewer action (case-insensitive).
     /// When any of these labels are present on an open PR, the PR badge is coloured
     /// with the "review" colour (light purple) instead of the regular open colour.
@@ -150,6 +158,8 @@ impl Default for Config {
             editor_gui: None,
             shell_program: std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string()),
             pr_check_interval_secs: 120,
+            project_pull_enabled: true,
+            project_pull_interval_secs: 3600,
             pr_review_labels: default_pr_review_labels(),
             fetch_before_create: true,
             resume_session: true,

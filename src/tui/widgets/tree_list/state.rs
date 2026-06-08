@@ -85,9 +85,16 @@ impl TreeListState {
         }
     }
 
-    /// Update item count and ensure selection is valid
+    /// Update item count and ensure selection is valid.
+    ///
+    /// Also clears any per-index `selectable` mask installed by a prior
+    /// `set_selectable` call — `set_item_count` is the "no mask, every row
+    /// is selectable" entry point, and a stale mask from another view
+    /// would otherwise make rows at the same indices unreachable with
+    /// up/down navigation.
     pub fn set_item_count(&mut self, count: usize) {
         self.item_count = count;
+        self.selectable.clear();
 
         // Ensure selection is still valid
         if let Some(selected) = self.list_state.selected() {

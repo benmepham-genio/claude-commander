@@ -27,6 +27,12 @@ brew tap sizeak/tap
 brew install claude-commander
 ```
 
+### Arch Linux (AUR)
+
+```bash
+yay -S claude-commander
+```
+
 ### Cargo
 
 Install directly from GitHub:
@@ -65,7 +71,14 @@ cargo release <patch|minor|major|X.Y.Z> --execute   # actually release
 
 Every invocation is a dry-run by default; add `--execute` once the printed plan looks right. The command bumps the version in `Cargo.toml`, refreshes `Cargo.lock`, creates a GPG-signed commit (`Bump version to X.Y.Z`) and a GPG-signed tag (`vX.Y.Z`), and pushes both to `origin/main`.
 
-The tag push triggers `.github/workflows/publish-tap.yml`, which creates the GitHub release with auto-generated notes and bumps the formula in [`sizeak/homebrew-tap`](https://github.com/sizeak/homebrew-tap) so `brew upgrade claude-commander` sees the new version within ~60 seconds.
+The tag push triggers `.github/workflows/publish-tap.yml`, which creates the GitHub release with auto-generated notes and bumps the formula in [`sizeak/homebrew-tap`](https://github.com/sizeak/homebrew-tap) so `brew upgrade claude-commander` sees the new version within ~60 seconds. In parallel, `.github/workflows/publish-aur.yml` rewrites the `sha256sums` line in `packaging/aur/PKGBUILD` against the new GitHub source tarball and pushes the result to the [`claude-commander`](https://aur.archlinux.org/packages/claude-commander) AUR package so `yay -Syu claude-commander` picks it up.
+
+The AUR job depends on:
+
+- A repo secret `AUR_SSH_PRIVATE_KEY` containing the private half of an SSH key registered against the maintainer's [aur.archlinux.org](https://aur.archlinux.org) account.
+- The package already existing on AUR — the first publish must be done by hand (`git clone ssh://aur@aur.archlinux.org/claude-commander.git`, copy `packaging/aur/PKGBUILD`, run `makepkg --printsrcinfo > .SRCINFO`, commit and push). Every subsequent tag is handled by the workflow.
+
+`cargo-release` keeps `pkgver` in `packaging/aur/PKGBUILD` in sync with `Cargo.toml` via the `pre-release-replacements` block in `release.toml`; the workflow fills in `sha256sums` at publish time.
 
 ## Usage
 
@@ -78,14 +91,26 @@ claude-commander
 ### Commands
 
 ```bash
-# List active sessions (add --all to include stopped)
+# List active sessions (add --all to include stopped, --json for machine-readable output)
 claude-commander list
 
 # Create a new session
 claude-commander new "feature-auth" --path /path/to/repo
 
+# Create a session with an initial prompt (starts working immediately)
+claude-commander new "fix-auth" --initial-prompt "Fix the auth bypass in login.rs" --effort high
+
+# Create a session in plan mode, forking from a specific branch
+claude-commander new "feature-api" --base-branch develop --mode plan
+
+# Create a session placed directly in a specific section
+claude-commander new "feature-ui" --section "Needs Review"
+
 # Attach to a session
 claude-commander attach feature-auth
+
+# Dump recent terminal output from a session (default 100 lines, max 10000)
+claude-commander log feature-auth --lines 200
 
 # Show configuration
 claude-commander config
@@ -172,6 +197,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 |-----|--------|
 | `j/k` or `↑/↓` or `Ctrl-n/p` | Navigate session list |
 | `Space` | Quick-switch palette (sessions and commands) |
+| `Ctrl-Space` | Quick-switch palette (same shortcut as the in-session switcher) |
 | `Shift+Space` | Command palette (commands only) |
 | `>` (as first char in palette) | Filter palette to commands only |
 | `Enter` | Attach to selected session |
@@ -187,6 +213,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `o` | Open PR in browser (when the session has a PR) |
 | `S` | Scan directory for git repos and add them as projects |
 | `s` | Open shell in worktree |
+| `v` | Cycle session list view: Project → Sections → Section Stacks (requires `[[sections]]` config) |
 | palette only | Collapse/expand section (press on any item in the section, or `Enter` on the section header) |
 | palette only | Move session to section (manual override; see [Session List Sections](#session-list-sections)) |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
@@ -264,6 +291,20 @@ ui_refresh_fps = 30
 
 # Interval in seconds between GitHub PR checks (0 = disabled)
 pr_check_interval_secs = 120
+
+# Periodically fast-forward each project's main branch from origin.
+# When enabled, runs `git fetch origin <main>` and advances the local
+# `<main>` ref whenever a fast-forward is possible. If `<main>` is the
+# currently checked-out branch in the project repo, `git merge --ff-only`
+# is used when the working tree is clean. The pull is held back (and the
+# project row shows a ⚠ badge) when the working tree is dirty, the branch
+# has diverged from origin, or `<main>` is checked out in another worktree.
+# Default: enabled.
+project_pull_enabled = true
+
+# Interval in seconds between project-branch pulls. Minimum 60.
+# Default: 3600 (one hour).
+project_pull_interval_secs = 3600
 
 # Use rounded border corners (╭╮╰╯) instead of square (┌┐└┘)
 rounded_borders = false

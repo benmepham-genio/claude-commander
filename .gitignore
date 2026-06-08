@@ -16,4 +16,7 @@ Thumbs.db
 .env.local
 
 # cargo-mutants output (see scripts/mutants.sh, .cargo/mutants.toml)
-/mutants.out/
+/mutants.out*/
+
+# claude-commander
+.claude/worktrees/

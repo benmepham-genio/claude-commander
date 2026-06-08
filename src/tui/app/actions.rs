@@ -89,13 +89,19 @@ impl App {
         }
         if let Some(session_id) = self.ui_state.selected_session_id {
             info!("Getting attach command for session: {}", session_id);
-            match self.session_manager.get_attach_command(&session_id).await {
+            match self
+                .service
+                .session_manager()
+                .get_attach_command(&session_id)
+                .await
+            {
                 Ok(cmd) => {
                     info!("Got attach command: {}", cmd);
                     // Clear unread flag when attaching
                     let sid = session_id;
                     let _ = self
-                        .store
+                        .service
+                        .store()
                         .mutate(move |state| {
                             if let Some(session) = state.get_session_mut(&sid) {
                                 session.unread = false;
@@ -116,14 +122,16 @@ impl App {
         } else if let Some(mr_id) = self.ui_state.selected_multi_repo_id {
             info!("Getting attach command for multi-repo session: {}", mr_id);
             match self
-                .session_manager
+                .service
+                .session_manager()
                 .get_multi_repo_attach_command(&mr_id)
                 .await
             {
                 Ok(cmd) => {
                     let sid = mr_id;
                     let _ = self
-                        .store
+                        .service
+                        .store()
                         .mutate(move |state| {
                             if let Some(session) = state.get_multi_repo_session_mut(&sid) {
                                 session.unread = false;
@@ -151,7 +159,8 @@ impl App {
         }
         if let Some(session_id) = self.ui_state.selected_session_id {
             match self
-                .session_manager
+                .service
+                .session_manager()
                 .get_shell_attach_command(&session_id)
                 .await
             {
@@ -167,7 +176,8 @@ impl App {
             }
         } else if let Some(project_id) = self.ui_state.selected_project_id {
             match self
-                .session_manager
+                .service
+                .session_manager()
                 .get_project_shell_attach_command(&project_id)
                 .await
             {
@@ -183,7 +193,8 @@ impl App {
             }
         } else if let Some(mr_id) = self.ui_state.selected_multi_repo_id {
             match self
-                .session_manager
+                .service
+                .session_manager()
                 .get_multi_repo_shell_attach_command(&mr_id)
                 .await
             {
@@ -214,7 +225,8 @@ impl App {
             let claude_name = current_tmux_name.trim_end_matches("-sh").to_string();
             // Verify the Claude session exists
             if self
-                .session_manager
+                .service
+                .session_manager()
                 .tmux
                 .session_exists(&claude_name)
                 .await?
@@ -228,7 +240,7 @@ impl App {
 
         // We're in a Claude session — find the matching session ID and ensure shell exists
         let session_id = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             state
                 .sessions
                 .values()
@@ -238,7 +250,8 @@ impl App {
 
         if let Some(session_id) = session_id {
             let shell_name = self
-                .session_manager
+                .service
+                .session_manager()
                 .ensure_shell_session(&session_id)
                 .await?;
             return Ok(shell_name);
@@ -246,7 +259,7 @@ impl App {
 
         // Try project-level shell
         let project_id = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             state
                 .projects
                 .values()
@@ -256,7 +269,8 @@ impl App {
 
         if let Some(project_id) = project_id {
             let shell_name = self
-                .session_manager
+                .service
+                .session_manager()
                 .ensure_project_shell_session(&project_id)
                 .await?;
             return Ok(shell_name);
@@ -264,7 +278,7 @@ impl App {
 
         // Multi-repo session: look up by tmux_session_name and ensure its shell.
         let mr_id = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             state
                 .multi_repo_sessions
                 .values()
@@ -274,7 +288,8 @@ impl App {
 
         if let Some(mr_id) = mr_id {
             let shell_name = self
-                .session_manager
+                .service
+                .session_manager()
                 .ensure_multi_repo_shell_session(&mr_id)
                 .await?;
             return Ok(shell_name);
@@ -303,7 +318,7 @@ impl App {
             .to_string();
 
         let path = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             state
                 .sessions
                 .values()
@@ -357,7 +372,7 @@ impl App {
             return;
         }
         let path = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             if let Some(session_id) = self.ui_state.selected_session_id {
                 state
                     .sessions
@@ -405,7 +420,7 @@ impl App {
             return;
         };
         let pr_url = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             state
                 .sessions
                 .get(&session_id)
@@ -440,7 +455,7 @@ impl App {
     pub(super) async fn handle_new_session(&mut self) {
         if let Some(project_id) = self.ui_state.selected_project_id {
             let repo_path = {
-                let state = self.store.read().await;
+                let state = self.service.store().read().await;
                 state.get_project(&project_id).map(|p| p.repo_path.clone())
             };
             let existing_branches = repo_path.and_then(|p| existing_branch_names(&p));
@@ -474,7 +489,7 @@ impl App {
             return;
         };
         let resolved = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             state
                 .get_session(&selected_session_id)
                 .and_then(|selected| {
@@ -494,7 +509,7 @@ impl App {
             return;
         };
         let repo_path = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             state.get_project(&project_id).map(|p| p.repo_path.clone())
         };
         let existing_branches = repo_path.and_then(|p| existing_branch_names(&p));
@@ -528,7 +543,7 @@ impl App {
     /// Handle `Cascade resume` — continue a previously paused cascade.
     pub(super) async fn handle_cascade_resume(&mut self) {
         let paused_at = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             state.cascade_paused_at
         };
         let Some(sid) = paused_at else {
@@ -561,7 +576,7 @@ impl App {
         ));
 
         let agent_states = self.ui_state.agent_states.clone();
-        let mgr = self.session_manager.clone();
+        let mgr = self.service.session_manager().clone();
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
             let result = mgr
@@ -604,7 +619,7 @@ impl App {
 
     /// Handle `Cascade abandon` — clear the paused state without merging.
     pub(super) async fn handle_cascade_abandon(&mut self) {
-        match self.session_manager.cascade_abandon().await {
+        match self.service.cascade_abandon().await {
             Ok(()) => {
                 self.ui_state.status_message = Some((
                     "Cascade pause cleared".to_string(),
@@ -637,7 +652,7 @@ impl App {
         ));
 
         let agent_states = self.ui_state.agent_states.clone();
-        let mgr = self.session_manager.clone();
+        let mgr = self.service.session_manager().clone();
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
             let result = match action {
@@ -672,7 +687,7 @@ impl App {
                 sessions_merged,
             }) => {
                 let title = {
-                    let state = self.store.read().await;
+                    let state = self.service.store().read().await;
                     state
                         .get_session(&at)
                         .map(|s| s.title.clone())
@@ -709,7 +724,7 @@ impl App {
         };
 
         let repo_path = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             match state.get_project(&project_id) {
                 Some(p) => p.repo_path.clone(),
                 None => {
@@ -834,7 +849,8 @@ impl App {
         let title = branch_name.clone();
 
         let session_id = match self
-            .session_manager
+            .service
+            .session_manager()
             .prepare_session(&project_id, title, None, Some(branch_name.clone()))
             .await
         {
@@ -857,10 +873,13 @@ impl App {
         self.update_selection();
 
         // Spawn background task for heavy work (same pattern as NewSession)
-        let session_manager = self.session_manager.clone();
+        let session_manager = self.service.session_manager().clone();
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
-            match session_manager.finalize_session(&session_id).await {
+            match session_manager
+                .finalize_session(&session_id, None, None)
+                .await
+            {
                 Ok(sid) => {
                     let _ = tx
                         .send(AppEvent::StateUpdate(StateUpdate::SessionCreated {
@@ -897,7 +916,7 @@ impl App {
     /// Non-empty queries are ranked by fuzzy score (best match first);
     /// empty queries fall back to alphabetical title order.
     pub(super) async fn gather_quick_switch_matches(&self, query: &str) -> Vec<QuickSwitchMatch> {
-        let state = self.store.read().await;
+        let state = self.service.store().read().await;
         let mut scored: Vec<(i64, QuickSwitchMatch)> = Vec::new();
 
         for session in state.sessions.values() {
@@ -1176,7 +1195,7 @@ impl App {
     /// transient status message) when nothing qualifies.
     pub(super) async fn handle_delete_merged_pr_sessions(&mut self) {
         let merged: Vec<(SessionId, String)> = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             state
                 .sessions
                 .values()
@@ -1229,7 +1248,7 @@ impl App {
         session_id: SessionId,
     ) -> crate::error::Result<()> {
         let cleanup_data = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             state.get_session(&session_id).map(|s| {
                 let repo_path = state
                     .get_project(&s.project_id)
@@ -1243,7 +1262,8 @@ impl App {
             })
         };
 
-        self.store
+        self.service
+            .store()
             .mutate(move |state| {
                 state.remove_session(&session_id);
             })
@@ -1255,7 +1275,7 @@ impl App {
         self.refresh_list_items().await;
 
         if let Some((tmux_name, shell_tmux_name, worktree_path, repo_path)) = cleanup_data {
-            let tmux = self.session_manager.tmux.clone();
+            let tmux = self.service.session_manager().tmux.clone();
             let tx = self.event_loop.sender();
             tokio::spawn(async move {
                 background::cleanup_session_tmux(
@@ -1362,7 +1382,10 @@ impl App {
     }
 
     /// Apply a manual section move chosen in the picker palette.
-    /// `target = Some(name)` sets the override; `target = None` clears it.
+    /// `target = Some(name)` sets the override; `target = None` is the
+    /// "Auto" entry, which must fully re-evaluate from the predicates
+    /// rather than honour the forward-only rule that `apply_assignment`
+    /// uses for the background poller.
     pub(super) async fn apply_section_move(
         &mut self,
         session_id: SessionId,
@@ -1371,11 +1394,19 @@ impl App {
         let sections = self.config.sections.clone();
         let now = chrono::Utc::now();
         let _ = self
-            .store
+            .service
+            .store()
             .mutate(move |state| {
                 if let Some(session) = state.get_session_mut(&session_id) {
-                    session.section_override = target;
-                    crate::session::apply_assignment(session, &sections, now);
+                    match target {
+                        Some(name) => {
+                            session.section_override = Some(name);
+                            crate::session::apply_assignment(session, &sections, now);
+                        }
+                        None => {
+                            crate::session::clear_override_and_reassign(session, &sections, now);
+                        }
+                    }
                 }
             })
             .await;
@@ -1390,7 +1421,7 @@ impl App {
             return;
         };
         let current_title = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             match state.get_session(&session_id) {
                 Some(s) => s.title.clone(),
                 None => return,
@@ -1420,7 +1451,8 @@ impl App {
                 // Insert placeholder session immediately (no blocking modal)
                 self.ui_state.modal = Modal::None;
                 let session_id = match self
-                    .session_manager
+                    .service
+                    .session_manager()
                     .prepare_session(&project_id, value, None, None)
                     .await
                 {
@@ -1443,10 +1475,13 @@ impl App {
                 self.update_selection();
 
                 // Spawn background task for heavy work
-                let session_manager = self.session_manager.clone();
+                let session_manager = self.service.session_manager().clone();
                 let tx = self.event_loop.sender();
                 tokio::spawn(async move {
-                    match session_manager.finalize_session(&session_id).await {
+                    match session_manager
+                        .finalize_session(&session_id, None, None)
+                        .await
+                    {
                         Ok(sid) => {
                             let _ = tx
                                 .send(AppEvent::StateUpdate(StateUpdate::SessionCreated {
@@ -1481,7 +1516,8 @@ impl App {
                 // Insert placeholder session immediately (no blocking modal)
                 self.ui_state.modal = Modal::None;
                 let session_id = match self
-                    .session_manager
+                    .service
+                    .session_manager()
                     .prepare_session(&project_id, value, None, None)
                     .await
                 {
@@ -1499,7 +1535,8 @@ impl App {
                 // from the parent's branch and to inject the PR-base context
                 // into the Claude launch command.
                 if let Err(e) = self
-                    .store
+                    .service
+                    .store()
                     .mutate(move |state| {
                         if let Some(s) = state.get_session_mut(&session_id) {
                             s.stack_parent_session_id = Some(parent_session_id);
@@ -1523,10 +1560,13 @@ impl App {
                 self.update_selection();
 
                 // Spawn background task for heavy work
-                let session_manager = self.session_manager.clone();
+                let session_manager = self.service.session_manager().clone();
                 let tx = self.event_loop.sender();
                 tokio::spawn(async move {
-                    match session_manager.finalize_session(&session_id).await {
+                    match session_manager
+                        .finalize_session(&session_id, None, None)
+                        .await
+                    {
                         Ok(sid) => {
                             let _ = tx
                                 .send(AppEvent::StateUpdate(StateUpdate::SessionCreated {
@@ -1555,7 +1595,7 @@ impl App {
                     return;
                 }
 
-                match self.session_manager.add_project(path).await {
+                match self.service.add_project(path).await {
                     Ok(project_id) => {
                         self.ui_state.status_message = Some((
                             format!("Added project {}", project_id),
@@ -1586,7 +1626,8 @@ impl App {
                     return;
                 }
                 let _ = self
-                    .store
+                    .service
+                    .store()
                     .mutate(move |state| {
                         if let Some(session) = state.get_session_mut(&session_id) {
                             session.title = new_title;
@@ -1613,7 +1654,7 @@ impl App {
 
                 // If the path itself is a git repo, just add it directly
                 if path.join(".git").exists() {
-                    match self.session_manager.add_project(path).await {
+                    match self.service.add_project(path).await {
                         Ok(project_id) => {
                             self.ui_state.status_message = Some((
                                 format!("Added project {}", project_id),
@@ -1643,7 +1684,7 @@ impl App {
                     message: format!("Scanning {} for git repos…", path.display()),
                 };
 
-                match self.session_manager.scan_directory(&path).await {
+                match self.service.scan_directory(&path).await {
                     Ok(result) => {
                         if result.added == 0 && result.skipped == 0 {
                             self.ui_state.modal = Modal::Error {
@@ -1715,7 +1756,7 @@ impl App {
                 }
             }
             ConfirmAction::RestartSession { session_id } => {
-                match self.session_manager.restart_session(&session_id).await {
+                match self.service.restart_session(&session_id).await {
                     Ok(_) => {
                         self.ui_state.status_message = Some((
                             "Session restarted".to_string(),
@@ -1731,7 +1772,7 @@ impl App {
                 }
             }
             ConfirmAction::DeleteMultiRepoSession { session_id } => {
-                let session_manager = self.session_manager.clone();
+                let session_manager = self.service.session_manager().clone();
                 let tx = self.event_loop.sender();
                 self.ui_state.selected_multi_repo_id = None;
                 self.ui_state.status_message = Some((
@@ -1756,7 +1797,7 @@ impl App {
             ConfirmAction::RemoveProject { project_id } => {
                 // 1. Capture project and session data before removal
                 let cleanup_data = {
-                    let state = self.store.read().await;
+                    let state = self.service.store().read().await;
                     state.get_project(&project_id).map(|project| {
                         let repo_path = project.repo_path.clone();
                         let shell_tmux = project.shell_tmux_session_name.clone();
@@ -1779,7 +1820,8 @@ impl App {
 
                 // 2. Remove from state immediately so the UI updates
                 if let Err(e) = self
-                    .store
+                    .service
+                    .store()
                     .mutate(move |state| {
                         state.remove_project(&project_id);
                     })
@@ -1799,7 +1841,7 @@ impl App {
 
                 // 3. Spawn background cleanup (kill all tmux sessions + remove worktrees)
                 if let Some((repo_path, shell_tmux, sessions)) = cleanup_data {
-                    let tmux = self.session_manager.tmux.clone();
+                    let tmux = self.service.session_manager().tmux.clone();
                     let tx = self.event_loop.sender();
                     tokio::spawn(async move {
                         // Kill project shell tmux session
@@ -1825,7 +1867,7 @@ impl App {
 
     /// Open the multi-repo project picker modal.
     pub(super) async fn handle_new_multi_repo_session(&mut self) {
-        let state = self.store.read().await;
+        let state = self.service.store().read().await;
         if state.project_count() < 2 {
             self.ui_state.status_message = Some((
                 "Need at least 2 projects registered".to_string(),
@@ -1855,7 +1897,8 @@ impl App {
         title: String,
     ) {
         let session_id = match self
-            .session_manager
+            .service
+            .session_manager()
             .prepare_multi_repo_session(project_ids, title, None)
             .await
         {
@@ -1870,7 +1913,7 @@ impl App {
 
         self.refresh_list_items().await;
 
-        let session_manager = self.session_manager.clone();
+        let session_manager = self.service.session_manager().clone();
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
             match session_manager

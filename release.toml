@@ -1,7 +1,8 @@
 # Release automation driven by cargo-release.
 # Run `cargo release patch` for a dry-run; add `--execute` to actually release.
-# The GitHub release itself and the Homebrew tap bump are handled by
-# .github/workflows/publish-tap.yml, which fires on tag push.
+# The GitHub release itself, the Homebrew tap bump, and the AUR publish are
+# handled by .github/workflows/publish-tap.yml and publish-aur.yml, which fire
+# on tag push.
 
 sign-commit = true
 sign-tag    = true
@@ -16,3 +17,10 @@ publish = false
 
 # Only cut releases from main.
 allow-branch = ["main"]
+
+# Keep the AUR PKGBUILD's pkgver in sync with Cargo.toml at release-commit
+# time. The sha256sums field is rewritten by .github/workflows/publish-aur.yml
+# once the GitHub release tarball exists.
+pre-release-replacements = [
+  { file = "packaging/aur/PKGBUILD", search = "^pkgver=.*$", replace = "pkgver={{version}}", exactly = 1 },
+]

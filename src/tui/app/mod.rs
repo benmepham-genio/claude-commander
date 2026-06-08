@@ -5,7 +5,7 @@
 //! - User input handling
 //! - Background state updates
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -40,11 +40,13 @@ use super::widgets::{
     InfoContent, InfoProjectData, InfoSessionData, InfoView, InfoViewState, Preview, PreviewState,
     TreeList, TreeListState,
 };
+use crate::api::CommanderService;
 use crate::config::{BindableAction, Config, ConfigStore, StateStore};
 use crate::error::{Result, TuiError};
 use crate::git::{
-    AiSummary, DiffInfo, EnrichedPrInfo, PrCheckResult, check_pr_for_branch, diff_hash,
-    fetch_branch_summary, fetch_enriched_pr, is_gh_available,
+    AiSummary, BlockReason, DiffInfo, EnrichedPrInfo, PrCheckResult, PullOutcome,
+    check_pr_for_branch, diff_hash, fetch_branch_summary, fetch_enriched_pr, is_gh_available,
+    run_project_pull,
 };
 use crate::session::{
     AgentState, MultiRepoSessionId, ProjectId, SessionId, SessionListItem, SessionManager,
@@ -93,6 +95,19 @@ pub enum RightPaneView {
     Preview,
     Info,
     Shell,
+}
+
+// `ViewMode` lives in `crate::config` so that `AppState` can persist it.
+// Re-exported here so existing call sites in this module's submodules
+// (which all do `use super::*;`) keep compiling unchanged.
+pub use crate::config::ViewMode;
+
+/// A single entry in the pre-computed stack chain for the Info pane.
+#[derive(Debug, Clone)]
+pub struct StackChainEntry {
+    pub title: String,
+    pub status: SessionStatus,
+    pub is_current: bool,
 }
 
 /// Modal dialog state
@@ -494,6 +509,25 @@ pub struct AppUiState {
     /// Last left-mouse click on a session-list row: (list index, timestamp).
     /// Used to detect double-click on the same row within `DOUBLE_CLICK_WINDOW`.
     pub last_left_click: Option<(usize, Instant)>,
+    /// Current list view mode (project-grouped vs section-grouped).
+    pub view_mode: ViewMode,
+    /// Pre-computed stack chain for the selected session (empty if not stacked).
+    pub stack_chain: Vec<StackChainEntry>,
+    /// When each project last completed a background pull attempt
+    /// (success or block). Drives the per-project interval scheduler.
+    pub last_project_pull: HashMap<ProjectId, Instant>,
+    /// Projects whose most recent pull was held back, with the reason.
+    /// Cleared when a subsequent attempt advances or finds nothing to do.
+    pub project_pull_blocked: HashMap<ProjectId, BlockReason>,
+    /// Projects with a pull task currently in flight, so we don't double-spawn.
+    pub project_pull_in_flight: std::collections::HashSet<ProjectId>,
+    /// When the app launched. Used to give the background pull task a short
+    /// grace period before its first fire after startup.
+    pub started_at: Instant,
+    /// When the project-pull scheduler last swept the project list. A cheap
+    /// global throttle so the per-tick check doesn't acquire the state lock
+    /// and clone the project list on every render frame.
+    pub last_project_pull_sweep: Option<Instant>,
 }
 
 impl Default for AppUiState {
@@ -533,6 +567,13 @@ impl Default for AppUiState {
             cascade_paused: false,
             collapsed_sections: std::collections::HashSet::new(),
             last_left_click: None,
+            view_mode: ViewMode::default(),
+            stack_chain: Vec::new(),
+            last_project_pull: HashMap::new(),
+            project_pull_blocked: HashMap::new(),
+            project_pull_in_flight: std::collections::HashSet::new(),
+            started_at: Instant::now(),
+            last_project_pull_sweep: None,
         }
     }
 }
@@ -622,12 +663,8 @@ impl AppUiState {
 pub struct App {
     /// Local config cache — refreshed from config_store on tick when file changes
     config: Config,
-    /// Shared config store (hot-reloaded from disk)
-    config_store: Arc<ConfigStore>,
-    /// Concurrent-safe persistent state store
-    store: Arc<StateStore>,
-    /// Session manager
-    session_manager: SessionManager,
+    /// Unified service layer — owns SessionManager, StateStore, and ConfigStore
+    service: CommanderService,
     /// UI state
     ui_state: AppUiState,
     /// Event loop
@@ -645,12 +682,7 @@ impl App {
     /// Create a new application
     pub fn new(config_store: Arc<ConfigStore>, store: Arc<StateStore>) -> Self {
         let config = config_store.read().clone();
-        let theme = Theme::default();
-        let session_manager = SessionManager::new(
-            config_store.clone(),
-            store.clone(),
-            theme.tmux_status_style(),
-        );
+        let service = CommanderService::new(config_store, store);
 
         let base = config
             .theme
@@ -663,9 +695,7 @@ impl App {
 
         Self {
             config,
-            config_store,
-            store,
-            session_manager,
+            service,
             ui_state: AppUiState::default(),
             event_loop: EventLoop::new(),
             theme,
@@ -677,7 +707,7 @@ impl App {
     /// Run the application
     pub async fn run(&mut self) -> Result<()> {
         // Check tmux is available
-        self.session_manager.check_tmux().await?;
+        self.service.check_tmux().await?;
 
         // One-time setup
         self.cleanup_stale_creating_sessions().await;
@@ -698,7 +728,7 @@ impl App {
 
         // Start background state sync for cross-instance changes
         if self.config.state_sync_interval_ms > 0 {
-            let store = self.store.clone();
+            let store = self.service.store().clone();
             let tx = self.event_loop.sender();
             let interval_ms = self.config.state_sync_interval_ms;
             tokio::spawn(async move {
@@ -722,10 +752,10 @@ impl App {
 
         // Start background agent state polling
         if self.config.agent_state_poll_interval_ms > 0 {
-            let store = self.store.clone();
+            let store = self.service.store().clone();
             let tx = self.event_loop.sender();
             let interval_ms = self.config.agent_state_poll_interval_ms;
-            let tmux = self.session_manager.tmux.clone();
+            let tmux = self.service.session_manager().tmux.clone();
             tokio::spawn(async move {
                 let cache_ttl = Duration::from_millis(interval_ms.saturating_sub(500).max(500));
                 let mut detector = AgentStateDetector::new(tmux, cache_ttl);
@@ -756,6 +786,18 @@ impl App {
                 }
             });
         }
+
+        // Restore the last-selected view if the user has previously chosen
+        // one. If they haven't, fall back to the section-aware default:
+        // SectionGrouped when sections are configured, else ProjectGrouped.
+        // Any section view falls back to ProjectGrouped at refresh time if
+        // sections have since been removed from config.
+        let persisted_view = self.service.store().read().await.view_mode;
+        self.ui_state.view_mode = match persisted_view {
+            Some(view) => view,
+            None if !self.config.sections.is_empty() => ViewMode::SectionGrouped,
+            None => ViewMode::ProjectGrouped,
+        };
 
         // Restore last selection from persisted state
         self.refresh_list_items().await;
@@ -808,11 +850,18 @@ impl App {
                         // Attach to session via async PTY bridge (supports Ctrl+Q detach, Ctrl+\ shell toggle)
                         info!("Executing attach command: {}", cmd);
                         let session_name = cmd.split_whitespace().last().unwrap_or("").to_string();
+                        // Track every session viewed during this attach
+                        // (including ones reached via the in-tmux switcher or
+                        // shell toggle) so we can refresh just their agent
+                        // state on the way out — see the post-loop block.
+                        let mut viewed_sessions: HashSet<String> = HashSet::new();
                         if !session_name.is_empty() {
                             let mut current_session = session_name.clone();
                             let mut consecutive_ends: u8 = 0;
 
                             loop {
+                                viewed_sessions.insert(current_session.clone());
+
                                 let editor_triggers =
                                     crate::config::keybindings::editor_trigger_bytes(
                                         &self.config.keybindings,
@@ -828,7 +877,8 @@ impl App {
                                 // switcher can sort Alt+Tab-style by MRU.
                                 let to_stamp = current_session.clone();
                                 if let Err(e) = self
-                                    .store
+                                    .service
+                                    .store()
                                     .mutate(move |state| {
                                         if let Some(session) = state
                                             .sessions
@@ -866,6 +916,7 @@ impl App {
                                 // necessarily the one we entered with. Trust the outcome.
                                 let switched_via_popup = outcome.final_session != current_session;
                                 current_session = outcome.final_session;
+                                viewed_sessions.insert(current_session.clone());
                                 if switched_via_popup {
                                     // Picking a new session in the popup invalidates the
                                     // shell-toggle pair (which is tied to a specific
@@ -936,7 +987,8 @@ impl App {
                                         if is_claude_session && consecutive_ends < 3 {
                                             consecutive_ends += 1;
                                             match self
-                                                .session_manager
+                                                .service
+                                                .session_manager()
                                                 .restart_session_fresh_by_tmux_name(
                                                     &current_session,
                                                 )
@@ -980,10 +1032,48 @@ impl App {
                         // Flush stdin again after detach to discard any stale input
                         crate::tmux::flush_stdin();
 
-                        // Restart the input reader after detach
+                        // Restart the input reader after detach. This also
+                        // drains the event channel, discarding any
+                        // AgentStatesUpdated events queued while attached.
                         info!("Returned from attach, restarting input reader");
                         self.event_loop.restart_input();
-                        // Loop continues, TUI resumes with state preserved
+
+                        // Refresh agent state for just the sessions we viewed,
+                        // setting their freshly-observed state directly. We
+                        // deliberately do NOT clear the whole map: clearing
+                        // blanks every spinner in the tree until the next poll
+                        // (~3s) and wipes the unread baseline for background
+                        // sessions, silently dropping genuine Working→Idle
+                        // notifications that occurred while we were attached.
+                        // Setting the viewed sessions directly (bypassing the
+                        // unread diff) avoids re-flagging them as unread, since
+                        // the user was watching them.
+                        if !viewed_sessions.is_empty() {
+                            let targets: Vec<(SessionId, String, String)> = {
+                                let store_state = self.service.store().read().await;
+                                store_state
+                                    .sessions
+                                    .values()
+                                    .filter(|s| s.status == SessionStatus::Running)
+                                    .filter(|s| {
+                                        viewed_sessions.iter().any(|name| s.matches_tmux_name(name))
+                                    })
+                                    .map(|s| (s.id, s.tmux_session_name.clone(), s.program.clone()))
+                                    .collect()
+                            };
+                            if !targets.is_empty() {
+                                let mut detector = AgentStateDetector::new(
+                                    self.service.session_manager().tmux.clone(),
+                                    Duration::from_millis(0),
+                                );
+                                let refreshed = detector.detect_all(&targets).await;
+                                state::apply_viewed_session_refresh(
+                                    &mut self.ui_state.agent_states,
+                                    refreshed,
+                                );
+                                self.refresh_list_items().await;
+                            }
+                        }
                     }
                     None => {
                         // Save selection before quitting

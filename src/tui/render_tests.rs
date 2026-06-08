@@ -604,6 +604,7 @@ fn test_info_view_session_with_pr() {
                     diff_hash: 123,
                 }),
                 summary_key_hint: Some("g".into()),
+                stack_chain: &[],
             };
             let info_view = InfoView::new(InfoContent::Session(data), &theme)
                 .block(
@@ -668,6 +669,7 @@ fn test_info_view_long_text_wraps() {
                     diff_hash: 1,
                 }),
                 summary_key_hint: Some("g".into()),
+                stack_chain: &[],
             };
             let info_view = InfoView::new(InfoContent::Session(data), &theme)
                 .block(
@@ -709,6 +711,7 @@ fn test_info_view_summary_placeholder() {
                 enriched_pr: None,
                 ai_summary: None,
                 summary_key_hint: Some("g".into()),
+                stack_chain: &[],
             };
             let info_view = InfoView::new(InfoContent::Session(data), &theme)
                 .block(
@@ -1045,6 +1048,7 @@ fn test_preview_to_info_view_switch_no_clear() {
                 enriched_pr: None,
                 ai_summary: None,
                 summary_key_hint: Some("g".into()),
+                stack_chain: &[],
             };
             let info_view = InfoView::new(InfoContent::Session(data), &theme)
                 .block(

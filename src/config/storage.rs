@@ -13,6 +13,7 @@ use crate::session::{
 };
 
 use super::Config;
+use super::view_mode::ViewMode;
 
 /// Persistent application state
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -56,6 +57,13 @@ pub struct AppState {
     #[serde(default)]
     pub version: String,
 
+    /// Last-selected session list view (Project / Sections / Stacks).
+    /// `None` means the user has never made a choice — the TUI then picks a
+    /// section-aware default at startup (SectionGrouped if sections are
+    /// configured, otherwise ProjectGrouped).
+    #[serde(default)]
+    pub view_mode: Option<ViewMode>,
+
     /// Path to save state to (not serialized, set at load time)
     #[serde(skip)]
     state_path: Option<PathBuf>,
@@ -74,6 +82,41 @@ impl AppState {
     pub fn load() -> Result<Self> {
         let path = Config::state_file_path()?;
         Self::load_from(&path)
+    }
+
+    /// Load state, or print a clear refusal to stderr and exit non-zero
+    /// when the state file exists but cannot be parsed. Use this from CLI
+    /// entry points instead of `.unwrap_or_else(|_| AppState::new())`,
+    /// which silently drops the user's projects into a fresh empty state
+    /// and then risks overwriting the real file on the next save.
+    ///
+    /// "File doesn't exist" is not an error — `load_from` already returns
+    /// a fresh `AppState` in that case.
+    pub fn load_or_exit() -> Self {
+        let path = match Config::state_file_path() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Failed to determine state file path: {}", e);
+                std::process::exit(2);
+            }
+        };
+        match Self::load_from(&path) {
+            Ok(state) => state,
+            Err(e) => {
+                eprintln!(
+                    "Refusing to start: state file exists but failed to load.\n\
+                     Path: {}\n\
+                     Error: {}\n\
+                     \n\
+                     Your data is still on disk. To investigate, open the file\n\
+                     above; to start fresh, move it aside (e.g. `mv … ….bak`)\n\
+                     and relaunch.",
+                    path.display(),
+                    e,
+                );
+                std::process::exit(2);
+            }
+        }
     }
 
     /// Load state from a specific path
@@ -353,6 +396,48 @@ mod tests {
             Some("In Progress")
         );
         assert_eq!(loaded_session.entered_section_at, stamp);
+    }
+
+    #[test]
+    fn test_view_mode_roundtrip() {
+        use super::super::ViewMode;
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+
+        let mut state = AppState::new();
+        state.view_mode = Some(ViewMode::SectionStacks);
+        state.save_to(&state_path).unwrap();
+
+        let loaded = AppState::load_from(&state_path).unwrap();
+        assert_eq!(loaded.view_mode, Some(ViewMode::SectionStacks));
+    }
+
+    #[test]
+    fn test_view_mode_legacy_section_grouped_with_stacks_alias_loads_as_section_stacks() {
+        // Earlier on this branch the variant was called
+        // `SectionGroupedWithStacks`. Any state.json written by that build
+        // must still parse — otherwise main.rs's `load().unwrap_or_else(|_|
+        // AppState::new())` drops the user's whole project list. Keep this
+        // alias as long as those files might exist in the wild.
+        use super::super::ViewMode;
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+        std::fs::write(&state_path, r#"{"view_mode": "SectionGroupedWithStacks"}"#).unwrap();
+        let loaded = AppState::load_from(&state_path).unwrap();
+        assert_eq!(loaded.view_mode, Some(ViewMode::SectionStacks));
+    }
+
+    #[test]
+    fn test_view_mode_missing_field_loads_as_none() {
+        // Older state files written before this field existed should
+        // deserialize cleanly and present no preference, so the app can
+        // fall back to a section-aware default.
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+        std::fs::write(&state_path, "{}").unwrap();
+
+        let loaded = AppState::load_from(&state_path).unwrap();
+        assert!(loaded.view_mode.is_none());
     }
 
     #[test]

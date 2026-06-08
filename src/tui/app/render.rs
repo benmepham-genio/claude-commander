@@ -67,18 +67,30 @@ impl App {
             .constraints([Constraint::Length(1), Constraint::Min(0)])
             .split(area);
 
-        // Full-width heading bar with dark grey background
+        // Full-width heading bar with dark grey background. The label reflects
+        // the active view so the user can see at a glance which mode is on.
         let heading_style = self.theme.status_bar();
-        let heading =
-            Paragraph::new(Line::styled(" Sessions:", heading_style)).style(heading_style);
+        let heading = Paragraph::new(Line::styled(
+            self.ui_state.view_mode.heading_label(),
+            heading_style,
+        ))
+        .style(heading_style);
         frame.render_widget(heading, chunks[0]);
+
+        let blocked: std::collections::HashMap<ProjectId, &str> = self
+            .ui_state
+            .project_pull_blocked
+            .iter()
+            .map(|(id, r)| (*id, r.as_str()))
+            .collect();
 
         let tree_list = TreeList::new(&self.ui_state.list_items, &self.theme)
             .tick(self.ui_state.tick_count)
             .highlight_style(self.theme.selection().add_modifier(Modifier::BOLD))
             .review_labels(&self.config.pr_review_labels)
             .invert_pr_label_color(self.config.invert_pr_label_color)
-            .show_session_program(self.config.show_session_program);
+            .show_session_program(self.config.show_session_program)
+            .pull_blocked_projects(blocked);
 
         frame.render_stateful_widget(
             tree_list,
@@ -258,6 +270,7 @@ impl App {
                     enriched_pr,
                     ai_summary,
                     summary_key_hint,
+                    stack_chain: &self.ui_state.stack_chain,
                 })
             } else {
                 InfoContent::Empty
@@ -287,10 +300,16 @@ impl App {
             });
 
             if let Some((name, repo_path, main_branch)) = project_data {
+                let pull_blocked = self
+                    .ui_state
+                    .project_pull_blocked
+                    .get(&project_id)
+                    .map(|r| r.as_str().to_string());
                 InfoContent::Project(InfoProjectData {
                     name,
                     repo_path,
                     main_branch,
+                    pull_blocked,
                 })
             } else {
                 InfoContent::Empty
@@ -371,7 +390,7 @@ impl App {
             None
         };
 
-        let restart_needed = self.config_store.restart_required();
+        let restart_needed = self.service.restart_required();
 
         let session_count = self
             .ui_state

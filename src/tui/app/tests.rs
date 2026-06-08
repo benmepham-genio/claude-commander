@@ -460,3 +460,325 @@ fn test_adjust_list_scroll_short_list_stays_at_top() {
     assert_eq!(adjust_list_scroll(2, 0, 10), 0);
     assert_eq!(adjust_list_scroll(0, 0, 10), 0);
 }
+
+// ---------------------------------------------------------------------------
+// ViewMode toggle
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_view_mode_default_is_project_grouped() {
+    let s = AppUiState::default();
+    assert_eq!(s.view_mode, ViewMode::ProjectGrouped);
+}
+
+#[test]
+fn test_toggle_view_mode_always_available_in_palette() {
+    let s = AppUiState::default();
+    assert!(s.is_command_available(BindableAction::ToggleViewMode));
+}
+
+#[test]
+fn test_view_mode_cycles_through_three_views() {
+    assert_eq!(ViewMode::ProjectGrouped.next(), ViewMode::SectionGrouped);
+    assert_eq!(ViewMode::SectionGrouped.next(), ViewMode::SectionStacks);
+    assert_eq!(ViewMode::SectionStacks.next(), ViewMode::ProjectGrouped);
+}
+
+#[test]
+fn test_view_mode_heading_label() {
+    assert_eq!(
+        ViewMode::ProjectGrouped.heading_label(),
+        " Sessions [Project]:"
+    );
+    assert_eq!(
+        ViewMode::SectionGrouped.heading_label(),
+        " Sessions [Sections]:"
+    );
+    assert_eq!(
+        ViewMode::SectionStacks.heading_label(),
+        " Sessions [Section Stacks]:"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Stack chain info in Info pane
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_info_view_renders_stack_chain() {
+    use crate::tui::widgets::{InfoContent, InfoSessionData, InfoView};
+
+    let theme = crate::tui::theme::Theme::basic();
+    let diff = crate::git::DiffInfo::empty();
+    let chain = vec![
+        StackChainEntry {
+            title: "base".into(),
+            status: SessionStatus::Running,
+            is_current: false,
+        },
+        StackChainEntry {
+            title: "child".into(),
+            status: SessionStatus::Running,
+            is_current: true,
+        },
+    ];
+    let data = InfoSessionData {
+        title: "child".into(),
+        branch: "child-br".into(),
+        created_at: "now".into(),
+        status: SessionStatus::Running,
+        program: "claude".into(),
+        worktree_path: "/tmp".into(),
+        diff_info: &diff,
+        pr_number: None,
+        pr_url: None,
+        pr_merged: false,
+        enriched_pr: None,
+        ai_summary: None,
+        summary_key_hint: None,
+        stack_chain: &chain,
+    };
+    let view = InfoView::new(InfoContent::Session(data), &theme);
+    let lines = view.build_lines();
+    let text: String = lines
+        .iter()
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("Stack (2 sessions)"),
+        "should show stack header"
+    );
+    assert!(text.contains("base"), "should list base session");
+    assert!(text.contains("← current"), "should mark current session");
+}
+
+#[test]
+fn test_info_view_stack_section_renders_above_pr_section() {
+    // The stack tells the user where this session sits in the PR graph,
+    // which they typically scan before getting into PR-specific details
+    // (state, labels, CI, body). Order in the rendered lines should be
+    // Stack → PR, not the other way around.
+    use crate::tui::widgets::{InfoContent, InfoSessionData, InfoView};
+
+    let theme = crate::tui::theme::Theme::basic();
+    let diff = crate::git::DiffInfo::empty();
+    let chain = vec![
+        StackChainEntry {
+            title: "base".into(),
+            status: SessionStatus::Running,
+            is_current: false,
+        },
+        StackChainEntry {
+            title: "child".into(),
+            status: SessionStatus::Running,
+            is_current: true,
+        },
+    ];
+    let data = InfoSessionData {
+        title: "child".into(),
+        branch: "child-br".into(),
+        created_at: "now".into(),
+        status: SessionStatus::Running,
+        program: "claude".into(),
+        worktree_path: "/tmp".into(),
+        diff_info: &diff,
+        pr_number: Some(7),
+        pr_url: Some("https://example.com/pr/7".into()),
+        pr_merged: false,
+        enriched_pr: None,
+        ai_summary: None,
+        summary_key_hint: None,
+        stack_chain: &chain,
+    };
+    let view = InfoView::new(InfoContent::Session(data), &theme);
+    let lines = view.build_lines();
+    let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+
+    let stack_idx = text
+        .iter()
+        .position(|l| l.contains("Stack (2 sessions)"))
+        .expect("stack header should be present");
+    let pr_idx = text
+        .iter()
+        .position(|l| l.contains("PR #7"))
+        .expect("PR header should be present");
+    assert!(
+        stack_idx < pr_idx,
+        "stack section (line {stack_idx}) should appear before PR section (line {pr_idx})"
+    );
+}
+
+#[test]
+fn test_info_view_no_stack_section_for_unstacked() {
+    use crate::tui::widgets::{InfoContent, InfoSessionData, InfoView};
+
+    let theme = crate::tui::theme::Theme::basic();
+    let diff = crate::git::DiffInfo::empty();
+    let data = InfoSessionData {
+        title: "solo".into(),
+        branch: "solo-br".into(),
+        created_at: "now".into(),
+        status: SessionStatus::Running,
+        program: "claude".into(),
+        worktree_path: "/tmp".into(),
+        diff_info: &diff,
+        pr_number: None,
+        pr_url: None,
+        pr_merged: false,
+        enriched_pr: None,
+        ai_summary: None,
+        summary_key_hint: None,
+        stack_chain: &[],
+    };
+    let view = InfoView::new(InfoContent::Session(data), &theme);
+    let lines = view.build_lines();
+    let text: String = lines
+        .iter()
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !text.contains("Stack"),
+        "unstacked session should not show stack section"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Settings: build_settings_rows + apply_settings_edit for worktrees_dir
+// ---------------------------------------------------------------------------
+
+use crate::config::{AppState, ConfigStore, StateStore};
+
+fn make_test_app() -> App {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_path = tmp.path().join("config.toml");
+    let state_path = tmp.path().join("state.json");
+    let config = Config::default();
+    let config_store = Arc::new(ConfigStore::with_path(config, config_path));
+    let store = Arc::new(StateStore::with_path(AppState::new(), state_path));
+    // Leak the TempDir so paths stay valid for the lifetime of the test.
+    std::mem::forget(tmp);
+    App::new(config_store, store)
+}
+
+#[test]
+fn test_worktrees_dir_row_shows_default_when_none() {
+    let app = make_test_app();
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let row = rows
+        .iter()
+        .find(|r| r.field_key == "worktrees_dir")
+        .unwrap();
+    assert_eq!(row.value, "(default)");
+}
+
+#[test]
+fn test_worktrees_dir_row_shows_custom_path() {
+    let mut app = make_test_app();
+    app.config.worktrees_dir = Some(std::path::PathBuf::from("/custom/path"));
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let row = rows
+        .iter()
+        .find(|r| r.field_key == "worktrees_dir")
+        .unwrap();
+    assert_eq!(row.value, "/custom/path");
+}
+
+#[test]
+fn test_apply_worktrees_dir_sets_custom_path() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(SettingsTab::General, "worktrees_dir", "/my/worktrees");
+    assert_eq!(
+        app.config.worktrees_dir,
+        Some(std::path::PathBuf::from("/my/worktrees"))
+    );
+}
+
+#[test]
+fn test_apply_worktrees_dir_empty_clears_to_none() {
+    let mut app = make_test_app();
+    app.config.worktrees_dir = Some(std::path::PathBuf::from("/custom"));
+    app.apply_settings_edit(SettingsTab::General, "worktrees_dir", "");
+    assert_eq!(app.config.worktrees_dir, None);
+}
+
+#[test]
+fn test_apply_worktrees_dir_default_sentinel_clears_to_none() {
+    let mut app = make_test_app();
+    app.config.worktrees_dir = Some(std::path::PathBuf::from("/custom"));
+    app.apply_settings_edit(SettingsTab::General, "worktrees_dir", "(default)");
+    assert_eq!(app.config.worktrees_dir, None);
+}
+
+#[tokio::test]
+async fn ctrl_space_opens_quick_switch_in_tree() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = make_test_app();
+    assert!(matches!(app.ui_state.modal, Modal::None));
+
+    let key = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
+    app.handle_input(InputEvent::Key(key)).await;
+
+    assert!(
+        matches!(
+            app.ui_state.modal,
+            Modal::QuickSwitch {
+                mode: PaletteMode::Unified,
+                ..
+            }
+        ),
+        "Ctrl+Space should open the unified quick-switch palette, got {:?}",
+        app.ui_state.modal
+    );
+}
+
+#[test]
+fn test_project_pull_rows_present_in_general_tab() {
+    let app = make_test_app();
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let enabled = rows
+        .iter()
+        .find(|r| r.field_key == "project_pull_enabled")
+        .expect("project_pull_enabled row missing");
+    assert_eq!(enabled.value, "true");
+    let interval = rows
+        .iter()
+        .find(|r| r.field_key == "project_pull_interval_secs")
+        .expect("project_pull_interval_secs row missing");
+    assert_eq!(interval.value, "3600");
+}
+
+#[test]
+fn test_apply_project_pull_enabled_round_trip() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(SettingsTab::General, "project_pull_enabled", "true");
+    assert!(app.config.project_pull_enabled);
+    app.apply_settings_edit(SettingsTab::General, "project_pull_enabled", "false");
+    assert!(!app.config.project_pull_enabled);
+}
+
+#[test]
+fn test_apply_project_pull_interval_accepts_60_and_above() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(SettingsTab::General, "project_pull_interval_secs", "120");
+    assert_eq!(app.config.project_pull_interval_secs, 120);
+    app.apply_settings_edit(SettingsTab::General, "project_pull_interval_secs", "60");
+    assert_eq!(app.config.project_pull_interval_secs, 60);
+}
+
+#[test]
+fn test_apply_project_pull_interval_rejects_below_60() {
+    let mut app = make_test_app();
+    app.config.project_pull_interval_secs = 3600;
+    app.apply_settings_edit(SettingsTab::General, "project_pull_interval_secs", "30");
+    assert_eq!(
+        app.config.project_pull_interval_secs, 3600,
+        "values below 60 must be rejected"
+    );
+    assert!(
+        app.ui_state.status_message.is_some(),
+        "rejection should surface a status message"
+    );
+}

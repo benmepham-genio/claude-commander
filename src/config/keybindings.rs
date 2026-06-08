@@ -58,6 +58,7 @@ pub enum BindableAction {
     NewMultiRepoSession,
     MoveToSection,
     ToggleSection,
+    ToggleViewMode,
 }
 
 impl BindableAction {
@@ -86,6 +87,7 @@ impl BindableAction {
         Self::NewMultiRepoSession,
         Self::MoveToSection,
         Self::ToggleSection,
+        Self::ToggleViewMode,
         Self::TogglePane,
         Self::TogglePaneReverse,
         Self::ShrinkLeftPane,
@@ -138,6 +140,7 @@ impl BindableAction {
             Self::NewMultiRepoSession => "new_multi_repo_session",
             Self::MoveToSection => "move_to_section",
             Self::ToggleSection => "toggle_section",
+            Self::ToggleViewMode => "toggle_view_mode",
         }
     }
 
@@ -179,6 +182,7 @@ impl BindableAction {
             Self::NewMultiRepoSession => "New multi-repo session",
             Self::MoveToSection => "Move session to section…",
             Self::ToggleSection => "Collapse/expand section",
+            Self::ToggleViewMode => "Cycle project / sections / section stacks view",
         }
     }
 
@@ -205,7 +209,8 @@ impl BindableAction {
             | Self::ScanDirectory
             | Self::NewMultiRepoSession
             | Self::MoveToSection
-            | Self::ToggleSection => "Session Management",
+            | Self::ToggleSection
+            | Self::ToggleViewMode => "Session Management",
             Self::TogglePane
             | Self::TogglePaneReverse
             | Self::ShrinkLeftPane
@@ -257,6 +262,7 @@ impl FromStr for BindableAction {
             "new_multi_repo_session" => Ok(Self::NewMultiRepoSession),
             "move_to_section" => Ok(Self::MoveToSection),
             "toggle_section" => Ok(Self::ToggleSection),
+            "toggle_view_mode" => Ok(Self::ToggleViewMode),
             _ => Err(format!("unknown action: {s}")),
         }
     }
@@ -605,6 +611,10 @@ impl Default for KeyBindings {
             vec![kb(KeyCode::Char('S'), shift)],
         );
         bindings.insert(BindableAction::ToggleSection, vec![]);
+        bindings.insert(
+            BindableAction::ToggleViewMode,
+            vec![kb(KeyCode::Char('v'), none)],
+        );
 
         // Info Pane
         bindings.insert(
@@ -899,6 +909,13 @@ mod tests {
         let kb = KeyBindings::default();
         let key = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE);
         assert_eq!(kb.resolve(&key), Some(BindableAction::NewStackedSession));
+    }
+
+    #[test]
+    fn test_toggle_view_mode_default_bound_to_v() {
+        let kb = KeyBindings::default();
+        let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&key), Some(BindableAction::ToggleViewMode));
     }
 
     #[test]

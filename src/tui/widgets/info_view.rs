@@ -12,6 +12,7 @@ use ratatui::{
 
 use crate::git::{AiSummary, ChecksStatus, DiffInfo, EnrichedPrInfo, PrState};
 use crate::session::SessionStatus;
+use crate::tui::app::StackChainEntry;
 use crate::tui::theme::Theme;
 
 /// Data required to render the Info pane for a session.
@@ -30,6 +31,8 @@ pub struct InfoSessionData<'a> {
     pub ai_summary: Option<&'a AiSummary>,
     /// Display string for the generate-summary hotkey (e.g. "g"). None = AI disabled.
     pub summary_key_hint: Option<String>,
+    /// Pre-computed stack chain (empty if session is not stacked).
+    pub stack_chain: &'a [StackChainEntry],
 }
 
 /// Data required to render the Info pane for a project.
@@ -37,6 +40,9 @@ pub struct InfoProjectData {
     pub name: String,
     pub repo_path: String,
     pub main_branch: String,
+    /// When set, the background project-branch pull is currently held back
+    /// for this project. Displayed as a "Pull: " line in the Info pane.
+    pub pull_blocked: Option<String>,
 }
 
 /// Info pane content — either session or project data.
@@ -158,12 +164,23 @@ impl<'a> InfoView<'a> {
             ]));
         }
 
-        // Separator
+        // Stack first — where this session sits in the PR graph is the
+        // higher-level orientation; PR specifics come after.
+        let separator = || {
+            Line::from(Span::styled(
+                " ─────────────────────────────────",
+                self.secondary_style(),
+            ))
+        };
+
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            " ─────────────────────────────────",
-            self.secondary_style(),
-        )));
+        lines.push(separator());
+
+        if !data.stack_chain.is_empty() {
+            self.build_stack_chain_lines(data, &mut lines);
+            lines.push(Line::from(""));
+            lines.push(separator());
+        }
 
         // PR section
         self.build_pr_lines(data, &mut lines);
@@ -191,6 +208,38 @@ impl<'a> InfoView<'a> {
         }
 
         lines
+    }
+
+    fn build_stack_chain_lines(&self, data: &InfoSessionData<'_>, lines: &mut Vec<Line<'static>>) {
+        let label = self.label_style();
+        let value = self.value_style();
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(" Stack ({} sessions)", data.stack_chain.len()),
+            label,
+        )));
+        for entry in data.stack_chain {
+            let (icon, color) = match entry.status {
+                SessionStatus::Running => ("●", self.theme.status_running),
+                SessionStatus::Stopped => ("○", self.theme.status_stopped),
+                SessionStatus::Creating => ("…", self.theme.status_creating),
+                SessionStatus::Merging => ("⟳", self.theme.status_creating),
+                SessionStatus::CascadePaused => ("⏸", self.theme.agent_waiting),
+                SessionStatus::Pushing => ("↑", self.theme.status_creating),
+            };
+            let mut spans = vec![
+                Span::styled("   ", value),
+                Span::styled(icon, Style::default().fg(color)),
+                Span::styled(format!(" {}", entry.title), value),
+            ];
+            if entry.is_current {
+                spans.push(Span::styled(
+                    "  ← current",
+                    Style::default().fg(self.theme.text_accent),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
     }
 
     fn build_pr_lines(&self, data: &InfoSessionData<'_>, lines: &mut Vec<Line<'static>>) {
@@ -326,7 +375,7 @@ impl<'a> InfoView<'a> {
         let label = self.label_style();
         let value = self.value_style();
 
-        vec![
+        let mut lines = vec![
             Line::from(vec![
                 Span::styled(" Project: ", label),
                 Span::styled(data.name.clone(), value),
@@ -339,7 +388,17 @@ impl<'a> InfoView<'a> {
                 Span::styled(" Branch:  ", label),
                 Span::styled(data.main_branch.clone(), value),
             ]),
-        ]
+        ];
+        if let Some(reason) = &data.pull_blocked {
+            lines.push(Line::from(vec![
+                Span::styled(" Pull:    ", label),
+                Span::styled(
+                    format!("⚠ blocked — {reason}"),
+                    Style::default().fg(self.theme.agent_waiting),
+                ),
+            ]));
+        }
+        lines
     }
 
     fn label_style(&self) -> Style {
@@ -455,6 +514,7 @@ mod tests {
             enriched_pr: None,
             ai_summary: None,
             summary_key_hint: Some("g".into()),
+            stack_chain: &[],
         };
         let view = InfoView::new(InfoContent::Session(data), &theme);
         let lines = view.build_lines();
@@ -495,6 +555,7 @@ mod tests {
                 diff_hash: 123,
             }),
             summary_key_hint: Some("g".into()),
+            stack_chain: &[],
         };
         let view = InfoView::new(InfoContent::Session(data), &theme);
         let lines = view.build_lines();
@@ -508,10 +569,25 @@ mod tests {
             name: "my-project".into(),
             repo_path: "/home/user/projects/my-project".into(),
             main_branch: "main".into(),
+            pull_blocked: None,
         };
         let view = InfoView::new(InfoContent::Project(data), &theme);
         let lines = view.build_lines();
         assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn test_info_view_project_pull_blocked() {
+        let theme = test_theme();
+        let data = InfoProjectData {
+            name: "my-project".into(),
+            repo_path: "/home/user/projects/my-project".into(),
+            main_branch: "main".into(),
+            pull_blocked: Some("Working tree dirty".into()),
+        };
+        let view = InfoView::new(InfoContent::Project(data), &theme);
+        let lines = view.build_lines();
+        assert_eq!(lines.len(), 4);
     }
 
     #[test]
@@ -532,6 +608,7 @@ mod tests {
             enriched_pr: None,
             ai_summary: Some(&AiSummary::Loading),
             summary_key_hint: Some("g".into()),
+            stack_chain: &[],
         };
         let view = InfoView::new(InfoContent::Session(data), &theme);
         let lines = view.build_lines();
@@ -562,6 +639,7 @@ mod tests {
             enriched_pr: None,
             ai_summary: Some(&summary),
             summary_key_hint: Some("g".into()),
+            stack_chain: &[],
         };
         let view = InfoView::new(InfoContent::Session(data), &theme);
         let lines = view.build_lines();
@@ -622,6 +700,7 @@ mod tests {
             enriched_pr: None,
             ai_summary: None,
             summary_key_hint: Some("g".into()),
+            stack_chain: &[],
         };
         let view = InfoView::new(InfoContent::Session(data), &theme);
         let lines = view.build_lines();

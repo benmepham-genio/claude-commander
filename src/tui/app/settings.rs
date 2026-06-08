@@ -31,6 +31,16 @@ impl App {
                         color_swatch: None,
                     },
                     SettingsRow {
+                        label: "Worktrees Directory".into(),
+                        value: c
+                            .worktrees_dir
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "(default)".into()),
+                        field_key: "worktrees_dir".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
                         label: "Per-Repo Worktree Dirs".into(),
                         value: c.per_repo_worktree_dirs.to_string(),
                         field_key: "per_repo_worktree_dirs".into(),
@@ -74,6 +84,18 @@ impl App {
                         label: "PR Check Interval (s)".into(),
                         value: c.pr_check_interval_secs.to_string(),
                         field_key: "pr_check_interval_secs".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "Project Pull Enabled".into(),
+                        value: c.project_pull_enabled.to_string(),
+                        field_key: "project_pull_enabled".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "Project Pull Interval (s)".into(),
+                        value: c.project_pull_interval_secs.to_string(),
+                        field_key: "project_pull_interval_secs".into(),
                         color_swatch: None,
                     },
                     SettingsRow {
@@ -720,6 +742,13 @@ impl App {
                 "default_program" => self.config.default_program = value.to_string(),
                 "branch_prefix" => self.config.branch_prefix = value.to_string(),
                 "shell_program" => self.config.shell_program = value.to_string(),
+                "worktrees_dir" => {
+                    self.config.worktrees_dir = if value.is_empty() || value == "(default)" {
+                        None
+                    } else {
+                        Some(PathBuf::from(value))
+                    };
+                }
                 "per_repo_worktree_dirs" => {
                     if let Ok(b) = value.parse::<bool>() {
                         self.config.per_repo_worktree_dirs = b;
@@ -759,6 +788,23 @@ impl App {
                         self.config.pr_check_interval_secs = v;
                     }
                 }
+                "project_pull_enabled" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.project_pull_enabled = b;
+                    }
+                }
+                "project_pull_interval_secs" => match value.parse::<u64>() {
+                    Ok(v) if v >= 60 => {
+                        self.config.project_pull_interval_secs = v;
+                    }
+                    Ok(_) => {
+                        self.ui_state.status_message = Some((
+                            "Project Pull Interval must be at least 60 seconds".into(),
+                            std::time::Instant::now() + std::time::Duration::from_secs(4),
+                        ));
+                    }
+                    Err(_) => {}
+                },
                 "max_concurrent_tmux" => {
                     if let Ok(v) = value.parse::<usize>() {
                         self.config.max_concurrent_tmux = v;
@@ -931,7 +977,7 @@ impl App {
 
         // Persist config via the store (updates mtime so hot-reload won't re-read our own write)
         let updated = self.config.clone();
-        if let Err(e) = self.config_store.mutate(|c| *c = updated) {
+        if let Err(e) = self.service.update_config(updated) {
             warn!("Failed to save config: {}", e);
         }
     }
@@ -1397,7 +1443,7 @@ impl App {
     /// Persist the current sections config to disk and reconcile session assignments.
     async fn save_sections_config(&mut self) {
         let updated = self.config.clone();
-        if let Err(e) = self.config_store.mutate(|c| *c = updated) {
+        if let Err(e) = self.service.update_config(updated) {
             warn!("Failed to save sections config: {}", e);
         }
         self.reconcile_section_assignments().await;

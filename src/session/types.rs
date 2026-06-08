@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Unique identifier for a project (git repository)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ProjectId(Uuid);
 
 impl ProjectId {
@@ -42,7 +42,7 @@ impl fmt::Display for ProjectId {
 }
 
 /// Unique identifier for a worktree session
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SessionId(Uuid);
 
 impl SessionId {
@@ -176,7 +176,8 @@ impl fmt::Display for SessionStatus {
 
 /// Sub-state of a Running Claude Code session, detected via pane content parsing.
 /// This is ephemeral (not persisted) and only meaningful when SessionStatus == Running.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentState {
     /// Claude is actively generating output
     Working,
@@ -553,6 +554,29 @@ pub fn stack_top(session_id: SessionId, project_sessions: &[&WorktreeSession]) -
     current
 }
 
+/// Walk up the stack chain starting from `session_id` to find the session at
+/// the bottom of its stack.
+///
+/// Returns the root session: the ancestor whose own `resolve_stack_parent`
+/// returns `None`. If the selected session is unstacked, returns it unchanged.
+/// Dual of [`stack_top`].
+///
+/// On fan-out (one parent with multiple children), every descendant resolves
+/// to the same root, so callers can use this to group an entire stack
+/// subgraph by a single identifier.
+pub fn stack_root(session_id: SessionId, project_sessions: &[&WorktreeSession]) -> SessionId {
+    let mut current = session_id;
+    // Bounded by session count to be safe against any malformed cycle.
+    for _ in 0..project_sessions.len() {
+        let this = project_sessions.iter().find(|s| s.id == current);
+        match this.and_then(|s| resolve_stack_parent(s, project_sessions)) {
+            Some(parent) => current = parent,
+            None => return current,
+        }
+    }
+    current
+}
+
 /// Linearise a stack from its base, returning `[base, child, grandchild, …]`.
 ///
 /// Walks downward the same way as `stack_top` — on each hop, the session whose
@@ -690,7 +714,7 @@ impl MultiRepoSession {
 
 /// Represents an item in the hierarchical session list
 /// Used for UI display and navigation
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionListItem {
     /// A project header
     Project {
@@ -1449,6 +1473,43 @@ mod tests {
         // separately).
         let base_id = SessionId::new();
         assert_eq!(stack_chain_from_base(base_id, &[]), vec![base_id]);
+    }
+
+    #[test]
+    fn stack_root_on_unstacked_session_returns_self() {
+        let s = session_with("solo", None, None);
+        assert_eq!(stack_root(s.id, &[&s]), s.id);
+    }
+
+    #[test]
+    fn stack_root_walks_up_chain() {
+        let base = session_with("base", None, None);
+        let mid = session_with("mid", None, Some(base.id));
+        let top = session_with("top", None, Some(mid.id));
+        let all = [&base, &mid, &top];
+        assert_eq!(stack_root(top.id, &all), base.id);
+        assert_eq!(stack_root(mid.id, &all), base.id);
+        assert_eq!(stack_root(base.id, &all), base.id);
+    }
+
+    #[test]
+    fn stack_root_with_fan_out_returns_same_root_for_all_descendants() {
+        // A→B and A→C; both branches share A as their root.
+        let base = session_with("base", None, None);
+        let mut a = session_with("a", None, Some(base.id));
+        a.created_at = Utc::now() - ChronoDuration::hours(2);
+        let mut b = session_with("b", None, Some(base.id));
+        b.created_at = Utc::now();
+        let all = [&base, &a, &b];
+        assert_eq!(stack_root(a.id, &all), base.id);
+        assert_eq!(stack_root(b.id, &all), base.id);
+    }
+
+    #[test]
+    fn stack_root_missing_session_returns_starting_id() {
+        // Defensive: walking from an id not in the slice just returns that id.
+        let phantom = SessionId::new();
+        assert_eq!(stack_root(phantom, &[]), phantom);
     }
 
     #[test]

@@ -136,6 +136,11 @@ pub enum StateUpdate {
     PushStackFinished {
         result: std::result::Result<crate::session::PushStackOutcome, String>,
     },
+    /// Background project-branch pull finished for one project.
+    ProjectPullFinished {
+        project_id: ProjectId,
+        outcome: crate::git::PullOutcome,
+    },
 }
 
 /// User commands triggered by input
@@ -221,6 +226,8 @@ pub enum UserCommand {
     MoveToSection,
     /// Collapse or expand the section containing the selected item.
     ToggleSection,
+    /// Toggle between project-grouped and section-grouped list views.
+    ToggleViewMode,
 }
 
 impl UserCommand {
@@ -291,6 +298,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::NewMultiRepoSession => Self::NewMultiRepoSession,
             BindableAction::MoveToSection => Self::MoveToSection,
             BindableAction::ToggleSection => Self::ToggleSection,
+            BindableAction::ToggleViewMode => Self::ToggleViewMode,
         }
     }
 }
@@ -768,6 +776,16 @@ mod tests {
             state: KeyEventState::empty(),
         };
         assert!(UserCommand::from_key(key, &b).is_none());
+    }
+
+    #[test]
+    fn test_toggle_view_mode_bound_to_v() {
+        let b = kb();
+        let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::ToggleViewMode)
+        ));
     }
 
     #[test]

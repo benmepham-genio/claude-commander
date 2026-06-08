@@ -59,6 +59,11 @@ impl App {
                         self.spawn_pr_status_check();
                     }
                 }
+
+                // Periodic project-branch pull
+                if self.config.project_pull_enabled && self.config.project_pull_interval_secs > 0 {
+                    self.maybe_spawn_project_pulls().await;
+                }
             }
 
             if self.ui_state.should_quit {
@@ -120,10 +125,10 @@ impl App {
 
     /// Check if `config.toml` has been modified externally and refresh the local cache.
     pub(super) fn check_config_reload(&mut self) {
-        match self.config_store.reload_if_changed() {
+        match self.service.reload_config() {
             Ok(true) => {
                 debug!("Config hot-reloaded from disk");
-                self.config = self.config_store.read().clone();
+                self.config = self.service.read_config();
                 let base = self
                     .config
                     .theme
