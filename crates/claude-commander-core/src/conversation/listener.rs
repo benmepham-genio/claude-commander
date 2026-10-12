@@ -131,6 +131,13 @@ impl PendingModes {
         self.0.push_back(mode);
     }
 
+    /// The mode of the recording that is live right now: the most recent
+    /// `Start`. Earlier entries are recordings already stopped whose WAVs are
+    /// still on their way, so a `Stop` always belongs to the last one.
+    fn live(&self) -> Option<VoiceMode> {
+        self.0.back().copied()
+    }
+
     /// Claim the mode belonging to the WAV that just arrived. An empty queue
     /// means the pairing has desynced (see the type docs), so this falls back to
     /// [`VoiceMode::Conversation`] — the destination that existed before
@@ -143,6 +150,24 @@ impl PendingModes {
             );
             VoiceMode::Conversation
         })
+    }
+}
+
+/// The media-gate signals to send when the mic closes on a recording of mode
+/// `live`.
+///
+/// Dictation also signals [`MediaSignal::Silence`] here: its transcript is typed
+/// somewhere, never submitted to the conversation, so no `TurnComplete` or
+/// spoken reply will ever arrive to release the gate — and nothing about the
+/// transcription outcome changes that. Signalling at stop rather than once the
+/// transcript is back resumes paused players the moment the user stops talking
+/// instead of after the STT round-trip. A conversation recording holds the gate
+/// until its reply has been spoken (`media.rs`).
+fn stop_signals(live: Option<VoiceMode>) -> &'static [MediaSignal] {
+    if live.is_some_and(VoiceMode::is_dictation) {
+        &[MediaSignal::RecordStopped, MediaSignal::Silence]
+    } else {
+        &[MediaSignal::RecordStopped]
     }
 }
 
@@ -278,19 +303,12 @@ pub fn spawn_listener(
                     // Stage 1 timing: WAV bytes in → transcript out.
                     let wav_bytes = wav.len();
                     let t0 = Instant::now();
+                    // Dictation released the media gate when its recording
+                    // stopped (`stop_signals`), and sends no `SpeakerCommand`
+                    // here either: start sent no Interrupt, so there is no mute
+                    // to lift, and a Resume would un-mute a reply the user
+                    // deliberately let keep playing.
                     let outcome = client.transcribe(wav).await;
-                    if mode.is_dictation() {
-                        // Dictation never reaches the conversation session, so no
-                        // `TurnComplete` will ever arrive to release the media gate
-                        // — and the gate resumes only on Silence, on TurnComplete
-                        // plus a speech end, or on the safety timeout (`media.rs`).
-                        // So signal Silence in *every* outcome, or paused players
-                        // stay paused until the safety timer rescues them. No
-                        // `SpeakerCommand` either way: start sent no Interrupt, so
-                        // there is no mute to lift, and a Resume here would un-mute
-                        // a reply the user deliberately let keep playing.
-                        media_signal(&gate, MediaSignal::Silence);
-                    }
                     // Dictation hears about every outcome (see `Transcript`);
                     // conversation only about text. Sent before the per-outcome
                     // bookkeeping below so the frontend's held notice is replaced
@@ -358,7 +376,9 @@ pub fn spawn_listener(
                     }
                     Some(ListenerCommand::Stop) => {
                         recorder.stop();
-                        media_signal(&gate, MediaSignal::RecordStopped);
+                        for &sig in stop_signals(pending.live()) {
+                            media_signal(&gate, sig);
+                        }
                     }
                     None => break, // sender dropped → end the task (releases mic)
                 },
@@ -372,6 +392,7 @@ pub fn spawn_listener(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conversation::media::{GateAction, MediaGate};
 
     /// Drain whatever commands are queued on the listener channel.
     fn drain(rx: &mut mpsc::UnboundedReceiver<ListenerCommand>) -> Vec<ListenerCommand> {
@@ -546,6 +567,54 @@ mod tests {
     fn pending_modes_empty_pop_falls_back_to_conversation() {
         let mut modes = PendingModes::default();
         assert_eq!(modes.pop_for_wav(), VoiceMode::Conversation);
+    }
+
+    #[test]
+    fn pending_modes_live_is_the_most_recent_start() {
+        // `Stop` belongs to the recording that is live, which is the last one
+        // started — even with an earlier recording's WAV still being transcribed.
+        let mut modes = PendingModes::default();
+        assert_eq!(modes.live(), None);
+        modes.push(VoiceMode::Conversation);
+        modes.push(VoiceMode::Dictation);
+        assert_eq!(modes.live(), Some(VoiceMode::Dictation));
+    }
+
+    /// Feed a recording's start and its stop-time signals through a real gate,
+    /// returning what the last stop-time signal decided.
+    fn gate_action_at_stop(mode: VoiceMode) -> GateAction {
+        let mut gate = MediaGate::default();
+        assert_eq!(gate.on(MediaSignal::RecordStarted), GateAction::Pause);
+        stop_signals(Some(mode))
+            .iter()
+            .map(|&s| gate.on(s))
+            .last()
+            .expect("a stop always signals RecordStopped")
+    }
+
+    #[test]
+    fn dictation_releases_media_as_soon_as_recording_stops() {
+        // No reply follows a dictation, so the music must not wait out the STT
+        // round-trip — it comes back the moment the mic closes.
+        assert_eq!(
+            gate_action_at_stop(VoiceMode::Dictation),
+            GateAction::Resume
+        );
+        assert_eq!(
+            gate_action_at_stop(VoiceMode::UiDictation),
+            GateAction::Resume
+        );
+    }
+
+    #[test]
+    fn conversation_holds_media_past_recording_stop() {
+        // A conversation turn is still to be answered (and spoken), so stopping
+        // the mic alone must not resume playback.
+        assert_eq!(
+            gate_action_at_stop(VoiceMode::Conversation),
+            GateAction::None
+        );
+        assert_eq!(stop_signals(None), [MediaSignal::RecordStopped]);
     }
 
     #[test]

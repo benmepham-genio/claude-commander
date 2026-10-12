@@ -106,7 +106,8 @@ pub enum MediaSignal {
     RecordStarted,
     /// The microphone closed (Alt-V pressed again / recording ended).
     RecordStopped,
-    /// Transcription produced nothing — no reply is coming.
+    /// No reply is coming: a conversation transcription produced nothing, or a
+    /// dictation recording stopped (its text is typed, never answered).
     Silence,
     /// The assistant finished the text of its turn.
     TurnComplete,
