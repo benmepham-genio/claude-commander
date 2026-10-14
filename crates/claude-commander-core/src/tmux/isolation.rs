@@ -59,3 +59,15 @@ impl TmuxTmpdir for pty_process::Command {
         self.env_remove(key)
     }
 }
+
+impl TmuxTmpdir for std::process::Command {
+    fn set_env(mut self, key: &str, val: &Path) -> Self {
+        self.env(key, val);
+        self
+    }
+
+    fn remove_env(mut self, key: &str) -> Self {
+        self.env_remove(key);
+        self
+    }
+}
