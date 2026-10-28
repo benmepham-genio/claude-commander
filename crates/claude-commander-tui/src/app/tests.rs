@@ -5687,9 +5687,30 @@ async fn review_toggle_file_reviewed_routes_to_owning_backend() {
     app.handle_review_key(mark, state).await;
 
     assert_eq!(
-        remote_mock(&app, BackendId(1)).toggled_reviewed_files(),
-        vec![(remote_sid, "a.rs".to_string())],
-        "toggle_file_reviewed must route to the owning backend, by display path"
+        remote_mock(&app, BackendId(1)).set_reviewed_files(),
+        vec![(remote_sid, "a.rs".to_string(), true)],
+        "set_file_reviewed must route to the owning backend, by display path"
+    );
+}
+
+#[tokio::test]
+async fn review_mark_key_asks_for_the_opposite_of_what_the_view_shows() {
+    // The store may hold a mark the view isn't showing (set by the CLI for
+    // newer content); `m` must ask for the state the user sees it flip to,
+    // never toggle the store, which would clear that mark.
+    let (mut app, remote_sid) = app_with_remote_session().await;
+    let mut state = review_state_for(remote_sid);
+    state.reviewed.insert("a.rs".to_string());
+    let mark = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('m'),
+        crossterm::event::KeyModifiers::NONE,
+    );
+
+    app.handle_review_key(mark, state).await;
+
+    assert_eq!(
+        remote_mock(&app, BackendId(1)).set_reviewed_files(),
+        vec![(remote_sid, "a.rs".to_string(), false)],
     );
 }
 
@@ -6179,6 +6200,79 @@ async fn remote_review_auto_refreshes_on_working_to_idle() {
         refreshed,
         "a remote session's review must auto-refresh on Working→Idle"
     );
+}
+
+#[tokio::test]
+async fn open_review_picks_up_marks_set_elsewhere_on_the_tick() {
+    // An agent marking files through `claude-commander review mark` writes the
+    // store, not this view; the once-a-second poll must fold the mark in
+    // without the user reopening the review.
+    let (mut app, remote_sid) = app_with_remote_session().await;
+    let state = review_state_for(remote_sid);
+    let file = &state.diff.files[0];
+    remote_mock(&app, BackendId(1)).set_reviewed_marks(vec![
+        claude_commander_protocol::api::ReviewedFileMark {
+            file: file.display_path().to_string(),
+            hash: claude_commander_viewmodel::review::hash_hex(file),
+        },
+    ]);
+    app.ui_state.modal = Modal::ReviewDiff(state);
+
+    // A remote session polls every fifth second, not every second.
+    for _ in 0..30 {
+        app.process_event(AppEvent::Tick).await;
+    }
+    assert!(
+        !app.ui_state.reviewed_poll_in_flight,
+        "a remote review must not poll every second"
+    );
+    for _ in 30..150 {
+        app.process_event(AppEvent::Tick).await;
+    }
+    assert!(app.ui_state.reviewed_poll_in_flight);
+    loop {
+        match app.event_loop.next().await.expect("a marks poll event") {
+            AppEvent::StateUpdate(su @ StateUpdate::ReviewedMarksPolled { .. }) => {
+                app.handle_state_update(su).await;
+                break;
+            }
+            _ => continue,
+        }
+    }
+
+    assert!(
+        app.open_review().unwrap().reviewed.contains("a.rs"),
+        "the externally set mark must show in the open view"
+    );
+    assert!(!app.ui_state.reviewed_poll_in_flight);
+}
+
+#[tokio::test]
+async fn a_failed_or_foreign_marks_poll_changes_nothing() {
+    let (mut app, remote_sid) = app_with_remote_session().await;
+    let mut state = review_state_for(remote_sid);
+    state.reviewed.insert("a.rs".to_string());
+    app.ui_state.modal = Modal::ReviewDiff(state);
+
+    // A failed read (`None`) clears the guard but must not touch the view.
+    app.ui_state.reviewed_poll_in_flight = true;
+    app.handle_state_update(StateUpdate::ReviewedMarksPolled {
+        session_id: remote_sid,
+        generation: 0,
+        marks: None,
+    })
+    .await;
+    assert!(!app.ui_state.reviewed_poll_in_flight);
+    assert!(app.open_review().unwrap().reviewed.contains("a.rs"));
+
+    // An empty store for some *other* session must not clear this one.
+    app.handle_state_update(StateUpdate::ReviewedMarksPolled {
+        session_id: SessionId::new(),
+        generation: 0,
+        marks: Some(Vec::new()),
+    })
+    .await;
+    assert!(app.open_review().unwrap().reviewed.contains("a.rs"));
 }
 
 #[tokio::test]

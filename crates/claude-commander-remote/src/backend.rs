@@ -29,6 +29,7 @@ use claude_commander_core::backend::{
 };
 use claude_commander_core::comment::{ApplyOutcome, Comment};
 use claude_commander_core::session::{ProjectId, ScanResult, SessionId};
+use claude_commander_protocol::api::ReviewedFileMark;
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
 use claude_commander_protocol::workspace::SetWorkspacesRequest;
 use claude_commander_protocol::ws::AttachKind as WsAttachKind;
@@ -463,9 +464,21 @@ impl CommanderBackend for RemoteBackend {
             .map_err(into_backend_error)
     }
 
-    async fn toggle_file_reviewed(&self, id: SessionId, display_path: String) -> BResult<bool> {
+    async fn set_file_reviewed(
+        &self,
+        id: SessionId,
+        display_path: String,
+        reviewed: bool,
+    ) -> BResult<bool> {
         self.client
-            .toggle_file_reviewed(id, display_path)
+            .set_file_reviewed(id, display_path, reviewed)
+            .await
+            .map_err(into_backend_error)
+    }
+
+    async fn reviewed_marks(&self, id: SessionId) -> BResult<Vec<ReviewedFileMark>> {
+        self.client
+            .reviewed_marks(id)
             .await
             .map_err(into_backend_error)
     }

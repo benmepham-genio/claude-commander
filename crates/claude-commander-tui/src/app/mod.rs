@@ -1774,6 +1774,9 @@ pub struct AppUiState {
     /// Whether a review-diff refresh re-compose is currently in flight, so the
     /// idle trigger and a manual refresh don't double-spawn.
     pub review_refresh_in_flight: bool,
+    /// A reviewed-marks poll for the open review is outstanding; see
+    /// `spawn_reviewed_marks_poll`.
+    pub reviewed_poll_in_flight: bool,
     /// Tick counter for animations (incremented each render tick)
     pub tick_count: u64,
     /// Throbber/spinner state for loading modals
@@ -1899,6 +1902,7 @@ impl Default for AppUiState {
             gh_available: false,
             enriched_pr_fetch_spawned_at: None,
             review_refresh_in_flight: false,
+            reviewed_poll_in_flight: false,
             terminal_size: Rect::default(),
             theme_workspace: None,
             tick_count: 0,

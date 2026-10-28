@@ -330,10 +330,11 @@ abstract class CommanderApi {
     required String sessionId,
   });
 
-  Future<bool> toggleFileReviewed({
+  Future<bool> setFileReviewed({
     required String handle,
     required String sessionId,
     required String displayPath,
+    required bool reviewed,
   });
 
   Future<Uint8List> fetchBlob({
@@ -785,14 +786,16 @@ class RustCommanderApi implements CommanderApi {
   }) => review.applyComments(handle: handle, sessionId: sessionId);
 
   @override
-  Future<bool> toggleFileReviewed({
+  Future<bool> setFileReviewed({
     required String handle,
     required String sessionId,
     required String displayPath,
-  }) => review.toggleFileReviewed(
+    required bool reviewed,
+  }) => review.setFileReviewed(
     handle: handle,
     sessionId: sessionId,
     displayPath: displayPath,
+    reviewed: reviewed,
   );
 
   @override

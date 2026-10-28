@@ -213,7 +213,7 @@ void main() {
 
   testWidgets('the reviewed checkbox is optimistic and guarded against '
       'double-tap', (tester) async {
-    // Gate toggleFileReviewed so the second tap arrives while the first is in
+    // Gate setFileReviewed so the second tap arrives while the first is in
     // flight; the _toggling guard must swallow it.
     final gate = GatedReviewApi();
     gate.openReviewResponse = reviewSnapshot(
@@ -233,13 +233,42 @@ void main() {
     await tester.tap(checkbox);
     await tester.pump();
 
-    expect(gate.countOf('toggleFileReviewed'), 1);
+    expect(gate.countOf('setFileReviewed'), 1);
 
     // Complete the flip; the optimistic set flips the checkbox to true.
     gate.releaseToggle(true);
     await tester.pumpAndSettle();
     final cb = tester.widget<Checkbox>(checkbox);
     expect(cb.value, isTrue);
+  });
+
+  testWidgets('the reviewed checkbox asks for the state it flips to, not a '
+      'toggle', (tester) async {
+    // The store may hold a mark this page isn't showing (set by the CLI since
+    // it loaded); a toggle would flip that instead of what the user sees.
+    api.openReviewResponse = reviewSnapshot(
+      files: [
+        reviewFile(displayPath: 'lib/a.dart'),
+        reviewFile(displayPath: 'lib/b.dart'),
+      ],
+      reviewed: ['lib/b.dart'],
+    );
+    await tester.pumpWidget(wrap());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(Checkbox).at(0));
+    await tester.pumpAndSettle();
+    expect(api.lastCall('setFileReviewed')?.args, {
+      'displayPath': 'lib/a.dart',
+      'reviewed': true,
+    });
+
+    await tester.tap(find.byType(Checkbox).at(1));
+    await tester.pumpAndSettle();
+    expect(api.lastCall('setFileReviewed')?.args, {
+      'displayPath': 'lib/b.dart',
+      'reviewed': false,
+    });
   });
 
   testWidgets('adding a comment does not setState after the hunk is disposed', (
@@ -620,7 +649,7 @@ class GatedCommentApi extends FakeCommanderApi {
   }
 }
 
-/// A [FakeCommanderApi] whose `toggleFileReviewed` blocks until released, so a
+/// A [FakeCommanderApi] whose `setFileReviewed` blocks until released, so a
 /// test can hold the flip in flight and exercise the `_toggling` guard.
 class GatedReviewApi extends FakeCommanderApi {
   final Completer<bool> _gate = Completer<bool>();
@@ -628,12 +657,18 @@ class GatedReviewApi extends FakeCommanderApi {
   void releaseToggle(bool result) => _gate.complete(result);
 
   @override
-  Future<bool> toggleFileReviewed({
+  Future<bool> setFileReviewed({
     required String handle,
     required String sessionId,
     required String displayPath,
+    required bool reviewed,
   }) {
-    calls.add(RecordedCall('toggleFileReviewed', {'displayPath': displayPath}));
+    calls.add(
+      RecordedCall('setFileReviewed', {
+        'displayPath': displayPath,
+        'reviewed': reviewed,
+      }),
+    );
     return _gate.future;
   }
 }

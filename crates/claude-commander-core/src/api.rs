@@ -28,13 +28,13 @@ use crate::comment::{
 use crate::config::{AppState, Config, ConfigStore, ProgramEntry, StateStore};
 use crate::error::{GitError, Result, SessionError};
 use crate::git::{
-    CloneJobs, CloneOutcome, ComposedDiff, FileDiff, GitBackend, PrCheckResult,
+    CloneJobs, CloneOutcome, ComposedDiff, GitBackend, ParsedDiff, PrCheckResult,
     clone_source_rejected, compose_review_diff, compute_branch_diff, diff_stat_summary,
     effective_pr_state, enrich_binary_sizes, is_gh_available, list_repos, list_worktrees_at,
     parse_unified_diff, prefer_remote_branch, read_base_blob, read_worktree_file, ref_exists_cli,
     run_clone,
 };
-use crate::reviewed::ReviewedStore;
+use crate::reviewed::{FileSelection, ReviewedStore, SetReviewedOutcome};
 use crate::session::workspace;
 use crate::session::{
     AgentState, CascadeOutcome, ProjectId, ScanResult, SessionId, SessionLookup, SessionManager,
@@ -44,6 +44,8 @@ use crate::session::{
 use crate::telemetry::{ConfigSnapshot, EnvFingerprint, FrontendInfo, Telemetry};
 use crate::term_caps::ColorMode;
 use crate::tmux::{AgentStateDetector, StatusBarInfo, TmuxExecutor};
+use claude_commander_protocol::api::ReviewedFileMark;
+use claude_commander_viewmodel::review::DiffHashes;
 
 /// High-level service that wraps `SessionManager`, state stores, and agent
 /// detection into a single entry point. Both the CLI and TUI route through
@@ -1425,7 +1427,13 @@ impl CommanderService {
 
     pub async fn delete_session(&self, id: &SessionId) -> Result<()> {
         self.telemetry.feature("session.delete");
-        self.manager.delete_session(id).await
+        self.manager.delete_session(id).await?;
+        // Best-effort: the session is already gone, so a leftover marks file
+        // is litter, not a failure to report.
+        if let Err(e) = self.reviewed.remove(*id).await {
+            tracing::warn!("Failed to remove reviewed marks for {id}: {e}");
+        }
+        Ok(())
     }
 
     /// Set a session's keep-alive flag (opt-out of auto-hibernation).
@@ -1450,8 +1458,9 @@ impl CommanderService {
         self.telemetry.feature("review.open");
         let (worktree_path, review_base) = self.review_target(session_id).await?;
         let base = review_base.git_ref(&worktree_path).await;
+        let composed_at = Utc::now();
         let composed = compose_review_diff(&worktree_path, &base).await?;
-        self.snapshot_from_raw(session_id, &worktree_path, base, composed)
+        self.snapshot_from_raw(session_id, &worktree_path, base, composed, composed_at)
             .await
     }
 
@@ -1468,12 +1477,13 @@ impl CommanderService {
     ) -> Result<Option<ReviewSnapshot>> {
         let (worktree_path, review_base) = self.review_target(session_id).await?;
         let base = review_base.git_ref(&worktree_path).await;
+        let composed_at = Utc::now();
         let composed = compose_review_diff(&worktree_path, &base).await?;
         if xxhash_rust::xxh3::xxh3_64(composed.raw.as_bytes()) == prev_hash {
             return Ok(None);
         }
         Ok(Some(
-            self.snapshot_from_raw(session_id, &worktree_path, base, composed)
+            self.snapshot_from_raw(session_id, &worktree_path, base, composed, composed_at)
                 .await?,
         ))
     }
@@ -1493,13 +1503,15 @@ impl CommanderService {
     /// Build a [`ReviewSnapshot`] from an already-composed unified diff: hash it
     /// for staleness detection, parse it, then drop orphaned comments, re-anchor
     /// the rest, and prune stale reviewed marks against the parsed diff
-    /// (persisting any changes).
+    /// (persisting any changes). `composed_at` is when the composition began:
+    /// marks set after it can't be judged against this diff.
     async fn snapshot_from_raw(
         &self,
         session_id: &SessionId,
         worktree_path: &Path,
         base: String,
         composed: ComposedDiff,
+        composed_at: DateTime<Utc>,
     ) -> Result<ReviewSnapshot> {
         let content_hash = xxhash_rust::xxh3::xxh3_64(composed.raw.as_bytes());
         let mut diff = parse_unified_diff(&composed.raw);
@@ -1530,11 +1542,33 @@ impl CommanderService {
         // simply omits it would silently throw away review progress (a stacked
         // base that only exists remotely degrades on *every* open, so this is a
         // persistent state, not a transient one).
+        //
+        // Read-modify-write under the store's lock, so a mark the CLI sets
+        // meanwhile is neither overwritten nor (being newer than `composed_at`)
+        // pruned against a diff that predates it.
+        // The common open/refresh has nothing to prune, so it reads without
+        // the lock and takes it only to prune (re-checking under it).
+        let hashes = DiffHashes::of(&diff);
         let mut marks = self.reviewed.load(*session_id).await?;
-        if can_prune && crate::reviewed::prune_invalidated(&mut marks, &diff) {
-            self.reviewed.save(*session_id, &marks).await?;
+        if can_prune && crate::reviewed::has_invalidated(&marks, &hashes, composed_at) {
+            let hashes = hashes.clone();
+            marks = self
+                .reviewed
+                .update(*session_id, move |marks| {
+                    let pruned = crate::reviewed::prune_invalidated(marks, &hashes, composed_at);
+                    (marks.clone(), pruned)
+                })
+                .await?;
         }
-        let reviewed = marks.into_iter().map(|m| m.file).collect();
+        // Only a mark pinned to the content shown reads as reviewed — on a
+        // degraded diff too, where nothing is pruned but a mark for edited
+        // content still mustn't show (so this view agrees with `review files`).
+        // In store order, so the snapshot is deterministic.
+        let reviewed = marks
+            .into_iter()
+            .filter(|m| hashes.holds(&m.file, &m.hash))
+            .map(|m| m.file)
+            .collect();
 
         Ok(ReviewSnapshot {
             base,
@@ -1573,24 +1607,11 @@ impl CommanderService {
         }
     }
 
-    /// Toggle the reviewed mark for one file of a session's review diff.
-    /// The hash is computed from the `FileDiff` the caller is displaying, so
-    /// the mark records exactly what the user saw (not a possibly-newer
-    /// working tree). Returns the new reviewed state.
-    pub async fn toggle_file_reviewed(
-        &self,
-        session_id: &SessionId,
-        file: &FileDiff,
-    ) -> Result<bool> {
-        self.telemetry.feature("review.toggle_reviewed");
-        let mut marks = self.reviewed.load(*session_id).await?;
-        let now_reviewed = crate::reviewed::toggle(&mut marks, file);
-        self.reviewed.save(*session_id, &marks).await?;
-        Ok(now_reviewed)
-    }
-
-    /// Toggle a file's reviewed mark by display path: resolve the file in the
-    /// **current** review diff and toggle against that. Keeps the wire API down
+    /// Toggle a file's reviewed mark by display path — only for a request
+    /// that doesn't say which state it wants (a client predating
+    /// [`ToggleReviewed::reviewed`]); every in-tree frontend uses
+    /// [`Self::set_file_reviewed_by_path`]. Resolves the file in the
+    /// **current** review diff and toggles against that. Keeps the wire API down
     /// to a path (no `FileDiff` echo for remote clients to cache) and makes it
     /// impossible to record a mark against a stale copy of the file — the hash
     /// always reflects the diff as it exists now. `FileNotInDiff` when the path
@@ -1600,15 +1621,140 @@ impl CommanderService {
         session_id: &SessionId,
         display_path: &str,
     ) -> Result<bool> {
-        let (worktree_path, review_base) = self.review_target(session_id).await?;
-        let base = review_base.git_ref(&worktree_path).await;
-        let diff = parse_unified_diff(&compose_review_diff(&worktree_path, &base).await?.raw);
+        self.telemetry.feature("review.toggle_reviewed");
+        let target = self.current_mark_for(session_id, display_path).await?;
+        self.reviewed
+            .update(*session_id, move |marks| {
+                (crate::reviewed::toggle(marks, &target), true)
+            })
+            .await
+    }
+
+    /// Set (`reviewed`) or clear one file's mark by display path, against the
+    /// current diff — the direction-explicit counterpart of
+    /// [`Self::toggle_file_reviewed_by_path`] for a view that knows which way
+    /// the user meant (see [`ToggleReviewed::reviewed`]). Returns the new state.
+    pub async fn set_file_reviewed_by_path(
+        &self,
+        session_id: &SessionId,
+        display_path: &str,
+        reviewed: bool,
+    ) -> Result<bool> {
+        // Same metric as the toggle: this is the TUI's `m`.
+        self.telemetry.feature("review.toggle_reviewed");
+        let target = self.current_mark_for(session_id, display_path).await?;
+        self.reviewed
+            .update(*session_id, move |marks| {
+                (reviewed, crate::reviewed::set(marks, &target, reviewed))
+            })
+            .await
+    }
+
+    /// The mark pinning `display_path` to its content in the **current**
+    /// review diff; `FileNotInDiff` when it isn't there.
+    async fn current_mark_for(
+        &self,
+        session_id: &SessionId,
+        display_path: &str,
+    ) -> Result<ReviewedFileMark> {
+        // Only the one file is hashed, not the whole diff.
+        let diff = self.current_review_diff(session_id).await?;
         let file = diff
             .files
             .iter()
             .find(|f| f.display_path() == display_path)
             .ok_or_else(|| SessionError::FileNotInDiff(display_path.to_string()))?;
-        self.toggle_file_reviewed(session_id, file).await
+        Ok(ReviewedFileMark {
+            file: display_path.to_string(),
+            hash: claude_commander_viewmodel::review::hash_hex(file),
+        })
+    }
+
+    /// Parse the session's review diff as it exists now, for operations that
+    /// resolve files by path (so a mark is always pinned to current content).
+    async fn current_review_diff(&self, session_id: &SessionId) -> Result<ParsedDiff> {
+        let (worktree_path, review_base) = self.review_target(session_id).await?;
+        let base = review_base.git_ref(&worktree_path).await;
+        Ok(parse_unified_diff(
+            &compose_review_diff(&worktree_path, &base).await?.raw,
+        ))
+    }
+
+    /// Set (or clear) the reviewed mark on several files of a session's review
+    /// diff at once, resolved against the current diff (see
+    /// [`crate::reviewed::resolve_selection`]). Idempotent — the bulk
+    /// counterpart of [`Self::toggle_file_reviewed_by_path`] for callers (the
+    /// CLI, an agent) that must be safe to re-run. All-or-nothing: a path not
+    /// in the diff, or one whose `@hash` no longer matches, fails the call
+    /// (`FileSelectionRejected`, naming every such file) and nothing is
+    /// written.
+    pub async fn set_files_reviewed(
+        &self,
+        session_id: &SessionId,
+        selection: &FileSelection,
+        reviewed: bool,
+    ) -> Result<SetReviewedOutcome> {
+        self.telemetry.feature("review.set_reviewed");
+        let diff = self.current_review_diff(session_id).await?;
+        let hashes = DiffHashes::of(&diff);
+        let targets: Vec<ReviewedFileMark> =
+            crate::reviewed::resolve_selection(&diff, &hashes, selection)?
+                .into_iter()
+                .filter_map(|f| hashes.mark_for(f.display_path()))
+                .collect();
+        self.reviewed
+            .update(*session_id, move |marks| {
+                let mut outcome = SetReviewedOutcome::default();
+                for target in targets {
+                    if crate::reviewed::set(marks, &target, reviewed) {
+                        outcome.changed.push(target.file);
+                    } else {
+                        outcome.unchanged.push(target.file);
+                    }
+                }
+                let changed = !outcome.changed.is_empty();
+                (outcome, changed)
+            })
+            .await
+    }
+
+    /// Read a session's review diff and which of its files are reviewed,
+    /// **without** the side effects of [`Self::open_review`] (no comment
+    /// re-anchoring or pruning, no store writes, no telemetry): the `review`
+    /// CLI reads concurrently with an open frontend, and a stale whole-file
+    /// save from a read would clobber that frontend's edits. Reviewed state is
+    /// hash-checked against this diff (`live_paths`), so a file edited since it
+    /// was marked reads as unreviewed even when pruning would be unsound.
+    pub async fn peek_review(&self, session_id: &SessionId) -> Result<ReviewPeek> {
+        // `current_review_diff` already checked the session exists.
+        let diff = self.current_review_diff(session_id).await?;
+        let hashes = DiffHashes::of(&diff);
+        let marks = self.reviewed.load(*session_id).await?;
+        let reviewed = claude_commander_viewmodel::review::live_paths(
+            marks.iter().map(|m| (m.file.as_str(), m.hash.as_str())),
+            &hashes,
+        );
+        Ok(ReviewPeek {
+            diff,
+            hashes,
+            reviewed,
+        })
+    }
+
+    /// A session's stored reviewed marks, unpruned. Cheap (one small file
+    /// read, no compose), so an open review view can poll it to pick up marks
+    /// set elsewhere; see `claude_commander_viewmodel::review::fold_marks` for the filtering a
+    /// caller must apply. `NotFound` for an unknown session, so a poller can
+    /// tell a deleted session from one with no marks.
+    pub async fn reviewed_marks(&self, session_id: &SessionId) -> Result<Vec<ReviewedFileMark>> {
+        self.review_target(session_id).await?;
+        Ok(self
+            .reviewed
+            .load(*session_id)
+            .await?
+            .iter()
+            .map(ReviewedFileMark::from)
+            .collect())
     }
 
     /// List a session's stored comments (without re-anchoring).
@@ -2713,6 +2859,16 @@ impl CommanderService {
             .cloned()
             .collect()
     }
+}
+
+/// [`CommanderService::peek_review`]'s result: the current review diff, its
+/// per-file hashes, and the display paths of its files whose reviewed mark
+/// holds against it.
+#[derive(Debug, Clone)]
+pub struct ReviewPeek {
+    pub diff: ParsedDiff,
+    pub hashes: DiffHashes,
+    pub reviewed: std::collections::HashSet<String>,
 }
 
 /// What a [`CommanderService::preview`] call targets: a session (with an
@@ -4166,11 +4322,171 @@ mod tests {
             snapshot.diff.files.is_empty(),
             "precondition: the degraded diff should be empty here"
         );
+        assert!(
+            snapshot.reviewed.is_empty(),
+            "a file the diff doesn't show can't read as reviewed"
+        );
         assert_eq!(
-            snapshot.reviewed,
-            ["changed.txt"],
+            svc.reviewed_marks(&sid).await.unwrap().len(),
+            1,
             "a degraded diff must not prune reviewed marks"
         );
+    }
+
+    /// Opening a review with nothing to prune is a plain read: it takes no
+    /// lock (so it never waits on a concurrent `review mark`) and leaves no
+    /// lock file behind. `ReviewedStore::remove` (which `delete_session` calls)
+    /// clears the marks file.
+    #[tokio::test]
+    async fn open_review_reads_marks_without_locking_and_delete_cleans_up() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (sid, _repo) = seed_review_repo(&svc, &dir).await;
+        let reviewed_dir = svc.store().data_dir().join("reviewed");
+
+        svc.open_review(&sid).await.unwrap();
+        assert!(
+            !reviewed_dir
+                .join(format!("{}.lock", sid.as_uuid()))
+                .exists(),
+            "an open with nothing to prune must not lock"
+        );
+
+        svc.set_files_reviewed(&sid, &FileSelection::All, true)
+            .await
+            .unwrap();
+        let marks_file = reviewed_dir.join(format!("{}.json", sid.as_uuid()));
+        assert!(marks_file.exists(), "precondition: marks were written");
+        svc.reviewed.remove(sid).await.unwrap();
+        assert!(!marks_file.exists());
+    }
+
+    /// The bulk setter is idempotent (re-running never flips a mark back, which
+    /// a toggle would) and reports what it changed.
+    #[tokio::test]
+    async fn set_files_reviewed_is_idempotent_and_reports_changes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (sid, _repo) = seed_review_repo(&svc, &dir).await;
+        let paths = FileSelection::Paths(vec!["changed.txt".to_string()]);
+
+        let first = svc.set_files_reviewed(&sid, &paths, true).await.unwrap();
+        assert_eq!(first.changed, ["changed.txt"]);
+        let again = svc.set_files_reviewed(&sid, &paths, true).await.unwrap();
+        assert!(again.changed.is_empty());
+        assert_eq!(again.unchanged, ["changed.txt"]);
+        assert_eq!(
+            svc.open_review(&sid).await.unwrap().reviewed,
+            ["changed.txt"]
+        );
+        assert_eq!(
+            svc.reviewed_marks(&sid)
+                .await
+                .unwrap()
+                .iter()
+                .map(|m| m.file.as_str())
+                .collect::<Vec<_>>(),
+            ["changed.txt"]
+        );
+
+        let cleared = svc
+            .set_files_reviewed(&sid, &FileSelection::All, false)
+            .await
+            .unwrap();
+        assert_eq!(cleared.changed, ["changed.txt"]);
+        assert!(svc.open_review(&sid).await.unwrap().reviewed.is_empty());
+    }
+
+    /// `review files` hands out a hash per file; marking with a hash the file
+    /// no longer has (it was edited after being read) is refused, writes
+    /// nothing, and `peek_review` reports the file as not reviewed.
+    #[tokio::test]
+    async fn set_files_reviewed_refuses_a_stale_hash_and_peek_is_hash_checked() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (sid, repo) = seed_review_repo(&svc, &dir).await;
+        let read_hash = claude_commander_viewmodel::review::hash_hex(
+            &svc.peek_review(&sid).await.unwrap().diff.files[0],
+        );
+
+        std::fs::write(repo.join("changed.txt"), "three\n").unwrap();
+        let err = svc
+            .set_files_reviewed(
+                &sid,
+                &FileSelection::Paths(vec![format!("changed.txt@{read_hash}")]),
+                true,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Changed since"), "{err}");
+        assert!(svc.reviewed_marks(&sid).await.unwrap().is_empty());
+
+        // Marked, then edited again: the store still holds the mark, but a
+        // read must not call the file reviewed.
+        svc.set_files_reviewed(&sid, &FileSelection::All, true)
+            .await
+            .unwrap();
+        std::fs::write(repo.join("changed.txt"), "four\n").unwrap();
+        assert!(svc.peek_review(&sid).await.unwrap().reviewed.is_empty());
+    }
+
+    /// A view showing an older copy of a file than the one the CLI just
+    /// marked shows it unreviewed; the user pressing "mark" there must keep
+    /// the mark, where a toggle would have cleared it.
+    #[tokio::test]
+    async fn set_file_reviewed_by_path_keeps_a_mark_set_elsewhere() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (sid, _repo) = seed_review_repo(&svc, &dir).await;
+        svc.set_files_reviewed(&sid, &FileSelection::All, true)
+            .await
+            .unwrap();
+
+        assert!(
+            svc.set_file_reviewed_by_path(&sid, "changed.txt", true)
+                .await
+                .unwrap()
+        );
+        assert_eq!(svc.reviewed_marks(&sid).await.unwrap().len(), 1);
+        assert!(
+            !svc.set_file_reviewed_by_path(&sid, "changed.txt", false)
+                .await
+                .unwrap()
+        );
+        assert!(svc.reviewed_marks(&sid).await.unwrap().is_empty());
+    }
+
+    /// The marks route a review view polls must tell a deleted session from
+    /// one with no marks; an empty list would read as "everything unmarked".
+    #[tokio::test]
+    async fn reviewed_marks_for_an_unknown_session_is_not_found() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let err = svc.reviewed_marks(&SessionId::new()).await.unwrap_err();
+        assert!(
+            matches!(err, crate::Error::Session(SessionError::NotFound(_))),
+            "{err}"
+        );
+    }
+
+    /// A bulk set naming a path outside the diff writes nothing — a typo must
+    /// not leave a half-applied batch behind — and the error names the path.
+    #[tokio::test]
+    async fn set_files_reviewed_with_an_unknown_path_writes_nothing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (sid, _repo) = seed_review_repo(&svc, &dir).await;
+
+        let err = svc
+            .set_files_reviewed(
+                &sid,
+                &FileSelection::Paths(vec!["changed.txt".into(), "nope.txt".into()]),
+                true,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("nope.txt"), "{err}");
+        assert!(svc.reviewed_marks(&sid).await.unwrap().is_empty());
     }
 
     /// Apply must not silently delete. When a file leaves the diff between the

@@ -27,6 +27,8 @@ fuzzy-matcher = "0.3"
 # `WorkspaceDef`). Serde-only and mobile-safe, so it keeps this crate's
 # no-host-deps rule; added now that a slice (workspaces) earns it.
 claude-commander-protocol = { path = "../claude-commander-protocol" }
+# The reviewed-mark hash (`review::file_diff_hash`). Pure Rust, mobile-safe.
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [dev-dependencies]
 # Fixture DTOs are built from JSON so they track the wire shape, not a field list.

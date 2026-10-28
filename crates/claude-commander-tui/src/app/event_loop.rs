@@ -115,6 +115,7 @@ impl App {
                 // (tick_count wraps at u64::MAX, is_multiple_of(30) at 30fps ≈ 1s)
                 if self.ui_state.tick_count.is_multiple_of(30) {
                     self.check_config_reload();
+                    self.spawn_reviewed_marks_poll(self.ui_state.tick_count / 30);
                 }
                 return true;
             }

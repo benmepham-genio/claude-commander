@@ -74,8 +74,20 @@ impl From<CoreError> for BackendError {
                 | SessionError::FileNotInDiff(_),
             ) => BackendError::NotFound,
 
+            // As the server splits it (404 / 409), so a session behaves the
+            // same on either backend: a named file missing from the diff is
+            // not-found; only stale hashes are an invalid request (a remote
+            // 409 arrives as one).
+            CoreError::Session(SessionError::FileSelectionRejected { missing, .. })
+                if !missing.is_empty() =>
+            {
+                BackendError::NotFound
+            }
+
             CoreError::Session(
-                SessionError::InvalidName { .. } | SessionError::InvalidProgram(_),
+                SessionError::InvalidName { .. }
+                | SessionError::InvalidProgram(_)
+                | SessionError::FileSelectionRejected { .. },
             ) => BackendError::InvalidRequest(err.to_string()),
 
             // A refused clone source/destination name: nothing failed, the
@@ -149,6 +161,22 @@ mod tests {
             BackendError::from(e),
             BackendError::InvalidRequest(_)
         ));
+        // A selection rejected only for stale hashes keeps its message
+        // (which files, and why); one naming a missing file is not-found, as
+        // the server's 404 arrives through a remote backend.
+        let e = CoreError::Session(SessionError::FileSelectionRejected {
+            missing: vec![],
+            changed: vec!["b.rs".into()],
+        });
+        assert!(matches!(
+            BackendError::from(e),
+            BackendError::InvalidRequest(m) if m.contains("b.rs")
+        ));
+        let e = CoreError::Session(SessionError::FileSelectionRejected {
+            missing: vec!["a.rs".into()],
+            changed: vec!["b.rs".into()],
+        });
+        assert!(matches!(BackendError::from(e), BackendError::NotFound));
     }
 
     #[test]

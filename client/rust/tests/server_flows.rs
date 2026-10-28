@@ -763,24 +763,29 @@ fn review_round_trip() {
         "the created comment should be listed"
     );
 
-    // -- toggle the file's reviewed mark on --
-    let reviewed =
-        review::toggle_file_reviewed(fx.handle.clone(), id.clone(), "newfile.txt".to_string())
-            .expect("toggle_file_reviewed");
-    assert!(
-        reviewed,
-        "toggling an un-reviewed file should mark it reviewed"
-    );
+    // -- mark the file reviewed: an explicit state, so re-sending it is a
+    //    no-op rather than flipping it back as a toggle would --
+    for attempt in ["first", "repeat"] {
+        let reviewed = review::set_file_reviewed(
+            fx.handle.clone(),
+            id.clone(),
+            "newfile.txt".to_string(),
+            true,
+        )
+        .expect("set_file_reviewed");
+        assert!(reviewed, "the {attempt} mark leaves the file reviewed");
+    }
 
     // -- a path that isn't in the current diff is a 404, not a silent no-op --
     assert!(
-        review::toggle_file_reviewed(
+        review::set_file_reviewed(
             fx.handle.clone(),
             id.clone(),
             "no-such-file.txt".to_string(),
+            true,
         )
         .is_err(),
-        "toggling a file absent from the diff must error"
+        "marking a file absent from the diff must error"
     );
 
     // -- apply the staged comment: composed + delivered (or deferred) --

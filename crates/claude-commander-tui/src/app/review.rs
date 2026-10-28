@@ -31,6 +31,8 @@ use claude_commander_core::api::{DiffSide, NewComment};
 use claude_commander_core::comment::{Comment, CommentSide, CommentStatus};
 use claude_commander_core::git::{DiffLine, FileDiff, FileStatus, LineOrigin, ParsedDiff};
 use claude_commander_core::term_caps::ColorMode;
+use claude_commander_protocol::api::ReviewedFileMark;
+use claude_commander_viewmodel::review::{self, DiffHashes};
 use diffgrid::layout::{
     Attach, AttachKey, ExpandAction, FileLayout, FileSource, LayoutMode, LayoutOptions, RowKind,
 };
@@ -347,6 +349,15 @@ pub struct DiffReviewState {
     /// Display paths of files marked reviewed (mirrors the persisted store;
     /// stale marks are pruned by the service before the view opens).
     pub reviewed: HashSet<String>,
+    /// Changed whenever this view changes `reviewed` itself (a toggle, a diff
+    /// refresh). A background poll of the store records the generation it was
+    /// spawned at and is dropped if the view has moved on, so a read that
+    /// raced a toggle can't revert it. Drawn from [`next_reviewed_gen`], so a
+    /// reopened view never shares a value with the one a poll was spawned for.
+    pub reviewed_gen: u64,
+    /// Every file's hash in `diff`, computed once per diff so folding polled
+    /// marks in each second is a lookup rather than a re-hash.
+    hashes: DiffHashes,
     /// Index into `diff.files` of the file shown in the body.
     pub selected_file: usize,
     /// First visible body row (scroll offset).
@@ -431,6 +442,7 @@ impl DiffReviewState {
         comments: Vec<Comment>,
     ) -> Self {
         let file_tree = build_file_tree(&diff.files);
+        let hashes = DiffHashes::of(&diff);
         // Body starts on the first file in tree order so it shows something.
         let selected_file = first_file_index(&file_tree).unwrap_or(0);
         Self {
@@ -441,6 +453,8 @@ impl DiffReviewState {
             comments,
             content_hash: 0,
             reviewed: HashSet::new(),
+            reviewed_gen: next_reviewed_gen(),
+            hashes,
             selected_file,
             scroll: 0,
             focus: ReviewFocus::FileList,
@@ -686,11 +700,26 @@ impl DiffReviewState {
         content_hash: u64,
     ) {
         let prev_path = self.current_file().map(|f| f.display_path().to_string());
+        let mut finished_before = Vec::new();
+        collect_completed_dirs(&self.file_tree, None, &self.reviewed, &mut finished_before);
+        self.hashes = DiffHashes::of(&diff);
         self.diff = diff;
         self.comments = comments;
         self.reviewed = reviewed;
+        self.reviewed_gen = next_reviewed_gen();
         self.content_hash = content_hash;
         self.file_tree = build_file_tree(&self.diff.files);
+        // Fold directories this refresh finished (marks set while it was
+        // away), but leave alone one that was already finished: the user may
+        // have expanded it to re-read, and an unrelated edit shouldn't shut it.
+        let mut finished = Vec::new();
+        collect_completed_dirs(&self.file_tree, None, &self.reviewed, &mut finished);
+        self.collapsed.extend(
+            finished
+                .into_iter()
+                .filter(|d| !finished_before.contains(d)),
+        );
+        self.clamp_tree_cursor();
         // Hunk boundaries (and gap indices) may have moved, so every file's
         // layout and revealed context is dropped and its content re-fetched
         // lazily on the next expand.
@@ -915,6 +944,7 @@ impl DiffReviewState {
     /// Set or clear the reviewed mark for `path` in the view's local mirror
     /// (the persisted store is updated by the service).
     fn set_reviewed(&mut self, path: String, on: bool) {
+        self.reviewed_gen = next_reviewed_gen();
         if on {
             self.reviewed.insert(path);
         } else {
@@ -922,12 +952,35 @@ impl DiffReviewState {
         }
     }
 
-    /// Fold away any ancestor directory of `reviewed_path` whose entire file
-    /// subtree is now reviewed, so a directory collapses automatically once its
-    /// last file is marked read. Only directories on the path of the
-    /// just-reviewed file are considered, so unrelated directories elsewhere in
-    /// the tree are never touched.
-    fn collapse_completed_dirs(&mut self, reviewed_path: &str) {
+    /// Fold in the store's marks as polled at `generation`, so marks set
+    /// elsewhere (the `review` CLI, another frontend) appear without a reopen
+    /// (see [`review::fold_marks`] for the per-file rule).
+    ///
+    /// A poll from before this view last changed its own marks is ignored.
+    pub(super) fn fold_reviewed_marks(&mut self, generation: u64, marks: &[ReviewedFileMark]) {
+        if generation != self.reviewed_gen {
+            return;
+        }
+        let newly_reviewed =
+            review::fold_marks(&mut self.reviewed, &self.diff, &self.hashes, marks);
+        // A mark arriving from elsewhere finishes a directory just as `m` does.
+        for path in &newly_reviewed {
+            self.collapse_completed_dirs(Some(path));
+        }
+        // Unlike `m`, nothing re-selects a file afterwards, so put the tree
+        // cursor back on the shown file if a collapse moved the rows under it.
+        if !newly_reviewed.is_empty() {
+            self.sync_tree_cursor_to_file();
+        }
+    }
+
+    /// Fold away directories whose entire file subtree is reviewed. With a
+    /// `reviewed_path` (the file just marked), only its ancestors are
+    /// considered, so unrelated directories elsewhere in the tree are never
+    /// touched. With `None` (on open), every finished directory folds, so
+    /// marks set while the view was closed — or by the `review` CLI — leave
+    /// the tree as `m` would have. Only ever collapses.
+    pub(super) fn collapse_completed_dirs(&mut self, reviewed_path: Option<&str>) {
         let mut completed = Vec::new();
         collect_completed_dirs(
             &self.file_tree,
@@ -935,9 +988,7 @@ impl DiffReviewState {
             &self.reviewed,
             &mut completed,
         );
-        for path in completed {
-            self.collapsed.insert(path);
-        }
+        self.collapsed.extend(completed);
         // Collapsing shrinks the visible rows; keep the cursor (and scroll) in range.
         self.clamp_tree_cursor();
     }
@@ -1854,19 +1905,23 @@ impl App {
                 }
             }
             // Toggle the reviewed mark on the file shown in the body (either
-            // focus); marking advances to the next unreviewed file.
+            // focus); marking advances to the next unreviewed file. The
+            // direction comes from what this view shows, not the store: a mark
+            // set elsewhere for newer content reads as unreviewed here, and a
+            // store-side toggle would clear it when the user meant to mark.
             KeyCode::Char('m') => {
                 if let Some(file) = state.current_file().cloned() {
+                    let want = !state.is_reviewed_path(file.display_path());
                     let backend = self.backend_arc(self.backend_of_session(state.session_id));
                     match backend
-                        .toggle_file_reviewed(state.session_id, file.display_path().to_string())
+                        .set_file_reviewed(state.session_id, file.display_path().to_string(), want)
                         .await
                     {
                         Ok(now_reviewed) => {
                             let path = file.display_path().to_string();
                             state.set_reviewed(path.clone(), now_reviewed);
                             if now_reviewed {
-                                state.collapse_completed_dirs(&path);
+                                state.collapse_completed_dirs(Some(&path));
                                 state.advance_to_next_unreviewed();
                             }
                         }
@@ -2465,7 +2520,7 @@ impl App {
                         Modifier::empty()
                     };
                     let indent = "  ".repeat(*depth);
-                    let marker = file_status_marker(file.status);
+                    let marker = file.status.marker();
                     // Only the status letter is coloured; the file name stays
                     // the default foreground.
                     let mut spans = vec![
@@ -2859,12 +2914,19 @@ fn subtree_all_reviewed(node: &TreeNode, reviewed: &HashSet<String>) -> bool {
     }
 }
 
-/// Collect the paths of directory nodes that contain `target` and whose entire
-/// file subtree is reviewed — the directories that should auto-collapse once
-/// `target` was marked read.
+/// A fresh [`DiffReviewState::reviewed_gen`], unique across every view this
+/// process opens.
+fn next_reviewed_gen() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Collect the paths of directory nodes whose entire file subtree is reviewed
+/// — the directories that should auto-collapse. With a `target`, only those
+/// containing it (the file just marked read); with `None`, every one.
 fn collect_completed_dirs(
     nodes: &[TreeNode],
-    target: &str,
+    target: Option<&str>,
     reviewed: &HashSet<String>,
     out: &mut Vec<String>,
 ) {
@@ -2874,10 +2936,10 @@ fn collect_completed_dirs(
         }
         // `target` is under this dir when stripping the dir path leaves a
         // `/`-rooted remainder; the leading slash stops "dir" matching "dir2/…".
-        if !target
-            .strip_prefix(node.path.as_str())
-            .is_some_and(|rest| rest.starts_with('/'))
-        {
+        if target.is_some_and(|t| {
+            !t.strip_prefix(node.path.as_str())
+                .is_some_and(|rest| rest.starts_with('/'))
+        }) {
             continue;
         }
         if subtree_all_reviewed(node, reviewed) {
@@ -2915,16 +2977,6 @@ fn first_unreviewed_file_index(
     reviewed: &HashSet<String>,
 ) -> Option<usize> {
     find_file_index(nodes, &|i| !reviewed.contains(diff.files[i].display_path()))
-}
-
-/// One-character marker for a file's change status.
-fn file_status_marker(status: FileStatus) -> char {
-    match status {
-        FileStatus::Added => 'A',
-        FileStatus::Deleted => 'D',
-        FileStatus::Modified => 'M',
-        FileStatus::Renamed => 'R',
-    }
 }
 
 /// Colour used for a file row by its change status, from the theme palette.
@@ -4293,6 +4345,57 @@ diff --git a/c.rs b/c.rs
         assert_eq!(s.selected_file, 0, "all reviewed falls back to first file");
     }
 
+    /// The store's mark for `file`, as another frontend would have written it.
+    fn stored_mark(file: &FileDiff) -> ReviewedFileMark {
+        ReviewedFileMark {
+            file: file.display_path().to_string(),
+            hash: review::hash_hex(file),
+        }
+    }
+
+    #[test]
+    fn polled_marks_fold_in_only_for_the_content_on_screen() {
+        let mut s = state_with_three_files();
+        let mut stale_b = stored_mark(&s.diff.files[1]);
+        stale_b.hash = "0".into();
+        let marks = vec![stored_mark(&s.diff.files[0]), stale_b];
+
+        s.fold_reviewed_marks(s.reviewed_gen, &marks);
+        assert!(s.is_reviewed_path("a.rs"));
+        assert!(
+            !s.is_reviewed_path("b.rs"),
+            "a mark pinned to other content than the view shows stays hidden"
+        );
+
+        s.fold_reviewed_marks(s.reviewed_gen, &[]);
+        assert!(s.reviewed.is_empty(), "an external unmark folds in too");
+    }
+
+    /// `m` pins its mark to the working tree, which can be newer than a stale
+    /// view's diff. The poll then sees a mark for other content than shown —
+    /// and must not undo the keypress.
+    #[test]
+    fn a_mark_for_newer_content_does_not_clear_what_the_view_shows() {
+        let mut s = state_with_three_files();
+        s.set_reviewed("a.rs".to_string(), true);
+        let mut newer_a = stored_mark(&s.diff.files[0]);
+        newer_a.hash = "0".into();
+
+        s.fold_reviewed_marks(s.reviewed_gen, &[newer_a]);
+        assert!(s.is_reviewed_path("a.rs"));
+    }
+
+    #[test]
+    fn a_poll_that_raced_a_local_toggle_is_dropped() {
+        let mut s = state_with_three_files();
+        let spawned_at = s.reviewed_gen;
+        // The user marks c.rs while a poll (which read the store before the
+        // write) is in flight.
+        s.set_reviewed("c.rs".to_string(), true);
+        s.fold_reviewed_marks(spawned_at, &[]);
+        assert!(s.is_reviewed_path("c.rs"), "the local toggle survives");
+    }
+
     #[test]
     fn mark_advances_to_next_unreviewed_file() {
         let mut s = state_with_two_files();
@@ -4405,6 +4508,98 @@ diff --git a/c.rs b/c.rs
         assert_eq!(s.visible_rows().len(), 3);
     }
 
+    fn dir_state() -> DiffReviewState {
+        DiffReviewState::new(
+            SessionId::new(),
+            "t".to_string(),
+            "main".to_string(),
+            ParsedDiff {
+                files: vec![file("dir/a.ts"), file("dir/b.ts"), file("other.ts")],
+            },
+            Vec::new(),
+        )
+    }
+
+    fn dir_collapsed(s: &DiffReviewState) -> bool {
+        s.visible_rows().iter().any(
+            |r| matches!(r, TreeRow::Dir { path, collapsed, .. } if path == "dir" && *collapsed),
+        )
+    }
+
+    /// Marks set by the `review` CLI finish a directory just as `m` does.
+    #[test]
+    fn polled_marks_that_finish_a_directory_collapse_it() {
+        let mut s = dir_state();
+        s.set_reviewed("dir/a.ts".to_string(), true);
+        let marks = [stored_mark(&s.diff.files[0]), stored_mark(&s.diff.files[1])];
+
+        s.fold_reviewed_marks(s.reviewed_gen, &marks);
+        assert!(dir_collapsed(&s));
+    }
+
+    /// Marks set while the view was closed (or between refreshes) leave
+    /// finished directories folded when it opens or refreshes.
+    #[test]
+    fn refresh_collapses_directories_reviewed_while_away() {
+        let mut s = dir_state();
+        assert!(!dir_collapsed(&s));
+        let diff = s.diff.clone();
+        let reviewed = ["dir/a.ts", "dir/b.ts"].map(String::from).into();
+
+        s.refresh_diff(diff, Vec::new(), reviewed, Vec::new(), 1);
+        assert!(dir_collapsed(&s));
+    }
+
+    /// A directory that was already finished stays as the user left it: an
+    /// unrelated edit refreshing the view mustn't shut one opened to re-read.
+    #[test]
+    fn refresh_leaves_an_already_finished_directory_the_user_expanded() {
+        let mut s = dir_state();
+        s.reviewed = ["dir/a.ts", "dir/b.ts"].map(String::from).into();
+        assert!(!dir_collapsed(&s), "precondition: the user has it expanded");
+        let diff = s.diff.clone();
+        let reviewed = s.reviewed.clone();
+
+        s.refresh_diff(diff, Vec::new(), reviewed, Vec::new(), 2);
+        assert!(!dir_collapsed(&s));
+    }
+
+    /// A poll collapsing a directory above the cursor must leave the tree
+    /// highlight on the file the body shows, not on whatever row slid under it.
+    #[test]
+    fn a_polled_collapse_keeps_the_tree_cursor_on_the_shown_file() {
+        let mut s = dir_state();
+        let other = s
+            .diff
+            .files
+            .iter()
+            .position(|f| f.display_path() == "other.ts")
+            .unwrap();
+        s.set_body_file(other);
+        s.sync_tree_cursor_to_file();
+        let marks = [stored_mark(&s.diff.files[0]), stored_mark(&s.diff.files[1])];
+
+        s.fold_reviewed_marks(s.reviewed_gen, &marks);
+
+        assert!(dir_collapsed(&s));
+        assert!(matches!(
+            s.visible_rows()[s.tree_cursor],
+            TreeRow::File { index, .. } if index == other
+        ));
+    }
+
+    /// Generations are unique across views, so a poll spawned for a closed
+    /// view can't pass as current for the one reopened in its place.
+    #[test]
+    fn a_reopened_view_does_not_accept_a_poll_from_the_old_one() {
+        let old = dir_state();
+        let mut reopened = dir_state();
+        reopened.reviewed.insert("other.ts".to_string());
+
+        reopened.fold_reviewed_marks(old.reviewed_gen, &[]);
+        assert!(reopened.is_reviewed_path("other.ts"));
+    }
+
     #[test]
     fn marking_last_file_in_dir_auto_collapses_it() {
         let diff = ParsedDiff {
@@ -4426,7 +4621,7 @@ diff --git a/c.rs b/c.rs
 
         // One of two files in `dir` reviewed: incomplete, stays expanded.
         s.set_reviewed("dir/a.ts".to_string(), true);
-        s.collapse_completed_dirs("dir/a.ts");
+        s.collapse_completed_dirs(Some("dir/a.ts"));
         assert_eq!(
             file_rows(&s),
             3,
@@ -4435,7 +4630,7 @@ diff --git a/c.rs b/c.rs
 
         // Last file in `dir` reviewed: the directory folds away automatically.
         s.set_reviewed("dir/b.ts".to_string(), true);
-        s.collapse_completed_dirs("dir/b.ts");
+        s.collapse_completed_dirs(Some("dir/b.ts"));
         let rows = s.visible_rows();
         assert!(
             rows.iter().any(
@@ -4466,7 +4661,7 @@ diff --git a/c.rs b/c.rs
         s.tree_scroll = 20;
 
         // Marking the last file folds the whole dir down to a single row.
-        s.collapse_completed_dirs("dir/f29.ts");
+        s.collapse_completed_dirs(Some("dir/f29.ts"));
         assert_eq!(
             s.visible_rows().len(),
             1,
@@ -4491,7 +4686,7 @@ diff --git a/c.rs b/c.rs
         );
         // The single-child chain compresses to one "a/b" node holding x.ts.
         s.set_reviewed("a/b/x.ts".to_string(), true);
-        s.collapse_completed_dirs("a/b/x.ts");
+        s.collapse_completed_dirs(Some("a/b/x.ts"));
         let rows = s.visible_rows();
         assert!(
             rows.iter().any(

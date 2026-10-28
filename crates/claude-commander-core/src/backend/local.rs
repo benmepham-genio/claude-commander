@@ -21,6 +21,7 @@ use crate::api::{
 use crate::comment::ApplyOutcome;
 use crate::session::{ProjectId, ScanResult, SessionId};
 use crate::tmux::HeadlessAttach;
+use claude_commander_protocol::api::ReviewedFileMark;
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
 use claude_commander_protocol::workspace::SetWorkspacesRequest;
 
@@ -460,11 +461,20 @@ impl CommanderBackend for LocalBackend {
         Ok(self.service.apply_comments(&id).await?)
     }
 
-    async fn toggle_file_reviewed(&self, id: SessionId, display_path: String) -> BResult<bool> {
+    async fn set_file_reviewed(
+        &self,
+        id: SessionId,
+        display_path: String,
+        reviewed: bool,
+    ) -> BResult<bool> {
         Ok(self
             .service
-            .toggle_file_reviewed_by_path(&id, &display_path)
+            .set_file_reviewed_by_path(&id, &display_path, reviewed)
             .await?)
+    }
+
+    async fn reviewed_marks(&self, id: SessionId) -> BResult<Vec<ReviewedFileMark>> {
+        Ok(self.service.reviewed_marks(&id).await?)
     }
 
     async fn fetch_diff_blob(

@@ -497,6 +497,7 @@ impl App {
                     let mut state = DiffReviewState::new(session_id, title, base, diff, comments);
                     state.content_hash = content_hash;
                     state.reviewed = reviewed.into_iter().collect();
+                    state.collapse_completed_dirs(None);
                     state.select_first_unreviewed();
                     state.prime_views(models);
                     self.reset_review_images();
@@ -591,6 +592,19 @@ impl App {
                             self.set_review_status(&format!("Expand failed: {e}"));
                         }
                     }
+                }
+            }
+            StateUpdate::ReviewedMarksPolled {
+                session_id,
+                generation,
+                marks,
+            } => {
+                self.ui_state.reviewed_poll_in_flight = false;
+                if let Some(marks) = marks
+                    && let Some(state) = self.open_review_mut()
+                    && state.session_id == session_id
+                {
+                    state.fold_reviewed_marks(generation, &marks);
                 }
             }
             StateUpdate::ReviewRefreshed { refreshed, manual } => {

@@ -115,7 +115,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/sessions/{id}/comments/apply", post(review::apply))
         .route(
             "/sessions/{id}/files/reviewed",
-            post(review::toggle_reviewed),
+            post(review::toggle_reviewed).get(review::reviewed_marks),
         )
         // -- blobs --
         .route("/sessions/{id}/blob", get(blobs::fetch))

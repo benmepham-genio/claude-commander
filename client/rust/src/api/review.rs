@@ -423,16 +423,20 @@ pub fn fetch_blob(
     call(client.fetch_diff_blob(sid, parse_diff_side(&side)?, path))
 }
 
-/// Toggle a file's reviewed mark, returning the new state. Only the display path
-/// crosses the wire — the server resolves the file in the *current* review diff.
-pub fn toggle_file_reviewed(
+/// Set (`reviewed`) or clear a file's reviewed mark, returning the new state.
+/// Only the display path crosses the wire — the server resolves the file in
+/// the *current* review diff. The page says which way it means rather than
+/// toggling, because the store may hold a mark the page isn't showing (set by
+/// the `review` CLI since it loaded), which a toggle would flip the wrong way.
+pub fn set_file_reviewed(
     handle: String,
     session_id: String,
     display_path: String,
+    reviewed: bool,
 ) -> Result<bool> {
     let client = with_client(&handle)?;
     let sid = parse_session_id(&session_id)?;
-    call(client.toggle_file_reviewed(sid, display_path))
+    call(client.set_file_reviewed(sid, display_path, reviewed))
 }
 
 #[cfg(test)]

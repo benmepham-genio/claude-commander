@@ -246,7 +246,9 @@ async function deleteComment(cid: string): Promise<void> {
 
 async function toggleReviewed(dp: string, cb: HTMLInputElement): Promise<void> {
   if (!sessionId) return;
-  const res = await act(api.toggleReviewed(sessionId, { display_path: dp }));
+  // Send the state the box now shows rather than toggling the store, which
+  // may hold a mark this page isn't showing (set by the CLI since it loaded).
+  const res = await act(api.toggleReviewed(sessionId, { display_path: dp, reviewed: cb.checked }));
   if (res && typeof res.value?.reviewed === "boolean") cb.checked = res.value.reviewed;
   else cb.checked = !cb.checked; // revert on failure
 }

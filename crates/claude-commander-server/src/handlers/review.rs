@@ -103,7 +103,8 @@ pub async fn apply(
     Ok(Json(outcome).into_response())
 }
 
-/// `POST /sessions/{id}/files/reviewed` → `toggle_file_reviewed_by_path` →
+/// `POST /sessions/{id}/files/reviewed` → `toggle_file_reviewed_by_path`, or
+/// `set_file_reviewed_by_path` when the body says which state it wants →
 /// [`ReviewedToggle`]. The body is a [`ToggleReviewed`] display path; the
 /// server resolves the file in the current review diff (404 when the path
 /// isn't in it).
@@ -113,11 +114,33 @@ pub async fn toggle_reviewed(
     Json(body): Json<ToggleReviewed>,
 ) -> Result<Response, ApiError> {
     let id = parse_session_id(&id)?;
-    let reviewed = state
-        .service
-        .toggle_file_reviewed_by_path(&id, &body.display_path)
-        .await?;
+    let reviewed = match body.reviewed {
+        Some(want) => {
+            state
+                .service
+                .set_file_reviewed_by_path(&id, &body.display_path, want)
+                .await?
+        }
+        None => {
+            state
+                .service
+                .toggle_file_reviewed_by_path(&id, &body.display_path)
+                .await?
+        }
+    };
     Ok(Json(ReviewedToggle { reviewed }).into_response())
+}
+
+/// `GET /sessions/{id}/files/reviewed` → `reviewed_marks` → the session's
+/// stored [`ReviewedFileMark`](claude_commander_protocol::api::ReviewedFileMark)s, unpruned; an open review view polls this and
+/// keeps only marks whose hash matches the diff it is showing.
+pub async fn reviewed_marks(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let id = parse_session_id(&id)?;
+    let marks = state.service.reviewed_marks(&id).await?;
+    Ok(Json(marks).into_response())
 }
 
 /// `GET /comments/pending` → session ids with at least one not-yet-applied
@@ -206,5 +229,40 @@ mod tests {
             status, 404,
             "a display_path body for an unknown session must 404 (not 422)"
         );
+    }
+
+    /// A body that says which state it wants is accepted too (it reaches the
+    /// service, which 404s the unknown session) rather than rejected as 422.
+    #[tokio::test]
+    async fn toggle_reviewed_accepts_an_explicit_state() {
+        let dir = TempDir::new().unwrap();
+        let id = uuid::Uuid::new_v4();
+        let router = Router::new()
+            .route(
+                "/sessions/{id}/files/reviewed",
+                axum::routing::post(super::toggle_reviewed),
+            )
+            .with_state(test_state(&dir));
+        let req = axum::http::Request::post(format!("/sessions/{id}/files/reviewed"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({ "display_path": "src/main.rs", "reviewed": true }).to_string(),
+            ))
+            .unwrap();
+        let (status, _) = crate::handlers::test_support::send(router, req).await;
+        assert_eq!(status, 404);
+    }
+
+    /// `GET /sessions/{id}/files/reviewed` 404s an unknown session, as the
+    /// POST does: a poller must not read a deleted session as "no marks".
+    #[tokio::test]
+    async fn reviewed_marks_unknown_session_is_404() {
+        let dir = TempDir::new().unwrap();
+        let id = uuid::Uuid::new_v4();
+        let router = Router::new()
+            .route("/sessions/{id}/files/reviewed", get(super::reviewed_marks))
+            .with_state(test_state(&dir));
+        let (status, _) = do_get(router, &format!("/sessions/{id}/files/reviewed")).await;
+        assert_eq!(status, 404);
     }
 }

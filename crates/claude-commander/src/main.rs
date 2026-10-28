@@ -15,7 +15,7 @@ use claude_commander_core::{
 };
 use claude_commander_tui::App;
 
-use crate::cli_args::{Cli, Commands, cli_reference};
+use crate::cli_args::{Cli, Commands, ReviewCommand, SetReviewedArgs, cli_reference};
 
 mod cli_args;
 mod serve;
@@ -88,6 +88,117 @@ fn resolve_cli_backend(
             Ok(build_remote_backend(&server)?)
         }
     }
+}
+
+/// Resolve a session by exact title or full ID for a command that mutates or
+/// inspects one session, exiting with the CLI's usual message when it is
+/// missing or ambiguous.
+async fn resolve_session_exact(
+    service: &claude_commander_core::api::CommanderService,
+    session: &str,
+) -> Result<claude_commander_core::api::SessionInfo> {
+    match service.find_session_exact(session).await? {
+        claude_commander_core::session::SessionLookup::Found(i) => Ok(i),
+        claude_commander_core::session::SessionLookup::NotFound => {
+            eprintln!("Session not found: {}", session);
+            eprintln!("Use 'claude-commander list' to see available sessions.");
+            std::process::exit(1);
+        }
+        claude_commander_core::session::SessionLookup::Ambiguous(n) => {
+            eprintln!(
+                "\"{}\" matches {} sessions. Use the exact title or full ID.",
+                session, n
+            );
+            eprintln!("Use 'claude-commander list' to see available sessions.");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Print a `review` command's expected refusal and exit 1, or hand back a
+/// genuine failure for the usual error report.
+fn exit_on_review_refusal(
+    err: claude_commander_core::Error,
+    session: &str,
+    writes: bool,
+) -> color_eyre::eyre::Report {
+    if let Some(report) = claude_commander_core::cli::review_refusal(&err, session, writes) {
+        eprintln!("{report}");
+        std::process::exit(1);
+    }
+    err.into()
+}
+
+/// Run a `review` subcommand against the local service.
+async fn execute_review(config: Config, command: ReviewCommand) -> Result<()> {
+    use claude_commander_core::cli;
+
+    let service = claude_commander_core::api::CommanderService::for_cli(config, frontend())?;
+    match command {
+        ReviewCommand::Files {
+            session,
+            unreviewed,
+            json,
+        } => {
+            let info = resolve_session_exact(&service, &session).await?;
+            let peek = service.peek_review(&info.session_id).await?;
+            let entries = cli::review_file_entries(&peek, unreviewed);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&entries)?);
+            } else {
+                println!("{}", cli::format_review_files_human(&entries));
+            }
+        }
+        ReviewCommand::Diff {
+            session,
+            files,
+            unreviewed,
+        } => {
+            let info = resolve_session_exact(&service, &session).await?;
+            let peek = service.peek_review(&info.session_id).await?;
+            let selected = cli::select_review_files(&peek, &files, unreviewed)
+                .map_err(|e| exit_on_review_refusal(e.into(), &session, false))?;
+            // Buffered: stdout is line-buffered, so a large diff would
+            // otherwise cost a write per line.
+            let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+            for file in selected {
+                out.write_all(cli::render_file_diff(file).as_bytes())?;
+            }
+            out.flush()?;
+        }
+        ReviewCommand::Mark(args) => set_reviewed(&service, args, true).await?,
+        ReviewCommand::Unmark(args) => set_reviewed(&service, args, false).await?,
+    }
+    Ok(())
+}
+
+/// `review mark` / `review unmark`: set every named (or `--all`) file's mark.
+async fn set_reviewed(
+    service: &claude_commander_core::api::CommanderService,
+    args: SetReviewedArgs,
+    reviewed: bool,
+) -> Result<()> {
+    use claude_commander_core::reviewed::FileSelection;
+
+    let info = resolve_session_exact(service, &args.session).await?;
+    let selection = if args.all {
+        FileSelection::All
+    } else {
+        FileSelection::Paths(args.files)
+    };
+    let outcome = service
+        .set_files_reviewed(&info.session_id, &selection, reviewed)
+        .await
+        .map_err(|e| exit_on_review_refusal(e, &args.session, true))?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&outcome)?);
+    } else {
+        println!(
+            "{}",
+            claude_commander_core::cli::format_set_reviewed_human(&outcome, reviewed)
+        );
+    }
+    Ok(())
 }
 
 fn setup_logging(debug: bool, to_file: bool) -> Result<()> {
@@ -455,22 +566,7 @@ async fn main() -> Result<()> {
             let service =
                 claude_commander_core::api::CommanderService::for_cli(config, frontend())?;
 
-            let info = match service.find_session_exact(&session).await? {
-                claude_commander_core::session::SessionLookup::Found(i) => i,
-                claude_commander_core::session::SessionLookup::NotFound => {
-                    eprintln!("Session not found: {}", session);
-                    eprintln!("Use 'claude-commander list' to see available sessions.");
-                    std::process::exit(1);
-                }
-                claude_commander_core::session::SessionLookup::Ambiguous(n) => {
-                    eprintln!(
-                        "\"{}\" matches {} sessions. Use the exact title or full ID to delete.",
-                        session, n
-                    );
-                    eprintln!("Use 'claude-commander list' to see available sessions.");
-                    std::process::exit(1);
-                }
-            };
+            let info = resolve_session_exact(&service, &session).await?;
 
             match claude_commander_core::cli::delete_guard(force, std::io::stdin().is_terminal()) {
                 claude_commander_core::cli::DeleteGuard::RequireForce => {
@@ -506,21 +602,7 @@ async fn main() -> Result<()> {
             let service =
                 claude_commander_core::api::CommanderService::for_cli(config, frontend())?;
 
-            let info = match service.find_session_exact(&session).await? {
-                claude_commander_core::session::SessionLookup::Found(i) => i,
-                claude_commander_core::session::SessionLookup::NotFound => {
-                    eprintln!("Session not found: {}", session);
-                    eprintln!("Use 'claude-commander list' to see available sessions.");
-                    std::process::exit(1);
-                }
-                claude_commander_core::session::SessionLookup::Ambiguous(n) => {
-                    eprintln!(
-                        "\"{}\" matches {} sessions. Use the exact title or full ID.",
-                        session, n
-                    );
-                    std::process::exit(1);
-                }
-            };
+            let info = resolve_session_exact(&service, &session).await?;
 
             // `on`/`off` set explicitly; with neither flag, toggle.
             let keep_alive = if on {
@@ -744,6 +826,11 @@ async fn main() -> Result<()> {
                     std::process::exit(1);
                 }
             }
+        }
+
+        Some(Commands::Review { command }) => {
+            setup_logging(cli.debug, false)?;
+            execute_review(config, command).await?;
         }
 
         Some(Commands::Config { init }) => {

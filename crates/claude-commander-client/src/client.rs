@@ -15,9 +15,9 @@ use std::time::Duration;
 use claude_commander_protocol::api::{
     AddProjectRequest, AgentStatesSnapshot, BranchInfo, ChangeProgram, CreateOptions,
     CreateSessionOpts, CreatedId, DiffSide, MarkUnread, NewComment, OperationStatus, PatchSession,
-    PreviewData, ProgramInfo, RenameSession, ReviewSnapshot, ReviewedToggle, ScanResponse,
-    SessionDetail, SetProgramsRequest, SetSection, SetSessionBase, SetSessionBaseOutcome, Snapshot,
-    ToggleReviewed,
+    PreviewData, ProgramInfo, RenameSession, ReviewSnapshot, ReviewedFileMark, ReviewedToggle,
+    ScanResponse, SessionDetail, SetProgramsRequest, SetSection, SetSessionBase,
+    SetSessionBaseOutcome, Snapshot, ToggleReviewed,
 };
 use claude_commander_protocol::comment::{ApplyOutcome, Comment};
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
@@ -855,12 +855,18 @@ impl RemoteClient {
         .await
     }
 
-    pub async fn toggle_file_reviewed(
+    /// Set or clear a file's reviewed mark (never a toggle), returning the new
+    /// state. See [`ToggleReviewed::reviewed`] for why a view says which way.
+    pub async fn set_file_reviewed(
         &self,
         id: SessionId,
         display_path: String,
+        reviewed: bool,
     ) -> ClientResult<bool> {
-        let body = ToggleReviewed { display_path };
+        let body = ToggleReviewed {
+            display_path,
+            reviewed: Some(reviewed),
+        };
         let out: ReviewedToggle = self
             .post_json_within(
                 self.session_url(id, &["files", "reviewed"]),
@@ -869,6 +875,16 @@ impl RemoteClient {
             )
             .await?;
         Ok(out.reviewed)
+    }
+
+    /// The session's stored reviewed marks (unpruned), for an open review view
+    /// to poll. Bounded like the other review store reads.
+    pub async fn reviewed_marks(&self, id: SessionId) -> ClientResult<Vec<ReviewedFileMark>> {
+        self.get_json_within(
+            self.session_url(id, &["files", "reviewed"]),
+            REVIEW_WRITE_TIMEOUT,
+        )
+        .await
     }
 
     pub async fn fetch_diff_blob(
