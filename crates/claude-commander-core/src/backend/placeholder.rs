@@ -24,6 +24,7 @@ use crate::api::{
 };
 use crate::comment::{ApplyOutcome, Comment};
 use crate::session::{ProjectId, ScanResult, SessionId};
+use claude_commander_protocol::api::ReviewedFileMark;
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
 use claude_commander_protocol::workspace::SetWorkspacesRequest;
 
@@ -292,7 +293,16 @@ impl CommanderBackend for PlaceholderBackend {
         self.unavailable()
     }
 
-    async fn toggle_file_reviewed(&self, _id: SessionId, _display_path: String) -> BResult<bool> {
+    async fn set_file_reviewed(
+        &self,
+        _id: SessionId,
+        _display_path: String,
+        _reviewed: bool,
+    ) -> BResult<bool> {
+        self.unavailable()
+    }
+
+    async fn reviewed_marks(&self, _id: SessionId) -> BResult<Vec<ReviewedFileMark>> {
         self.unavailable()
     }
 

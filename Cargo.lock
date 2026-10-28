@@ -955,6 +955,7 @@ dependencies = [
  "claude-commander-protocol",
  "fuzzy-matcher",
  "serde_json",
+ "xxhash-rust",
 ]
 
 [[package]]

@@ -43,7 +43,8 @@
 //! | `refresh_review_if_changed` | `GET /api/sessions/{id}/review/refresh?prev_hash=` (204 → `None`) |
 //! | `create_comment` / `delete_comment` | `POST` / `DELETE /api/sessions/{id}/comments[/{cid}]` |
 //! | `apply_comments` | `POST /api/sessions/{id}/comments/apply` |
-//! | `toggle_file_reviewed` | `POST /api/sessions/{id}/files/reviewed` |
+//! | `set_file_reviewed` | `POST /api/sessions/{id}/files/reviewed` |
+//! | `reviewed_marks` | `GET /api/sessions/{id}/files/reviewed` |
 //! | `fetch_diff_blob` | `GET /api/sessions/{id}/blob?side=&path=` |
 //! | `attach` | `GET /ws/attach` (WebSocket; see [`attach`]) |
 //!

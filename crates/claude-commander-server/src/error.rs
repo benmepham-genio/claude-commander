@@ -72,6 +72,17 @@ impl ApiError {
             | CoreError::Session(SessionError::TmuxSessionNotFound(_))
             | CoreError::Session(SessionError::FileNotInDiff(_)) => StatusCode::NOT_FOUND,
 
+            // A review-diff selection naming a file that isn't there is a 404;
+            // one whose only problem is a stale `@hash` is a conflict with the
+            // file's current content (409).
+            CoreError::Session(SessionError::FileSelectionRejected { missing, .. }) => {
+                if missing.is_empty() {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::NOT_FOUND
+                }
+            }
+
             // Conflicting existing state → 409.
             CoreError::Session(SessionError::AlreadyExists(_))
             | CoreError::Session(SessionError::InvalidState(_))
@@ -158,6 +169,21 @@ mod tests {
         let err = ApiError(CoreError::Session(SessionError::NotFound(SessionId::new())));
         assert_eq!(err.status(), StatusCode::NOT_FOUND);
         assert_eq!(err.kind(), "session");
+    }
+
+    /// A stale `@hash` alone is a conflict with the file's current content; a
+    /// named file that isn't in the diff at all is a 404 even beside one.
+    #[test]
+    fn file_selection_rejected_is_409_when_only_stale_else_404() {
+        let rejected = |missing: &[&str], changed: &[&str]| {
+            ApiError(CoreError::Session(SessionError::FileSelectionRejected {
+                missing: missing.iter().map(|s| s.to_string()).collect(),
+                changed: changed.iter().map(|s| s.to_string()).collect(),
+            }))
+            .status()
+        };
+        assert_eq!(rejected(&[], &["b.rs"]), StatusCode::CONFLICT);
+        assert_eq!(rejected(&["a.rs"], &["b.rs"]), StatusCode::NOT_FOUND);
     }
 
     #[test]

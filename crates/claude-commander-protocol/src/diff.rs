@@ -20,6 +20,17 @@ pub enum LineOrigin {
     Deletion,
 }
 
+impl LineOrigin {
+    /// The unified-diff column prefix for a line of this origin.
+    pub fn prefix(self) -> char {
+        match self {
+            LineOrigin::Addition => '+',
+            LineOrigin::Deletion => '-',
+            LineOrigin::Context => ' ',
+        }
+    }
+}
+
 /// A single line within a hunk, with resolved old/new line numbers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -55,6 +66,18 @@ pub enum FileStatus {
     Deleted,
     Modified,
     Renamed,
+}
+
+impl FileStatus {
+    /// The one-letter marker git uses for this status (`A`/`D`/`M`/`R`).
+    pub fn marker(self) -> char {
+        match self {
+            FileStatus::Added => 'A',
+            FileStatus::Deleted => 'D',
+            FileStatus::Modified => 'M',
+            FileStatus::Renamed => 'R',
+        }
+    }
 }
 
 /// What kind of binary a file is, for consumers deciding how to render it.

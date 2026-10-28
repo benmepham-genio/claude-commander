@@ -113,14 +113,21 @@ pub struct NewComment {
     pub comment: String,
 }
 
-/// Request to toggle a file's reviewed mark. Carries only the display path —
-/// the server resolves the file in the *current* review diff and hashes that,
-/// so clients never echo (or cache) the full `FileDiff` and a mark can't be
-/// recorded against a stale copy of the file.
+/// Request to toggle (or set) a file's reviewed mark. Carries only the display
+/// path — the server resolves the file in the *current* review diff and hashes
+/// that, so clients never echo (or cache) the full `FileDiff` and a mark can't
+/// be recorded against a stale copy of the file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ToggleReviewed {
     pub display_path: String,
+    /// The state the client wants, from what *it* shows; absent toggles. A
+    /// view whose copy of the file is older than the stored mark (set by the
+    /// CLI meanwhile) would otherwise flip that mark off when the user meant
+    /// to mark the file. Additive: an older server ignores it and toggles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub reviewed: Option<bool>,
 }
 
 /// Which side of a diff a binary blob fetch refers to: the base ("before") or
@@ -586,6 +593,19 @@ pub struct ReviewedToggle {
     pub reviewed: bool,
 }
 
+/// `GET /sessions/{id}/files/reviewed` element: one stored reviewed mark, as
+/// persisted — *not* pruned against the current diff, since that would cost a
+/// compose per poll. A mark only applies to the copy of the file whose diff
+/// hashes to `hash`; `claude_commander_viewmodel::review` holds the hash and
+/// the rules for applying a polled mark, shared by every frontend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewedFileMark {
+    /// Display path of the marked file.
+    pub file: String,
+    /// Hex hunk hash of the file at mark time.
+    pub hash: String,
+}
+
 /// `POST /projects/scan` response: how many repositories under the scanned
 /// directory were newly registered, and how many were already known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -661,6 +681,14 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ReviewedToggle { reviewed: true }).unwrap(),
             r#"{"reviewed":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ReviewedFileMark {
+                file: "src/a.rs".into(),
+                hash: "00000000000000ff".into()
+            })
+            .unwrap(),
+            r#"{"file":"src/a.rs","hash":"00000000000000ff"}"#
         );
         assert_eq!(
             serde_json::to_string(&ScanResponse {

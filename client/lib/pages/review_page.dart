@@ -181,10 +181,13 @@ class _ReviewBodyState extends State<ReviewBody> {
     if (_toggling.contains(displayPath)) return;
     setState(() => _toggling.add(displayPath));
     try {
-      final nowReviewed = await widget.api.toggleFileReviewed(
+      // Ask for the opposite of what this page shows rather than toggling
+      // the store, which may hold a mark set since the page loaded.
+      final nowReviewed = await widget.api.setFileReviewed(
         handle: widget.handle,
         sessionId: _id,
         displayPath: displayPath,
+        reviewed: !_reviewed.contains(displayPath),
       );
       if (!mounted) return;
       setState(() {

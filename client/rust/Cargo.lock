@@ -689,6 +689,7 @@ version = "0.38.0"
 dependencies = [
  "claude-commander-protocol",
  "fuzzy-matcher",
+ "xxhash-rust",
 ]
 
 [[package]]

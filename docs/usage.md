@@ -47,6 +47,12 @@ claude-commander attach feature-remote --remote workstation
 # Dump recent terminal output from a session (default 100 lines, max 10000)
 claude-commander log feature-auth --lines 200
 
+# Inspect a session's review diff and mark files reviewed (see "Marking files
+# reviewed from the CLI" below)
+claude-commander review files feature-auth --unreviewed
+claude-commander review diff feature-auth src/auth.rs
+claude-commander review mark feature-auth src/auth.rs src/lib.rs
+
 # Show configuration
 claude-commander config
 
@@ -142,6 +148,34 @@ detaching to the board. `Alt-r` is used rather than `Ctrl-r` so a
 shell's `Ctrl-r` reverse-history-search is never shadowed; the toggle is wired
 up for Claude sessions only.
 
+### Marking files reviewed from the CLI
+
+`claude-commander review` exposes the review view's per-file "reviewed" marks
+(`m` in the view) so a script or an agent can triage a diff for you — e.g.
+"mark every file whose only change is imports as reviewed":
+
+```bash
+claude-commander review files <session> [--unreviewed] [--json]  # files, +/- counts, reviewed state, hash
+claude-commander review diff  <session> [FILE…] [--unreviewed]   # unified diff, exactly what the view shows; FILE may be PATH@HASH
+claude-commander review mark   <session> FILE… | --all [--json]  # FILE may be PATH@HASH
+claude-commander review unmark <session> FILE… | --all [--json]
+```
+
+Files are named by the path `review files` prints (the old path for a deleted
+file). `mark`/`unmark` are idempotent and all-or-nothing: a path that is not in
+the diff fails the command without marking anything. Giving a file as
+`PATH@HASH`, with the hash from `review files --json`, also refuses the mark
+if the file has changed since — so a script can't pin a mark to content it
+never read while the session's agent is still editing. A refusal lists every
+bad file at once, and `diff` accepts the same `PATH@HASH` form. As with `m`, a
+mark is pinned to the file's current diff and clears itself when that file
+changes again. An open TUI review view picks up marks changed this way within
+about a second for a local session (about five for a remote one), collapsing
+any directory they finish; the web and mobile review views show them on their
+next refresh.
+`files` and `diff` are read-only. The command works on local sessions; for a
+session on a remote server, run it on that server.
+
 ### Pasting images into a remote session
 
 Claude Code accepts a pasted image on `Ctrl-V` by reading the clipboard of the
@@ -187,7 +221,11 @@ foreground-only colouring on 256- and 16-colour terminals.
   unreviewed file (wrapping); unmarking stays put. Marks persist per session
   across restarts and clear automatically when a file's diff changes or it
   leaves the diff (GitHub "Viewed" semantics), so a re-edited file demands a
-  fresh look. The tree title shows progress (`Files (3/7 reviewed)`).
+  fresh look. A directory whose files are all reviewed folds away — when you
+  mark its last file, when marks set elsewhere (the `review` CLI) arrive, when
+  the view opens, and when a refresh finishes it. A finished directory you
+  expand again stays open across refreshes. The tree title shows progress
+  (`Files (3/7 reviewed)`).
 - **Binary & image files**: image files (PNG, JPEG, GIF, WebP, BMP, …) render
   inline in the diff body using the terminal's graphics protocol (Kitty,
   iTerm2, or Sixel), falling back to Unicode half-blocks on terminals without
