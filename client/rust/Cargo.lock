@@ -591,7 +591,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "claude-commander-client"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "claude-commander-protocol",
  "futures-util",
@@ -608,7 +608,7 @@ dependencies = [
 
 [[package]]
 name = "claude-commander-core"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -641,7 +641,7 @@ dependencies = [
 
 [[package]]
 name = "claude-commander-protocol"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "chrono",
  "serde",
@@ -651,7 +651,7 @@ dependencies = [
 
 [[package]]
 name = "claude-commander-server"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "axum",
  "clap",
@@ -674,7 +674,7 @@ dependencies = [
 
 [[package]]
 name = "claude-commander-test-support"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "axum",
  "claude-commander-core",
@@ -685,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "claude-commander-viewmodel"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "claude-commander-protocol",
  "fuzzy-matcher",
