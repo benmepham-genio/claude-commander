@@ -44,12 +44,7 @@ pub fn fuzzy_score(haystack: String, needle: String) -> Option<i32> {
 /// Best score across a session's title, branch and program — the ranking rule
 /// the TUI's palette applies. The project name is deliberately not matched.
 #[frb(sync)]
-pub fn session_score(
-    title: String,
-    branch: String,
-    program: String,
-    query: String,
-) -> Option<i32> {
+pub fn session_score(title: String, branch: String, program: String, query: String) -> Option<i32> {
     claude_commander_viewmodel::session_score(&title, &branch, &program, &query).map(narrow)
 }
 

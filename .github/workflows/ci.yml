@@ -47,6 +47,10 @@ jobs:
       - name: Check Formatting
         run: cargo fmt --all -- --check
 
+      # client/rust is excluded from the workspace, so `--all` skips it.
+      - name: Check Client Rust Formatting
+        run: cargo fmt --manifest-path client/rust/Cargo.toml --all -- --check
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
@@ -499,6 +503,10 @@ jobs:
       # See the Build & Test job's step of the same name.
       - name: Poison Git Signing
         run: bash -c 'source scripts/lib/dev-common.sh && cc_poisoned_gitconfig' > "$RUNNER_TEMP/poisoned-gitconfig"
+
+      # client/rust is outside the workspace, so the Clippy job never sees it.
+      - name: Run cdylib Clippy
+        run: nix develop .#clientCi -c bash -c 'cd client/rust && cargo clippy --locked --all-targets -- -D warnings'
 
       - name: Run cdylib Integration Tests
         env:
