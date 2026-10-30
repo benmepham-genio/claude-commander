@@ -1,17 +1,7 @@
 name: Binaries
 
-# Prebuilt `claude-commander` + `claude-commander-server` for every commit on
-# main that passes CI, published as a rolling `main-build` prerelease. Tagged
-# releases still ship source only (publish-tap.yml / publish-aur.yml).
-#
-# Triggered by CI *completing* rather than by the push, so a commit that breaks
-# CI is never published. None of CI's own builds can be shipped instead: the Nix
-# build is linked against /nix/store, the rest are debug, and nothing builds
-# aarch64 Linux. A `workflow_run` trigger always uses this file as it is on the
-# default branch, so changes to the trigger take effect only once merged.
-#
-# A pull request that edits this file runs the build matrix (never the publish
-# job), so a change to the build is exercised before it reaches main.
+# Prebuilt binaries for every main commit that passes CI, as the rolling `main-build` prerelease.
+# PRs touching this file run the build only.
 on:
   workflow_run:
     workflows: [CI]
@@ -21,27 +11,19 @@ on:
     paths:
       - .github/workflows/binaries.yml
 
-# A newer green main commit supersedes an in-flight main build: only the latest one
-# is ever published, so there is nothing worth finishing.
 concurrency:
   group: binaries-${{ github.ref }}
   cancel-in-progress: true
 
-# Same backstop as ci.yml. Nothing here runs the app beyond `--version`, but the
-# baked telemetry credential is compiled into these binaries all the same.
 env:
   DO_NOT_TRACK: "1"
-  # The commit being built. Under `workflow_run`, GITHUB_SHA is the default
-  # branch's tip when the event fired, not the commit CI just passed; under
-  # `pull_request` it is a synthetic merge commit.
+  # workflow_run's GITHUB_SHA is main's tip, not the commit CI passed.
   BUILD_SHA: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
 
 jobs:
   build:
     name: Build (${{ matrix.target }})
-    # `branches: [main]` above filters on the head branch *name*, which a pull
-    # request from a fork's own `main` also matches, so additionally require a
-    # successful push run in this repository.
+    # `branches: [main]` also matches a fork's `main`, so require a push run in this repo.
     if: >-
       github.event_name == 'pull_request' ||
       (github.event.workflow_run.conclusion == 'success' &&
@@ -52,12 +34,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 24.04, not the older-glibc 22.04: libspa-sys 0.10 (cpal's PipeWire
-          # backend) binds against PipeWire headers newer than 22.04's 0.3.48,
-          # which lack `spa_video_info_raw.flags`, `spa_meta_first` and
-          # `spa_meta_region_is_valid` — the build fails there (run 40089122857).
-          # So the floor is 24.04's glibc 2.39: a binary runs on any glibc at
-          # least as new as the one it was linked against.
+          # 24.04: libspa-sys needs newer PipeWire headers than 22.04 has. Sets the glibc 2.39 floor.
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-24.04
           - target: aarch64-unknown-linux-gnu
@@ -70,18 +47,13 @@ jobs:
         with:
           ref: ${{ env.BUILD_SHA }}
 
-      # Plain rustup, not the Nix dev shell the CI jobs use: a binary built
-      # against the Nix store carries a /nix/store ELF interpreter and RPATHs,
-      # and would not start on an ordinary distro.
+      # Not Nix: Nix-built binaries link /nix/store and won't run on other distros.
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      # The apt equivalents of flake.nix's package inputs: core's default
-      # `audio` feature links ALSA and libpipewire (cpal/rodio), and the
-      # pipewire-sys/libspa-sys build scripts run bindgen, which needs libclang.
-      # macOS needs nothing — CoreAudio ships in the SDK.
+      # ALSA/PipeWire for the `audio` feature; libclang for bindgen.
       - name: Install Linux Build Dependencies
         if: runner.os == 'Linux'
         run: |
@@ -95,8 +67,6 @@ jobs:
           shared-key: binaries-${{ matrix.target }}
           save-if: ${{ github.event_name == 'workflow_run' }}
 
-      # The real `[profile.release]` (fat LTO, strip), so a main build is exactly
-      # what a release build would be. Nobody waits on a post-merge run.
       - name: Build
         run: >-
           cargo build --locked --release --target ${{ matrix.target }}
@@ -113,13 +83,11 @@ jobs:
              "target/${{ matrix.target }}/release/claude-commander-server" \
              README.md LICENSE "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
-          # `shasum` exists on both runner OSes; sha256sum is not on macOS.
           (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
           echo "dir=dist/$name" >> "$GITHUB_OUTPUT"
           echo "name=$name" >> "$GITHUB_OUTPUT"
 
-      # Runs the packaged copies, so a shared library missing on the runner
-      # fails here at load time rather than on a user's machine.
+      # Catches missing shared libraries.
       - name: Smoke Test
         shell: bash
         run: |
@@ -150,15 +118,7 @@ jobs:
           path: dist
           merge-multiple: true
 
-      # Delete and recreate rather than moving the `main-build` tag in place: the
-      # release and its tag are replaced together, and nothing is force-pushed.
-      # `--prerelease` keeps it off "latest", so releases/latest — and with it
-      # the Homebrew and AUR flows — still resolve to the last tagged release.
-      #
-      # CI runs for successive commits can finish out of order, and
-      # cancel-in-progress only cancels a run that is still going. So before
-      # replacing anything, skip if the current main build is already a newer
-      # commit than this one.
+      # Prerelease keeps it off releases/latest (Homebrew/AUR). Skip if a newer commit is already published.
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
