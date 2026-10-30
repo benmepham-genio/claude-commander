@@ -182,14 +182,11 @@ jobs:
           fi
           short="${BUILD_SHA::7}"
           cat > notes.md <<EOF
-          Automated build of [\`${short}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${BUILD_SHA}) on \`main\`. Not a release — expect rough edges.
+          Build of [\`${short}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${BUILD_SHA}) on \`main\`. Not a release.
 
-          Each archive holds \`claude-commander\` (the TUI/CLI) and \`claude-commander-server\` (headless server + web UI).
-
-          **Runtime requirements**
-          - \`tmux\` and \`git\` on \`PATH\`.
-          - Linux: \`claude-commander\` links \`libasound.so.2\` and \`libpipewire-0.3.so.0\` (ALSA and PipeWire, present on desktop distros). \`claude-commander-server\` has no audio dependencies. Needs glibc 2.39 or newer (Ubuntu 24.04, Debian 13, Fedora 40 and later).
-          - macOS: the binaries are unsigned; clear the quarantine flag with \`xattr -d com.apple.quarantine claude-commander claude-commander-server\`.
+          - Needs \`tmux\` and \`git\`.
+          - Linux: glibc 2.39+; \`claude-commander\` needs ALSA and PipeWire.
+          - macOS: unsigned — \`xattr -d com.apple.quarantine claude-commander*\`.
           EOF
           gh release delete main-build --cleanup-tag --yes || true
           gh release create main-build \
