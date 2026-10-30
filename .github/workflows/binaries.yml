@@ -1,16 +1,19 @@
 name: Binaries
 
 # Prebuilt `claude-commander` + `claude-commander-server` for every commit on
-# main that passes CI, published as a rolling `main-build` prerelease. Tagged
-# releases still ship source only (publish-tap.yml / publish-aur.yml).
+# main that passes CI, published as a rolling `main-build` prerelease, and for
+# every stable `v*` tag, attached to that tag's release. Pre-release tags
+# (`v1.2.3-rc.1`) are skipped, as in publish-tap.yml.
 #
-# Triggered by CI *completing* rather than by the push, so a commit that breaks
-# CI is never published. None of CI's own builds can be shipped instead: the Nix
-# build is linked against /nix/store, the rest are debug, and nothing builds
-# aarch64 Linux. A `workflow_run` trigger always uses this file as it is on the
-# default branch, so changes to the trigger take effect only once merged.
+# Main builds are triggered by CI *completing* rather than by the push, so a
+# commit that breaks CI is never published. Tag builds run on the tag push:
+# release tags are cut from main, whose commits CI has already passed. None of
+# CI's own builds can be shipped instead: the Nix build is linked against
+# /nix/store, the rest are debug, and nothing builds aarch64 Linux. A
+# `workflow_run` trigger always uses this file as it is on the default branch,
+# so changes to the trigger take effect only once merged.
 #
-# A pull request that edits this file runs the build matrix (never the publish
+# A pull request that edits this file runs the build matrix (never a publish
 # job), so a change to the build is exercised before it reaches main.
 on:
   workflow_run:
@@ -20,9 +23,11 @@ on:
   pull_request:
     paths:
       - .github/workflows/binaries.yml
+  push:
+    tags: ['v*']
 
-# A newer green main commit supersedes an in-flight main build: only the latest one
-# is ever published, so there is nothing worth finishing.
+# A newer green main commit supersedes an in-flight main build: only the latest
+# one is ever published, so there is nothing worth finishing.
 concurrency:
   group: binaries-${{ github.ref }}
   cancel-in-progress: true
@@ -33,8 +38,9 @@ env:
   DO_NOT_TRACK: "1"
   # The commit being built. Under `workflow_run`, GITHUB_SHA is the default
   # branch's tip when the event fired, not the commit CI just passed; under
-  # `pull_request` it is a synthetic merge commit.
-  BUILD_SHA: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
+  # `pull_request` it is a synthetic merge commit; under a tag push it is the
+  # tagged commit.
+  BUILD_SHA: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha || github.sha }}
 
 jobs:
   build:
@@ -46,7 +52,8 @@ jobs:
       github.event_name == 'pull_request' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push' &&
-       github.event.workflow_run.head_repository.full_name == github.repository)
+       github.event.workflow_run.head_repository.full_name == github.repository) ||
+      (github.event_name == 'push' && !contains(github.ref_name, '-'))
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -93,7 +100,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: binaries-${{ matrix.target }}
-          save-if: ${{ github.event_name == 'workflow_run' }}
+          save-if: ${{ github.event_name != 'pull_request' }}
 
       # The real `[profile.release]` (fat LTO, strip), so a main build is exactly
       # what a release build would be. Nobody waits on a post-merge run.
@@ -107,7 +114,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          name="claude-commander-main-${BUILD_SHA::7}-${{ matrix.target }}"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then label="$GITHUB_REF_NAME"; else label="main-${BUILD_SHA::7}"; fi
+          name="claude-commander-$label-${{ matrix.target }}"
           mkdir -p "dist/$name"
           cp "target/${{ matrix.target }}/release/claude-commander" \
              "target/${{ matrix.target }}/release/claude-commander-server" \
@@ -190,3 +198,31 @@ jobs:
             --title "Main build (${short})" \
             --notes-file notes.md \
             dist/*
+
+  release:
+    name: Publish Release Binaries
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Archives
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      # publish-tap.yml creates the release on the same tag push and normally
+      # wins by minutes; create it here only if it doesn't exist yet, and
+      # publish-tap's action then updates it rather than making a second one.
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --verify-tag --generate-notes
+          gh release upload "$TAG" dist/* --clobber
