@@ -1,0 +1,149 @@
+name: Binaries
+
+# Prebuilt binaries for every main commit that passes CI, as the rolling `main-build` prerelease.
+# PRs touching this file run the build only.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  pull_request:
+    paths:
+      - .github/workflows/binaries.yml
+
+concurrency:
+  group: binaries-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DO_NOT_TRACK: "1"
+  # workflow_run's GITHUB_SHA is main's tip, not the commit CI passed.
+  BUILD_SHA: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    # `branches: [main]` also matches a fork's `main`, so require a push run in this repo.
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 24.04: libspa-sys needs newer PipeWire headers than 22.04 has. Sets the glibc 2.39 floor.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.BUILD_SHA }}
+
+      # Not Nix: Nix-built binaries link /nix/store and won't run on other distros.
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # ALSA/PipeWire for the `audio` feature; libclang for bindgen.
+      - name: Install Linux Build Dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libpipewire-0.3-dev libclang-dev clang
+
+      - name: Restore Cargo Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: binaries-${{ matrix.target }}
+          save-if: ${{ github.event_name == 'workflow_run' }}
+
+      - name: Build
+        run: >-
+          cargo build --locked --release --target ${{ matrix.target }}
+          -p claude-commander -p claude-commander-server
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="claude-commander-main-${BUILD_SHA::7}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/claude-commander" \
+             "target/${{ matrix.target }}/release/claude-commander-server" \
+             README.md LICENSE "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+          echo "dir=dist/$name" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      # Catches missing shared libraries.
+      - name: Smoke Test
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${{ steps.package.outputs.dir }}/claude-commander" --version
+          "${{ steps.package.outputs.dir }}/claude-commander-server" --version
+
+      - name: Upload Archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  main-build:
+    name: Publish Main Build
+    needs: build
+    if: github.event_name == 'workflow_run'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Archives
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Prerelease keeps it off releases/latest (Homebrew/AUR). Skip if a newer commit is already published.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if current=$(gh api "repos/$GH_REPO/commits/main-build" --jq .sha 2>/dev/null); then
+            status=$(gh api "repos/$GH_REPO/compare/${BUILD_SHA}...${current}" --jq .status)
+            if [ "$status" = "ahead" ]; then
+              echo "main-build is already at ${current}, newer than ${BUILD_SHA}; not replacing it"
+              exit 0
+            fi
+          fi
+          short="${BUILD_SHA::7}"
+          cat > notes.md <<EOF
+          Build of [\`${short}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${BUILD_SHA}) on \`main\`. Not a release.
+
+          - Needs \`tmux\` and \`git\`.
+          - Linux: glibc 2.39+; \`claude-commander\` needs ALSA and PipeWire.
+          - macOS: unsigned — \`xattr -d com.apple.quarantine claude-commander*\`.
+          EOF
+          gh release delete main-build --cleanup-tag --yes || true
+          gh release create main-build \
+            --prerelease \
+            --target "$BUILD_SHA" \
+            --title "Main build (${short})" \
+            --notes-file notes.md \
+            dist/*
