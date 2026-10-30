@@ -89,7 +89,7 @@ resume_session = true
 # hibernate_check_interval_secs = 600
 
 # Launch sessions inside `nix develop` when the project has a `flake.nix` at
-# its root and `nix` is on PATH, so the agent and shell get the project's dev
+# its root or in `nix/`, and `nix` is on PATH, so the agent and shell get the project's dev
 # environment. Applies to Claude sessions and shell sessions. Projects without
 # a flake are unaffected.
 nix_develop = true

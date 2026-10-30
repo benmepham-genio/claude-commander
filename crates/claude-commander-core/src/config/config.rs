@@ -229,7 +229,7 @@ pub struct Config {
     pub resume_session: bool,
 
     /// Launch sessions inside `nix develop` when the project has a `flake.nix`
-    /// at its root and `nix` is on PATH. Applies to Claude sessions and shell
+    /// at its root or in `nix/`, and `nix` is on PATH. Applies to Claude sessions and shell
     /// sessions alike. Default true; projects without a flake are unaffected.
     #[serde(default = "default_true")]
     pub nix_develop: bool,

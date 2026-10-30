@@ -8,14 +8,14 @@ use std::sync::{Mutex, OnceLock};
 use super::*;
 
 /// Wrap a shell command string so it runs inside the Nix dev shell of the
-/// pane's working directory (`nix develop`'s flake ref defaults to `.`).
+/// flake at `flake_ref`, relative to the pane's working directory.
 ///
 /// The command is a full shell string (it may already contain quoting), not
 /// an argv list, so it must go through `sh -c` as a single argument. `exec`
 /// replaces that `sh` with the program, avoiding an extra process layer.
-pub(super) fn wrap_in_nix_develop(cmd: &str) -> String {
+pub(super) fn wrap_in_nix_develop(cmd: &str, flake_ref: &str) -> String {
     let escaped = lifecycle::shell_escape_single_quote(&format!("exec {cmd}"));
-    format!("nix develop --command sh -c '{escaped}'")
+    format!("nix develop {flake_ref} --command sh -c '{escaped}'")
 }
 
 /// Whether a `nix` executable exists in any directory of the given PATH value.
@@ -30,30 +30,36 @@ fn nix_available() -> bool {
     *AVAILABLE.get_or_init(|| nix_in_path(std::env::var_os("PATH").as_deref()))
 }
 
-/// Whether a launch in `dir` should run inside `nix develop`: the config
-/// option is on, the directory has a `flake.nix` at its root, and nix is
-/// installed.
-fn should_use_nix_develop(enabled: bool, dir: &Path, nix_available: bool) -> bool {
-    enabled && nix_available && dir.join("flake.nix").is_file()
+/// The flake ref a launch in `dir` should run `nix develop` against, if any:
+/// the config option is on, nix is installed, and the directory has a
+/// `flake.nix` at its root or, failing that, in a `nix/` subdirectory.
+fn nix_develop_flake_ref(enabled: bool, dir: &Path, nix_available: bool) -> Option<&'static str> {
+    if !enabled || !nix_available {
+        return None;
+    }
+    [".", "./nix"]
+        .into_iter()
+        .find(|flake_ref| dir.join(flake_ref).join("flake.nix").is_file())
 }
 
-/// Whether to spawn a background `nix develop` pre-warm for `dir`: the launch
-/// would use nix develop (see `should_use_nix_develop`) *and* we haven't already
-/// attempted a warm for this directory this process. Records the directory in
-/// `seen` on the first `true`, so each repo is warm-attempted at most once per
-/// process — rapidly creating several sessions in one project only warms once.
-/// Note this dedups on *attempt*, not success: a failed warm won't be retried.
-fn should_prewarm(
+/// The flake ref to pre-warm for `dir`, if any: the launch would use nix
+/// develop (see `nix_develop_flake_ref`) *and* we haven't already attempted a
+/// warm for this directory this process. Records the directory in `seen` on
+/// the first `Some`, so each repo is warm-attempted at most once per process —
+/// rapidly creating several sessions in one project only warms once. Note this
+/// dedups on *attempt*, not success: a failed warm won't be retried.
+fn prewarm_flake_ref(
     enabled: bool,
     dir: &Path,
     nix_available: bool,
     seen: &Mutex<HashSet<PathBuf>>,
-) -> bool {
-    if !should_use_nix_develop(enabled, dir, nix_available) {
-        return false;
-    }
+) -> Option<&'static str> {
+    let flake_ref = nix_develop_flake_ref(enabled, dir, nix_available)?;
     // insert() returns true when the value was newly inserted (not yet warmed).
-    seen.lock().unwrap().insert(dir.to_path_buf())
+    seen.lock()
+        .unwrap()
+        .insert(dir.to_path_buf())
+        .then_some(flake_ref)
 }
 
 /// Process-global set of repo paths already pre-warmed this run.
@@ -64,15 +70,16 @@ fn prewarmed_repos() -> &'static Mutex<HashSet<PathBuf>> {
 
 impl SessionManager {
     /// Wrap `cmd` in `nix develop --command` when `dir` is a flake project
-    /// (see `should_use_nix_develop`); otherwise return it unchanged. Applied
+    /// (see `nix_develop_flake_ref`); otherwise return it unchanged. Applied
     /// as the outermost layer of every launch command, after Claude-specific
     /// flag injection.
     pub(super) fn maybe_wrap_nix_develop(&self, cmd: &str, dir: &Path) -> String {
-        if should_use_nix_develop(self.config_store.read().nix_develop, dir, nix_available()) {
-            info!("Launching inside nix develop shell at {}", dir.display());
-            wrap_in_nix_develop(cmd)
-        } else {
-            cmd.to_string()
+        match nix_develop_flake_ref(self.config_store.read().nix_develop, dir, nix_available()) {
+            Some(flake_ref) => {
+                info!("Launching inside nix develop shell at {}", dir.display());
+                wrap_in_nix_develop(cmd, flake_ref)
+            }
+            None => cmd.to_string(),
         }
     }
 
@@ -88,18 +95,20 @@ impl SessionManager {
     ///
     /// Fire-and-forget and best-effort: no-op when the project isn't a nix
     /// flake (or `nix_develop` is off / nix is absent), and warms each repo at
-    /// most once per process (see `should_prewarm`).
+    /// most once per process (see `prewarm_flake_ref`).
     pub(super) fn prewarm_nix_shell(&self, repo_path: &Path) {
         let enabled = self.config_store.read().nix_develop;
-        if !should_prewarm(enabled, repo_path, nix_available(), prewarmed_repos()) {
+        let Some(flake_ref) =
+            prewarm_flake_ref(enabled, repo_path, nix_available(), prewarmed_repos())
+        else {
             return;
-        }
+        };
         info!("Pre-warming nix dev shell at {}", repo_path.display());
         let dir = repo_path.to_path_buf();
         tokio::spawn(async move {
             let result = tokio::process::Command::new("nix")
                 .current_dir(&dir)
-                .args(["develop", "--command", "true"])
+                .args(["develop", flake_ref, "--command", "true"])
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -134,43 +143,68 @@ mod nix_tests {
     #[test]
     fn wrap_simple_command() {
         assert_eq!(
-            wrap_in_nix_develop("claude"),
-            "nix develop --command sh -c 'exec claude'"
+            wrap_in_nix_develop("claude", "."),
+            "nix develop . --command sh -c 'exec claude'"
+        );
+    }
+
+    #[test]
+    fn wrap_uses_given_flake_ref() {
+        assert_eq!(
+            wrap_in_nix_develop("claude", "./nix"),
+            "nix develop ./nix --command sh -c 'exec claude'"
         );
     }
 
     #[test]
     fn wrap_escapes_single_quotes_in_command() {
         assert_eq!(
-            wrap_in_nix_develop("claude -n 'my session' --resume"),
-            "nix develop --command sh -c 'exec claude -n '\\''my session'\\'' --resume'"
+            wrap_in_nix_develop("claude -n 'my session' --resume", "."),
+            "nix develop . --command sh -c 'exec claude -n '\\''my session'\\'' --resume'"
         );
     }
 
     #[test]
-    fn should_use_requires_flake_file() {
+    fn flake_ref_requires_flake_file() {
         let dir = tempfile::TempDir::new().unwrap();
-        assert!(!should_use_nix_develop(true, dir.path(), true));
+        assert_eq!(nix_develop_flake_ref(true, dir.path(), true), None);
 
         std::fs::write(dir.path().join("flake.nix"), "{}").unwrap();
-        assert!(should_use_nix_develop(true, dir.path(), true));
+        assert_eq!(nix_develop_flake_ref(true, dir.path(), true), Some("."));
     }
 
     #[test]
-    fn should_use_respects_config_and_nix_availability() {
+    fn flake_ref_finds_nix_subdirectory() {
         let dir = tempfile::TempDir::new().unwrap();
-        std::fs::write(dir.path().join("flake.nix"), "{}").unwrap();
-
-        assert!(!should_use_nix_develop(false, dir.path(), true));
-        assert!(!should_use_nix_develop(true, dir.path(), false));
+        std::fs::create_dir(dir.path().join("nix")).unwrap();
+        std::fs::write(dir.path().join("nix/flake.nix"), "{}").unwrap();
+        assert_eq!(nix_develop_flake_ref(true, dir.path(), true), Some("./nix"));
     }
 
     #[test]
-    fn should_use_ignores_flake_directory() {
+    fn flake_ref_prefers_root_flake_over_subdirectory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("flake.nix"), "{}").unwrap();
+        std::fs::create_dir(dir.path().join("nix")).unwrap();
+        std::fs::write(dir.path().join("nix/flake.nix"), "{}").unwrap();
+        assert_eq!(nix_develop_flake_ref(true, dir.path(), true), Some("."));
+    }
+
+    #[test]
+    fn flake_ref_respects_config_and_nix_availability() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("flake.nix"), "{}").unwrap();
+
+        assert_eq!(nix_develop_flake_ref(false, dir.path(), true), None);
+        assert_eq!(nix_develop_flake_ref(true, dir.path(), false), None);
+    }
+
+    #[test]
+    fn flake_ref_ignores_flake_directory() {
         // A directory named flake.nix is not a flake
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join("flake.nix")).unwrap();
-        assert!(!should_use_nix_develop(true, dir.path(), true));
+        assert_eq!(nix_develop_flake_ref(true, dir.path(), true), None);
     }
 
     #[test]
@@ -180,8 +214,21 @@ mod nix_tests {
         let seen = Mutex::new(HashSet::new());
 
         // First call warms; second call for the same dir is deduped.
-        assert!(should_prewarm(true, dir.path(), true, &seen));
-        assert!(!should_prewarm(true, dir.path(), true, &seen));
+        assert_eq!(prewarm_flake_ref(true, dir.path(), true, &seen), Some("."));
+        assert_eq!(prewarm_flake_ref(true, dir.path(), true, &seen), None);
+    }
+
+    #[test]
+    fn prewarm_uses_nix_subdirectory_flake() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("nix")).unwrap();
+        std::fs::write(dir.path().join("nix/flake.nix"), "{}").unwrap();
+        let seen = Mutex::new(HashSet::new());
+
+        assert_eq!(
+            prewarm_flake_ref(true, dir.path(), true, &seen),
+            Some("./nix")
+        );
     }
 
     #[test]
@@ -190,13 +237,13 @@ mod nix_tests {
 
         // Not a flake.
         let plain = tempfile::TempDir::new().unwrap();
-        assert!(!should_prewarm(true, plain.path(), true, &seen));
+        assert_eq!(prewarm_flake_ref(true, plain.path(), true, &seen), None);
 
         let flake = tempfile::TempDir::new().unwrap();
         std::fs::write(flake.path().join("flake.nix"), "{}").unwrap();
         // Config disabled, or nix unavailable — no warm, and nothing recorded.
-        assert!(!should_prewarm(false, flake.path(), true, &seen));
-        assert!(!should_prewarm(true, flake.path(), false, &seen));
+        assert_eq!(prewarm_flake_ref(false, flake.path(), true, &seen), None);
+        assert_eq!(prewarm_flake_ref(true, flake.path(), false, &seen), None);
     }
 
     #[test]
@@ -207,11 +254,11 @@ mod nix_tests {
         std::fs::write(b.path().join("flake.nix"), "{}").unwrap();
         let seen = Mutex::new(HashSet::new());
 
-        assert!(should_prewarm(true, a.path(), true, &seen));
+        assert!(prewarm_flake_ref(true, a.path(), true, &seen).is_some());
         // A different flake dir still warms once of its own.
-        assert!(should_prewarm(true, b.path(), true, &seen));
-        assert!(!should_prewarm(true, a.path(), true, &seen));
-        assert!(!should_prewarm(true, b.path(), true, &seen));
+        assert!(prewarm_flake_ref(true, b.path(), true, &seen).is_some());
+        assert!(prewarm_flake_ref(true, a.path(), true, &seen).is_none());
+        assert!(prewarm_flake_ref(true, b.path(), true, &seen).is_none());
     }
 
     #[test]
