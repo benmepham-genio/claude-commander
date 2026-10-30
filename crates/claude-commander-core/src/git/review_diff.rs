@@ -14,7 +14,6 @@ use std::path::Path;
 use std::process::Stdio;
 
 use tracing::warn;
-use xxhash_rust::xxh3::Xxh3;
 
 use super::diff::untracked_patch_and_count;
 use crate::error::{GitError, Result};
@@ -329,38 +328,11 @@ pub use claude_commander_protocol::diff::{
     BinaryInfo, BinaryKind, DiffLine, FileDiff, FileStatus, Hunk, LineOrigin, ParsedDiff,
 };
 
-/// Stable content hash of a file's diff: xxh3_64 over a canonical byte
-/// rendering of its hunks. Changes whenever any hunk header (position) or
-/// line changes; deliberately excludes the path, which is the identity key.
-pub fn file_diff_hash(file: &FileDiff) -> u64 {
-    let mut h = Xxh3::new();
-    for hunk in &file.hunks {
-        h.update(
-            format!(
-                "@@ -{},{} +{},{} @@{}\n",
-                hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines, hunk.header
-            )
-            .as_bytes(),
-        );
-        for line in &hunk.lines {
-            let origin = match line.origin {
-                LineOrigin::Addition => b'+',
-                LineOrigin::Deletion => b'-',
-                LineOrigin::Context => b' ',
-            };
-            h.update(&[origin]);
-            h.update(line.content.as_bytes());
-            h.update(b"\n");
-        }
-    }
-    h.digest()
-}
-
 /// The path git writes for the side a file does not exist on. `diffgrid`
 /// resolves both sides to the real path (an added file's "old path" is the path
 /// git *would* have used), but the wire model predates that and consumers —
 /// including the Flutter client — key off this sentinel, so it is restored here.
-const DEV_NULL: &str = "/dev/null";
+pub(crate) const DEV_NULL: &str = "/dev/null";
 
 /// Parse a unified diff (the output of `git diff`) into a [`ParsedDiff`].
 ///
@@ -411,7 +383,7 @@ fn convert_file(f: &diffgrid::FileDiff<'_>) -> FileDiff {
     // git diffs an LFS-tracked file as a textual diff of its pointer (never
     // "Binary files differ"), so a textual diff whose content is an LFS pointer
     // is really a binary change. Reclassify it as binary — but keep the hunks,
-    // since `file_diff_hash` keys reviewed marks off them and the pointer's
+    // since the reviewed-mark hash (`claude_commander_viewmodel::review::file_diff_hash`) keys marks off them and the pointer's
     // `oid` lines make that hash invalidate on re-upload.
     let lfs_sizes = (!f.is_binary())
         .then(|| lfs_pointer_sizes(&hunks))
@@ -989,7 +961,7 @@ index 1111111..2222222 100644
         // would report the ~130-byte pointer blob).
         assert_eq!(b.old_size, Some(10880));
         assert_eq!(b.new_size, Some(23676));
-        // Hunks are kept so file_diff_hash stays content-sensitive (the oid
+        // Hunks are kept so the reviewed-mark hash stays content-sensitive (the oid
         // lines change when the image is re-uploaded), not collapsed to empty.
         assert!(!f.hunks.is_empty());
     }
@@ -1590,7 +1562,10 @@ index 0000000..2222222
         let raw = one_file_diff("src/a.rs", "-1,2 +1,2", " ctx\n-old\n+new\n");
         let a = parse_unified_diff(&raw);
         let b = parse_unified_diff(&raw);
-        assert_eq!(file_diff_hash(&a.files[0]), file_diff_hash(&b.files[0]));
+        assert_eq!(
+            claude_commander_viewmodel::review::file_diff_hash(&a.files[0]),
+            claude_commander_viewmodel::review::file_diff_hash(&b.files[0])
+        );
     }
 
     #[test]
@@ -1605,7 +1580,10 @@ index 0000000..2222222
             "-1,2 +1,2",
             " ctx\n-old\n+newer\n",
         ));
-        assert_ne!(file_diff_hash(&a.files[0]), file_diff_hash(&b.files[0]));
+        assert_ne!(
+            claude_commander_viewmodel::review::file_diff_hash(&a.files[0]),
+            claude_commander_viewmodel::review::file_diff_hash(&b.files[0])
+        );
     }
 
     #[test]
@@ -1620,7 +1598,10 @@ index 0000000..2222222
             "-1,2 +1,3",
             " ctx\n-old\n+new\n+extra\n",
         ));
-        assert_ne!(file_diff_hash(&a.files[0]), file_diff_hash(&b.files[0]));
+        assert_ne!(
+            claude_commander_viewmodel::review::file_diff_hash(&a.files[0]),
+            claude_commander_viewmodel::review::file_diff_hash(&b.files[0])
+        );
     }
 
     #[test]
@@ -1636,7 +1617,10 @@ index 0000000..2222222
             "-10,2 +10,2",
             " ctx\n-old\n+new\n",
         ));
-        assert_ne!(file_diff_hash(&a.files[0]), file_diff_hash(&b.files[0]));
+        assert_ne!(
+            claude_commander_viewmodel::review::file_diff_hash(&a.files[0]),
+            claude_commander_viewmodel::review::file_diff_hash(&b.files[0])
+        );
     }
 
     #[test]
@@ -1653,6 +1637,9 @@ index 0000000..2222222
             "-1,2 +1,2",
             " ctx\n-old\n+new\n",
         ));
-        assert_eq!(file_diff_hash(&a.files[0]), file_diff_hash(&b.files[0]));
+        assert_eq!(
+            claude_commander_viewmodel::review::file_diff_hash(&a.files[0]),
+            claude_commander_viewmodel::review::file_diff_hash(&b.files[0])
+        );
     }
 }

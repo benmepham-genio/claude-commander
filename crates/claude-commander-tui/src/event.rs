@@ -361,6 +361,15 @@ pub enum StateUpdate {
         refreshed: Option<Box<super::app::ReviewPrepared>>,
         manual: bool,
     },
+    /// The open review's stored reviewed marks, polled so marks set elsewhere
+    /// (the `review` CLI, another frontend) show up live. `generation` is the
+    /// view's `reviewed_gen` at spawn time; a stale poll is dropped. `None`
+    /// when the read failed (reported only to clear the in-flight guard).
+    ReviewedMarksPolled {
+        session_id: SessionId,
+        generation: u64,
+        marks: Option<Vec<claude_commander_protocol::api::ReviewedFileMark>>,
+    },
 }
 
 /// User commands triggered by input

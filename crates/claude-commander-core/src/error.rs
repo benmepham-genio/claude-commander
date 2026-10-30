@@ -88,6 +88,15 @@ pub enum SessionError {
     #[error("File not in the current review diff: {0}")]
     FileNotInDiff(String),
 
+    /// Some named files of a review-diff selection can't be used: `missing`
+    /// aren't in the diff, `changed` were edited since their `@hash` was read.
+    /// Both are reported so a caller can fix every problem in one pass.
+    #[error("{}", file_selection_message(missing, changed))]
+    FileSelectionRejected {
+        missing: Vec<String>,
+        changed: Vec<String>,
+    },
+
     #[error("Invalid pasted image: {0}")]
     InvalidImage(String),
 
@@ -313,6 +322,25 @@ impl From<gix::discover::Error> for GitError {
     }
 }
 
+/// [`SessionError::FileSelectionRejected`]'s message: one clause per
+/// non-empty list.
+fn file_selection_message(missing: &[String], changed: &[String]) -> String {
+    let mut parts = Vec::new();
+    if !missing.is_empty() {
+        parts.push(format!(
+            "Not in the current review diff: {}",
+            missing.join(", ")
+        ));
+    }
+    if !changed.is_empty() {
+        parts.push(format!(
+            "Changed since its hash was read (re-read its diff): {}",
+            changed.join(", ")
+        ));
+    }
+    parts.join("; ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,6 +383,10 @@ mod tests {
             SessionError::TmuxSessionNotFound("sess".to_string()),
             SessionError::CommanderDisabled,
             SessionError::FileNotInDiff("src/main.rs".to_string()),
+            SessionError::FileSelectionRejected {
+                missing: vec!["a.rs".to_string()],
+                changed: vec![],
+            },
         ];
         for err in variants {
             assert!(!err.to_string().is_empty(), "Empty display for {:?}", err);

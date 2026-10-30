@@ -96,16 +96,21 @@ Future<Uint8List> fetchBlob({
   path: path,
 );
 
-/// Toggle a file's reviewed mark, returning the new state. Only the display path
-/// crosses the wire — the server resolves the file in the *current* review diff.
-Future<bool> toggleFileReviewed({
+/// Set (`reviewed`) or clear a file's reviewed mark, returning the new state.
+/// Only the display path crosses the wire — the server resolves the file in
+/// the *current* review diff. The page says which way it means rather than
+/// toggling, because the store may hold a mark the page isn't showing (set by
+/// the `review` CLI since it loaded), which a toggle would flip the wrong way.
+Future<bool> setFileReviewed({
   required String handle,
   required String sessionId,
   required String displayPath,
-}) => RustLib.instance.api.crateApiReviewToggleFileReviewed(
+  required bool reviewed,
+}) => RustLib.instance.api.crateApiReviewSetFileReviewed(
   handle: handle,
   sessionId: sessionId,
   displayPath: displayPath,
+  reviewed: reviewed,
 );
 
 /// Outcome of applying a session's staged comments — a tagged struct (not a

@@ -145,6 +145,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // as the TUI does. Without this a server-only deployment — the many-idle-
     // sessions case hibernation targets — would never hibernate.
     service.start_hibernation_loop();
+    // List any recognised agent harness installed on this host that the
+    // program picker doesn't offer yet, as the TUI does at startup.
+    if let Err(e) = service.discover_programs() {
+        warn!("program discovery failed: {e}");
+    }
 
     let server = embed::start(service, &cfg, auth).await?;
     info!("claude-commander-server listening on {}", server.url());

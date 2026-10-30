@@ -167,7 +167,7 @@ cc_exit_code_for_lane() {
 # cc_lane_description <lane> -- one line for --list and the summary table.
 cc_lane_description() {
   case "${1:-}" in
-    fmt) printf 'cargo fmt --all -- --check\n' ;;
+    fmt) printf 'cargo fmt --check (workspace + client/rust)\n' ;;
     clippy) printf 'cargo clippy --workspace --all-targets -- -D warnings\n' ;;
     build) printf 'cargo build --workspace --all-targets\n' ;;
     test) printf 'cargo test --workspace\n' ;;
@@ -175,7 +175,7 @@ cc_lane_description() {
     dart-format) printf 'client/tool/dart-format.sh --check\n' ;;
     analyze) printf 'flutter analyze lib test integration_test\n' ;;
     flutter-test) printf 'flutter test (client widget + golden tests)\n' ;;
-    cdylib) printf 'cargo test --locked in client/rust\n' ;;
+    cdylib) printf 'cargo clippy -D warnings + cargo test --locked in client/rust\n' ;;
     e2e) printf 'client/tool/e2e.sh (hermetic server + Linux app)\n' ;;
     goldens) printf 'flutter test test/goldens (reference images only)\n' ;;
     web) printf 'web/: npm ci, check, typecheck, test, build is fresh; protocol TS drift + ts clippy\n' ;;

@@ -120,7 +120,12 @@ EOF
 # unchained failing step would not stop the ones after it.
 # ---------------------------------------------------------------------------
 
-lane_fmt() { cc_run_in_shell "" cargo "cargo fmt --all -- --check"; }
+lane_fmt() {
+  cc_run_in_shell "" cargo "cargo fmt --all -- --check" || return $?
+  # client/rust is excluded from the workspace (see the root Cargo.toml), so
+  # `--all` never reaches it. rustfmt needs no client toolchain.
+  cc_run_in_shell "" cargo "cargo fmt --manifest-path client/rust/Cargo.toml --all -- --check"
+}
 lane_clippy() { cc_run_in_shell "" cargo "cargo clippy --workspace --all-targets -- -D warnings"; }
 lane_build() {
   cc_run_in_shell "" cargo "cargo build --workspace --all-targets" || return $?
@@ -183,7 +188,10 @@ lane_cdylib() {
   # --locked: client/rust has its own Cargo.lock, which a dependency added to a
   # workspace crate it links (e.g. the server's rust-embed) leaves stale. Without
   # the flag cargo quietly rewrites it and the drift only shows as a dirty tree.
-  cc_run_in_shell "$CC_CLIENT_SHELL" cargo "cd client/rust && cargo test --locked"
+  # Clippy runs here rather than in the `clippy` lane because client/rust is
+  # outside the workspace and only builds in the client shell.
+  cc_run_in_shell "$CC_CLIENT_SHELL" cargo \
+    "cd client/rust && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked"
 }
 
 lane_e2e() {

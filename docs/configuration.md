@@ -13,12 +13,21 @@ Configuration file location depends on your platform:
 # Selectable agent harnesses for the New Session dialog's program picker. Each
 # entry pairs a display `label` with the `command` launched (program plus any
 # flags); the command's first token determines the harness, so Claude Code
-# (`claude`), OpenAI Codex (`codex`), OpenCode (`opencode`) and Oh My Pi (`omp`)
-# are all recognised and get the right launch, resume, and working/waiting
-# detection. Anything else is launched as-is, with no such handling — a bare
-# shell is a valid entry. The first entry is the default
-# for new sessions. When `programs` is omitted, the picker offers a single
-# built-in `claude` entry.
+# (`claude`), OpenAI Codex (`codex`), OpenCode (`opencode`), Oh My Pi (`omp`)
+# and Muse Code (`muse-code`) are all recognised and get the right
+# launch, resume, and working/waiting detection. Anything else is launched
+# as-is, with no such handling — a bare shell is a valid entry. The first entry
+# is the default for new sessions. When `programs` is omitted, the picker
+# offers a single built-in `claude` entry.
+#
+# Recognised harnesses are discovered automatically: at startup the TUI (and
+# `claude-commander-server`) looks each one up on `PATH` and appends an entry
+# for any that is installed but not yet listed. An entry already running that
+# harness — whatever its label, path or flags — counts as listed, so a
+# customised command is never duplicated or overwritten. Discovery only ever
+# adds: an entry whose program has been uninstalled is left for you to remove.
+# Removing an entry for a program that is still installed brings it back at
+# the next startup.
 #
 # Legacy configs using `default_program = "..."` are migrated automatically:
 # the legacy command is moved or inserted as the first `[[programs]]` entry and
@@ -89,7 +98,7 @@ resume_session = true
 # hibernate_check_interval_secs = 600
 
 # Launch sessions inside `nix develop` when the project has a `flake.nix` at
-# its root and `nix` is on PATH, so the agent and shell get the project's dev
+# its root or in `nix/`, and `nix` is on PATH, so the agent and shell get the project's dev
 # environment. Applies to Claude sessions and shell sessions. Projects without
 # a flake are unaffected.
 nix_develop = true

@@ -13,7 +13,7 @@
 //! the finished markdown ([`cli_reference`]) and stays clap-free, so embedders
 //! of the library don't inherit a CLI parser they have no use for.
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(version)]
@@ -149,7 +149,7 @@ pub enum Commands {
         #[arg(short, long)]
         mode: Option<String>,
 
-        /// Model to run the agent with (Claude, Codex, OpenCode or omp)
+        /// Model to run the agent with (Claude, Codex, OpenCode, omp or Muse Code)
         #[arg(long)]
         model: Option<String>,
 
@@ -190,6 +190,15 @@ pub enum Commands {
     /// that coordinates other sessions via this CLI. Creates it on first use.
     Commander,
 
+    /// Inspect a session's review diff (the TUI's diff view) and mark files in
+    /// it reviewed. Marks are pinned to each file's current diff and clear
+    /// themselves when that file changes again. An open TUI review view picks
+    /// up changes made here within about a second.
+    Review {
+        #[command(subcommand)]
+        command: ReviewCommand,
+    },
+
     /// Show configuration
     Config {
         /// Initialize config file with defaults
@@ -210,6 +219,71 @@ pub enum Commands {
         #[arg(long, conflicts_with = "start")]
         stop: bool,
     },
+}
+
+/// `review` subcommands. Every one takes the session by exact title or full ID
+/// (like `delete` and `keep-alive`), and files by the display path `files`
+/// prints (the new path; the old path for a deleted file).
+#[derive(Subcommand)]
+pub enum ReviewCommand {
+    /// List the files in a session's review diff with their change counts,
+    /// reviewed state and (in `--json`) content hash.
+    Files {
+        /// Session title or full ID
+        session: String,
+
+        /// Only list files not yet marked reviewed
+        #[arg(long)]
+        unreviewed: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Print a session's review diff in unified format, optionally only some
+    /// files. The output is exactly what the review view shows and marks.
+    Diff {
+        /// Session title or full ID
+        session: String,
+
+        /// Only these files: display paths as `review files` prints them, each
+        /// optionally `PATH@HASH` (refused if the file changed since)
+        files: Vec<String>,
+
+        /// Only files not yet marked reviewed
+        #[arg(long)]
+        unreviewed: bool,
+    },
+
+    /// Mark files reviewed. Idempotent: re-marking a reviewed file is a no-op.
+    /// All-or-nothing: if any file is not in the diff, or changed since the
+    /// hash given for it, nothing is marked.
+    Mark(SetReviewedArgs),
+
+    /// Clear files' reviewed marks. Idempotent and all-or-nothing, like `mark`.
+    Unmark(SetReviewedArgs),
+}
+
+/// The arguments `review mark` and `review unmark` share.
+#[derive(Args)]
+pub struct SetReviewedArgs {
+    /// Session title or full ID
+    pub session: String,
+
+    /// Files: display paths as `review files` prints them, each optionally
+    /// `PATH@HASH` with the hash from `review files --json` to refuse the
+    /// change if the file changed since you read it
+    #[arg(required_unless_present = "all", conflicts_with = "all")]
+    pub files: Vec<String>,
+
+    /// Every file in the diff
+    #[arg(long)]
+    pub all: bool,
+
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// The clap command tree for the CLI. Single source of truth for this binary's
@@ -348,5 +422,27 @@ mod tests {
         // (duplicate args, bad short flags, etc.). Exercising debug_assert
         // here turns that into a test failure rather than a surprise at launch.
         cli_command().debug_assert();
+    }
+
+    /// `review mark`/`unmark` need files or `--all`, never both — an agent that
+    /// forgets the paths must get an error, not a silent no-op.
+    #[test]
+    fn review_mark_requires_files_or_all_but_not_both() {
+        let parse =
+            |args: &[&str]| Cli::try_parse_from(["claude-commander", "review"].iter().chain(args));
+        assert!(parse(&["mark", "s"]).is_err());
+        assert!(parse(&["unmark", "s", "a.rs", "--all"]).is_err());
+
+        let Some(Commands::Review {
+            command: ReviewCommand::Mark(SetReviewedArgs { files, all, .. }),
+        }) = parse(&["mark", "s", "a.rs", "b.rs"]).unwrap().command
+        else {
+            panic!("expected review mark");
+        };
+        assert_eq!(
+            (files, all),
+            (vec!["a.rs".to_string(), "b.rs".to_string()], false)
+        );
+        assert!(parse(&["unmark", "s", "--all"]).is_ok());
     }
 }

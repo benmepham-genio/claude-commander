@@ -54,6 +54,7 @@ use crate::api::{
 };
 use crate::comment::ApplyOutcome;
 use crate::session::{ProjectId, SessionId};
+use claude_commander_protocol::api::ReviewedFileMark;
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
 use claude_commander_protocol::workspace::SetWorkspacesRequest;
 
@@ -802,8 +803,21 @@ pub trait CommanderBackend: Send + Sync {
     async fn create_comment(&self, id: SessionId, draft: NewComment) -> BResult<Uuid>;
     async fn delete_comment(&self, id: SessionId, comment_id: Uuid) -> BResult<()>;
     async fn apply_comments(&self, id: SessionId) -> BResult<ApplyOutcome>;
-    /// Toggle a file's reviewed mark by display path against the current diff.
-    async fn toggle_file_reviewed(&self, id: SessionId, display_path: String) -> BResult<bool>;
+    /// Set or clear a file's reviewed mark by display path against the current
+    /// diff, returning the new state. Explicit rather than a toggle: the view
+    /// says which way the user meant, so a mark set elsewhere since the view
+    /// last refreshed can't turn a "mark" keypress into an unmark.
+    async fn set_file_reviewed(
+        &self,
+        id: SessionId,
+        display_path: String,
+        reviewed: bool,
+    ) -> BResult<bool>;
+    /// The session's stored reviewed marks, unpruned. Polled by an open
+    /// review view to pick up marks set elsewhere (the CLI, another frontend);
+    /// a mark applies only to the file content it is pinned to
+    /// (`claude_commander_viewmodel::review::fold_marks`).
+    async fn reviewed_marks(&self, id: SessionId) -> BResult<Vec<ReviewedFileMark>>;
     /// Raw bytes of one side of a binary file in a session's review diff.
     async fn fetch_diff_blob(
         &self,

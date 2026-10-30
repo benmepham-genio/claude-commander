@@ -24,6 +24,12 @@ pub const DEFAULT_MAX_CONCURRENT: usize = 16;
 /// Default command timeout
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Tries `create_session` makes when it catches the tmux server mid-shutdown,
+/// and the pause between them. A server exits within milliseconds of losing
+/// its last session, so 10 × 50ms is ample.
+const CREATE_SESSION_ATTEMPTS: u32 = 10;
+const CREATE_SESSION_RETRY_DELAY: Duration = Duration::from_millis(50);
+
 /// Async tmux command executor
 ///
 /// Uses a semaphore to limit concurrent tmux commands, preventing
@@ -223,7 +229,32 @@ impl TmuxExecutor {
             args.push(cmd);
         }
 
-        self.execute(&args).await?;
+        // `kill-session` on a server's last session returns while that server
+        // is still shutting down, so a recreate straight after it (every
+        // restart path) can connect to the dying server and fail with "server
+        // exited unexpectedly". Once it has gone, `start-server` starts a fresh
+        // one, so retry briefly. Pinned by the integration test
+        // `recreating_the_only_session_survives_server_shutdown`.
+        let mut attempt = 1;
+        loop {
+            match self.execute(&args).await {
+                Err(crate::error::Error::Tmux(TmuxError::CommandFailed { stderr, .. }))
+                    if stderr_means_server_exiting(&stderr)
+                        && attempt < CREATE_SESSION_ATTEMPTS =>
+                {
+                    debug!(
+                        attempt,
+                        "tmux server was exiting during new-session; retrying"
+                    );
+                    tokio::time::sleep(CREATE_SESSION_RETRY_DELAY).await;
+                    attempt += 1;
+                }
+                result => {
+                    result?;
+                    break;
+                }
+            }
+        }
 
         // Enable mouse support so scroll wheel enters copy mode for scrollback
         self.execute(&["set-option", "-t", session_name, "mouse", "on"])
@@ -383,7 +414,9 @@ impl StatusBarInfo {
 
     /// Format the left side of the status bar.
     ///
-    /// Uses bold labels and box-drawing separators (`│`) for a polished look.
+    /// The branch (the session's identity) is bold; the project and workspace
+    /// are plain context. Key labels are bold too, and fields are split by
+    /// box-drawing separators (`│`).
     /// `#` is escaped to `##` for tmux format safety.
     pub fn format_left(&self) -> String {
         let safe_branch = self.branch.replace('#', "##");
@@ -399,7 +432,7 @@ impl StatusBarInfo {
             .map(|w| format!(" {}{}", w.replace('#', "##"), Self::SEP.trim_end()))
             .unwrap_or_default();
         format!(
-            "{workspace} #[bold]{}#[nobold]{}{}{}{sep}#[bold]Ctrl-q#[nobold]: detach{sep}#[bold]Ctrl-\\#[nobold]: {}{sep}#[bold]Ctrl-Space#[nobold]: switch ",
+            "{workspace} {}{}#[bold]{}#[nobold]{}{sep}#[bold]Ctrl-q#[nobold]: detach{sep}#[bold]Ctrl-\\#[nobold]: {}{sep}#[bold]Ctrl-Space#[nobold]: switch ",
             self.project_name,
             Self::SEP,
             safe_branch,
@@ -448,6 +481,14 @@ fn stderr_means_session_absent(stderr: &str) -> bool {
     // transient connection failure (e.g. "connection refused"), which we still
     // propagate rather than mistake for absence.
     s.contains("error connecting to") && s.contains("no such file")
+}
+
+/// Whether a failed tmux command's stderr says the server it connected to
+/// went away mid-command — what a client sees when it reaches a server that is
+/// shutting down after losing its last session.
+fn stderr_means_server_exiting(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    s.contains("server exited unexpectedly") || s.contains("lost server")
 }
 
 /// Parse tmux's `#{session_attached}` client count into "is a client attached".
@@ -583,7 +624,7 @@ mod tests {
         info.workspace = Some("Work".to_string());
         assert_eq!(
             info.format_left(),
-            " Work \u{2502} #[bold]my-project#[nobold] \u{2502} feature \u{2502} #[bold]Ctrl-q#[nobold]: detach \u{2502} #[bold]Ctrl-\\#[nobold]: shell \u{2502} #[bold]Ctrl-Space#[nobold]: switch "
+            " Work \u{2502} my-project \u{2502} #[bold]feature#[nobold] \u{2502} #[bold]Ctrl-q#[nobold]: detach \u{2502} #[bold]Ctrl-\\#[nobold]: shell \u{2502} #[bold]Ctrl-Space#[nobold]: switch "
         );
     }
 
@@ -599,7 +640,7 @@ mod tests {
         let info = test_info("feature-auth", None, false);
         assert_eq!(
             info.format_left(),
-            " #[bold]my-project#[nobold] \u{2502} feature-auth \u{2502} #[bold]Ctrl-q#[nobold]: detach \u{2502} #[bold]Ctrl-\\#[nobold]: shell \u{2502} #[bold]Ctrl-Space#[nobold]: switch "
+            " my-project \u{2502} #[bold]feature-auth#[nobold] \u{2502} #[bold]Ctrl-q#[nobold]: detach \u{2502} #[bold]Ctrl-\\#[nobold]: shell \u{2502} #[bold]Ctrl-Space#[nobold]: switch "
         );
     }
 
@@ -614,7 +655,7 @@ mod tests {
         let info = test_info("feature", Some(42), false);
         assert_eq!(
             info.format_left(),
-            " #[bold]my-project#[nobold] \u{2502} feature \u{2502} PR ##42 \u{2502} #[bold]Ctrl-q#[nobold]: detach \u{2502} #[bold]Ctrl-\\#[nobold]: shell \u{2502} #[bold]Ctrl-Space#[nobold]: switch "
+            " my-project \u{2502} #[bold]feature#[nobold] \u{2502} PR ##42 \u{2502} #[bold]Ctrl-q#[nobold]: detach \u{2502} #[bold]Ctrl-\\#[nobold]: shell \u{2502} #[bold]Ctrl-Space#[nobold]: switch "
         );
     }
 
@@ -623,7 +664,7 @@ mod tests {
         let info = test_info("feature", Some(42), true);
         assert_eq!(
             info.format_left(),
-            " #[bold]my-project#[nobold] \u{2502} feature \u{2502} PR ##42 merged \u{2502} #[bold]Ctrl-q#[nobold]: detach \u{2502} #[bold]Ctrl-\\#[nobold]: shell \u{2502} #[bold]Ctrl-Space#[nobold]: switch "
+            " my-project \u{2502} #[bold]feature#[nobold] \u{2502} PR ##42 merged \u{2502} #[bold]Ctrl-q#[nobold]: detach \u{2502} #[bold]Ctrl-\\#[nobold]: shell \u{2502} #[bold]Ctrl-Space#[nobold]: switch "
         );
     }
 
@@ -633,7 +674,7 @@ mod tests {
         info.is_shell = true;
         assert_eq!(
             info.format_left(),
-            " #[bold]my-project#[nobold] \u{2502} feature-auth \u{2502} #[bold]Ctrl-q#[nobold]: detach \u{2502} #[bold]Ctrl-\\#[nobold]: agent \u{2502} #[bold]Ctrl-Space#[nobold]: switch "
+            " my-project \u{2502} #[bold]feature-auth#[nobold] \u{2502} #[bold]Ctrl-q#[nobold]: detach \u{2502} #[bold]Ctrl-\\#[nobold]: agent \u{2502} #[bold]Ctrl-Space#[nobold]: switch "
         );
     }
 
@@ -652,6 +693,17 @@ mod tests {
         ));
         // Case-insensitive, since wording can vary slightly across versions.
         assert!(stderr_means_session_absent("Can't find session cc-abc123"));
+    }
+
+    #[test]
+    fn server_exiting_is_recognised_and_nothing_else() {
+        assert!(stderr_means_server_exiting("server exited unexpectedly\n"));
+        assert!(stderr_means_server_exiting("lost server"));
+        assert!(!stderr_means_server_exiting("duplicate session: cc-abc"));
+        assert!(!stderr_means_server_exiting(
+            "no server running on /tmp/tmux-501/default"
+        ));
+        assert!(!stderr_means_server_exiting(""));
     }
 
     #[test]

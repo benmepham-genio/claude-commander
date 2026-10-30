@@ -22,6 +22,7 @@ use crate::api::{
 };
 use crate::comment::{ApplyOutcome, Comment};
 use crate::session::{ProjectId, ScanResult, SessionId};
+use claude_commander_protocol::api::ReviewedFileMark;
 use claude_commander_protocol::github::{
     CloneJob, CloneJobId, CloneRequest, CloneSource, CloneStatus, GithubRepo, redact_credentials,
 };
@@ -85,8 +86,10 @@ pub struct MockBackend {
     created_comments: Mutex<Vec<SessionId>>,
     /// Sessions passed to [`Self::apply_comments`], for routing asserts.
     applied_comments: Mutex<Vec<SessionId>>,
-    /// `(session, display_path)` passed to [`Self::toggle_file_reviewed`].
-    toggled_reviewed: Mutex<Vec<(SessionId, String)>>,
+    /// `(session, display_path, reviewed)` passed to [`Self::set_file_reviewed`].
+    set_reviewed: Mutex<Vec<(SessionId, String, bool)>>,
+    /// Marks served by [`Self::reviewed_marks`], set by [`Self::set_reviewed_marks`].
+    reviewed_marks: Mutex<Vec<ReviewedFileMark>>,
     /// `(session, side, path)` passed to [`Self::fetch_diff_blob`].
     fetched_blobs: Mutex<Vec<(SessionId, DiffSide, String)>>,
     /// Overrides the `open_editor` capability (default `false`, matching a
@@ -161,7 +164,8 @@ impl MockBackend {
             listed_comments: Mutex::new(Vec::new()),
             created_comments: Mutex::new(Vec::new()),
             applied_comments: Mutex::new(Vec::new()),
-            toggled_reviewed: Mutex::new(Vec::new()),
+            set_reviewed: Mutex::new(Vec::new()),
+            reviewed_marks: Mutex::new(Vec::new()),
             fetched_blobs: Mutex::new(Vec::new()),
             open_editor: Mutex::new(false),
             github_repos: Mutex::new(Vec::new()),
@@ -277,9 +281,15 @@ impl MockBackend {
         self.applied_comments.lock().unwrap().clone()
     }
 
-    /// `(session, display_path)` pairs passed to [`Self::toggle_file_reviewed`].
-    pub fn toggled_reviewed_files(&self) -> Vec<(SessionId, String)> {
-        self.toggled_reviewed.lock().unwrap().clone()
+    /// `(session, display_path, reviewed)` passed to [`Self::set_file_reviewed`].
+    pub fn set_reviewed_files(&self) -> Vec<(SessionId, String, bool)> {
+        self.set_reviewed.lock().unwrap().clone()
+    }
+
+    /// Set the marks served by [`Self::reviewed_marks`] (as if stored by
+    /// another frontend).
+    pub fn set_reviewed_marks(&self, marks: Vec<ReviewedFileMark>) {
+        *self.reviewed_marks.lock().unwrap() = marks;
     }
 
     /// `(session, side, path)` tuples passed to [`Self::fetch_diff_blob`].
@@ -733,13 +743,23 @@ impl CommanderBackend for MockBackend {
         Ok(ApplyOutcome::Nothing)
     }
 
-    async fn toggle_file_reviewed(&self, id: SessionId, display_path: String) -> BResult<bool> {
+    async fn set_file_reviewed(
+        &self,
+        id: SessionId,
+        display_path: String,
+        reviewed: bool,
+    ) -> BResult<bool> {
         self.guard()?;
-        self.toggled_reviewed
+        self.set_reviewed
             .lock()
             .unwrap()
-            .push((id, display_path));
-        Ok(false)
+            .push((id, display_path, reviewed));
+        Ok(reviewed)
+    }
+
+    async fn reviewed_marks(&self, _id: SessionId) -> BResult<Vec<ReviewedFileMark>> {
+        self.guard()?;
+        Ok(self.reviewed_marks.lock().unwrap().clone())
     }
 
     async fn fetch_diff_blob(

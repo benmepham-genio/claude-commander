@@ -111,7 +111,6 @@ class FakeCommanderApi implements CommanderApi {
     count: 1,
   );
   bool toggleKeepAliveResponse = false;
-  bool toggleFileReviewedResponse = true;
   Uint8List fetchBlobResponse = Uint8List(0);
 
   /// Matches the real cap in `claude_commander_protocol::paste::MAX_IMAGE_BYTES`
@@ -238,7 +237,7 @@ class FakeCommanderApi implements CommanderApi {
   Object? createCommentError;
   Object? deleteCommentError;
   Object? applyCommentsError;
-  Object? toggleFileReviewedError;
+  Object? setFileReviewedError;
   Object? githubReposError;
   Object? startCloneError;
 
@@ -893,14 +892,18 @@ class FakeCommanderApi implements CommanderApi {
   }
 
   @override
-  Future<bool> toggleFileReviewed({
+  Future<bool> setFileReviewed({
     required String handle,
     required String sessionId,
     required String displayPath,
+    required bool reviewed,
   }) async {
-    _record('toggleFileReviewed', {'displayPath': displayPath});
-    if (toggleFileReviewedError != null) throw toggleFileReviewedError!;
-    return toggleFileReviewedResponse;
+    _record('setFileReviewed', {
+      'displayPath': displayPath,
+      'reviewed': reviewed,
+    });
+    if (setFileReviewedError != null) throw setFileReviewedError!;
+    return reviewed;
   }
 
   @override
