@@ -1774,7 +1774,7 @@ impl App {
 
     /// Persist the current config via the store (updates mtime so hot-reload
     /// won't re-read our own write).
-    fn persist_config(&mut self) {
+    pub(super) fn persist_config(&mut self) {
         let updated = self.config.clone();
         if let Err(e) = self.service.update_config(updated) {
             warn!("Failed to save config: {}", e);

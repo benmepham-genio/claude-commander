@@ -12680,3 +12680,31 @@ mod workspaces {
         );
     }
 }
+
+/// Startup discovery writes through the service, behind `App`'s cached config.
+/// The cache must pick the new entry up — or the picker never offers it, and the
+/// next settings save (which writes the cache back whole) deletes it from disk.
+#[cfg(unix)]
+#[test]
+fn startup_program_discovery_survives_a_settings_save() {
+    use std::os::unix::fs::PermissionsExt;
+    let (mut app, config_path) = make_test_app_with_path();
+    let bin = tempfile::TempDir::new().unwrap();
+    let muse = bin.path().join("muse-code");
+    std::fs::write(&muse, "").unwrap();
+    std::fs::set_permissions(&muse, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    app.discover_programs_on(bin.path().as_os_str());
+    assert!(
+        app.config
+            .program_choices()
+            .iter()
+            .any(|p| p.command == "muse-code"),
+        "{:?}",
+        app.config.programs
+    );
+
+    app.persist_config();
+    let on_disk = std::fs::read_to_string(&config_path).unwrap();
+    assert!(on_disk.contains("muse-code"), "{on_disk}");
+}

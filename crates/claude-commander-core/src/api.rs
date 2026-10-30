@@ -279,6 +279,45 @@ impl CommanderService {
         self.config_store.mutate(|c| c.programs = programs)
     }
 
+    /// Add a program entry for each recognised harness installed on this host
+    /// (found on `PATH`) that the program list doesn't already cover, and
+    /// persist the result; returns the entries added. See
+    /// [`Config::add_installed_programs`] for what "covered" means — in short,
+    /// it only ever appends, never overwrites or removes.
+    ///
+    /// Run once at startup by the long-lived frontends that launch sessions —
+    /// the TUI and the server — against their own `PATH`. That is the host the
+    /// sessions run on, but not necessarily the environment they launch in: a
+    /// tmux server started earlier keeps its own `PATH`, so a harness installed
+    /// since can still be missing inside the pane. Not run by one-shot CLI
+    /// commands.
+    pub fn discover_programs(&self) -> Result<Vec<ProgramEntry>> {
+        self.discover_programs_on(&std::env::var_os("PATH").unwrap_or_default())
+    }
+
+    /// [`Self::discover_programs`] against an explicit `PATH`-style list.
+    pub fn discover_programs_on(&self, path: &std::ffi::OsStr) -> Result<Vec<ProgramEntry>> {
+        let installed = AgentKind::installed_on(path);
+        // Check before mutating: `mutate` always rewrites the file, and the
+        // common startup — everything already listed — should not.
+        if self
+            .config_store
+            .read()
+            .clone()
+            .add_installed_programs(&installed)
+            .is_empty()
+        {
+            return Ok(Vec::new());
+        }
+        let added = self
+            .config_store
+            .mutate(|c| c.add_installed_programs(&installed))?;
+        for entry in &added {
+            info!("Discovered {} on PATH; added it to programs", entry.label);
+        }
+        Ok(added)
+    }
+
     // -- Workspaces --
 
     /// Replace the workspace definitions (order = display order), and — when
@@ -3204,20 +3243,20 @@ pub fn validate_program_flags(opts: &CreateSessionOpts, resolved_program: &str) 
         .into());
     }
     // An initial prompt is passed as a positional argument, which only
-    // harnesses that accept one (claude, codex, omp) understand.
+    // harnesses that accept one (claude, codex, omp, muse-code) understand.
     if opts.initial_prompt.is_some() && !kind.accepts_positional_prompt() {
         return Err(SessionError::InvalidProgram(format!(
             "--initial-prompt is only supported for programs that accept a \
-             positional prompt, e.g. claude, codex, or omp (got {:?})",
+             positional prompt, e.g. claude, codex, omp, or muse-code (got {:?})",
             resolved_program
         ))
         .into());
     }
-    // `--model` is understood by Claude, Codex, OpenCode, and omp.
+    // `--model` is understood by every recognised harness.
     if opts.model.is_some() && !kind.supports_model_flag() {
         return Err(SessionError::InvalidProgram(format!(
             "--model is only supported for programs that accept it, e.g. \
-             claude, codex, opencode, or omp (got {:?})",
+             claude, codex, opencode, omp, or muse-code (got {:?})",
             resolved_program
         ))
         .into());
@@ -6220,6 +6259,50 @@ mod tests {
             gen_after,
             "no redundant wake on an already-empty cache"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_programs_persists_installed_harnesses() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let bin = tempfile::TempDir::new().unwrap();
+        let muse = bin.path().join("muse-code");
+        std::fs::write(&muse, "").unwrap();
+        std::fs::set_permissions(&muse, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let svc = service_with_config(
+            &dir,
+            Config {
+                programs: vec![ProgramEntry {
+                    label: "Claude".to_string(),
+                    command: "claude".to_string(),
+                }],
+                ..Config::default()
+            },
+        );
+
+        let added = svc.discover_programs_on(bin.path().as_os_str()).unwrap();
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].command, "muse-code");
+        let commands = |svc: &CommanderService| -> Vec<String> {
+            svc.read_config()
+                .programs
+                .iter()
+                .map(|p| p.command.clone())
+                .collect()
+        };
+        assert_eq!(commands(&svc), ["claude", "muse-code"]);
+        // Persisted, not just held in memory: a fresh read of the file has it.
+        let on_disk = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(on_disk.contains("muse-code"), "{on_disk}");
+
+        // A second startup finds it already listed.
+        assert!(
+            svc.discover_programs_on(bin.path().as_os_str())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(commands(&svc), ["claude", "muse-code"]);
     }
 
     #[tokio::test]

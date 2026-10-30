@@ -12,6 +12,7 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::agent::AgentKind;
 use crate::config::keybindings::KeyBindings;
 use crate::config::migrations;
 use crate::config::theme::ThemeOverrides;
@@ -968,6 +969,37 @@ impl Config {
         0
     }
 
+    /// Append a program entry for each harness in `installed` that `programs`
+    /// does not already cover, returning the entries added.
+    ///
+    /// An entry covers a harness when its command resolves to it
+    /// ([`AgentKind::from_program`]), whatever flags or path it carries, so a
+    /// customised entry is never duplicated or overwritten. Nothing is ever
+    /// removed: an entry whose harness is no longer installed is the user's to
+    /// delete. When `programs` is empty its implicit default is written out
+    /// first, so a discovered harness is appended after it rather than becoming
+    /// the new default.
+    pub fn add_installed_programs(&mut self, installed: &[AgentKind]) -> Vec<ProgramEntry> {
+        let present: Vec<AgentKind> = self
+            .program_choices()
+            .iter()
+            .map(|p| AgentKind::from_program(&p.command))
+            .collect();
+        let added: Vec<ProgramEntry> = installed
+            .iter()
+            .filter(|kind| !present.contains(kind))
+            .map(|kind| ProgramEntry {
+                label: kind.display_name().to_string(),
+                command: kind.binary_name().unwrap_or_default().to_string(),
+            })
+            .collect();
+        if !added.is_empty() {
+            self.programs = self.program_choices();
+            self.programs.extend(added.iter().cloned());
+        }
+        added
+    }
+
     /// Resolve the worktrees directory, nesting under repo name if configured.
     pub fn resolve_worktrees_dir(&self, repo_name: &str) -> Result<PathBuf> {
         let base = self.worktrees_dir()?;
@@ -1910,6 +1942,115 @@ show_session_program = false
             ..Config::default()
         };
         assert_eq!(config.default_program_index(), 0);
+    }
+
+    fn entry(label: &str, command: &str) -> ProgramEntry {
+        ProgramEntry {
+            label: label.to_string(),
+            command: command.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_add_installed_programs_appends_missing_harnesses() {
+        let mut config = Config {
+            programs: vec![entry("Claude", "claude")],
+            ..Config::default()
+        };
+        let added = config.add_installed_programs(&[AgentKind::Codex, AgentKind::Muse]);
+        assert_eq!(
+            added,
+            vec![entry("Codex", "codex"), entry("Muse Code", "muse-code")]
+        );
+        assert_eq!(
+            config.programs,
+            vec![
+                entry("Claude", "claude"),
+                entry("Codex", "codex"),
+                entry("Muse Code", "muse-code"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_add_installed_programs_leaves_a_customised_entry_alone() {
+        // Any entry of the same harness counts as present, however its command
+        // was customised — discovery must never re-add or overwrite it.
+        let mut config = Config {
+            programs: vec![
+                entry("Opus", "/opt/bin/claude --model opus"),
+                entry("My muse", "/usr/bin/muse-code --effort max"),
+            ],
+            ..Config::default()
+        };
+        let before = config.programs.clone();
+        let added = config.add_installed_programs(&[AgentKind::Claude, AgentKind::Muse]);
+        assert!(added.is_empty());
+        assert_eq!(config.programs, before);
+    }
+
+    #[test]
+    fn test_add_installed_programs_keeps_entries_that_are_no_longer_installed() {
+        // An uninstalled harness may be mid-reinstall; removing it is the
+        // user's call, so discovery only ever adds.
+        let mut config = Config {
+            programs: vec![entry("Codex", "codex"), entry("bash", "bash")],
+            ..Config::default()
+        };
+        let added = config.add_installed_programs(&[AgentKind::Omp]);
+        assert_eq!(added, vec![entry("Oh My Pi", "omp")]);
+        assert_eq!(
+            config.programs,
+            vec![
+                entry("Codex", "codex"),
+                entry("bash", "bash"),
+                entry("Oh My Pi", "omp"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_add_installed_programs_preserves_the_implicit_default() {
+        // An empty `programs` means "just claude". Appending to it bare would
+        // make the first discovered harness the default instead, so the
+        // implicit entry is written out first.
+        let mut config = Config::default();
+        config.add_installed_programs(&[AgentKind::Codex]);
+        assert_eq!(config.default_session_program(), "claude");
+        assert_eq!(
+            config.programs,
+            vec![entry("claude", "claude"), entry("Codex", "codex")]
+        );
+
+        // Likewise an unmigrated legacy `default_program`.
+        let mut legacy = Config {
+            default_program: Some("omp --model opus".to_string()),
+            ..Config::default()
+        };
+        legacy.add_installed_programs(&[AgentKind::Omp, AgentKind::Codex]);
+        assert_eq!(legacy.default_session_program(), "omp --model opus");
+        assert_eq!(
+            legacy.programs,
+            vec![
+                entry("omp --model opus", "omp --model opus"),
+                entry("Codex", "codex"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_add_installed_programs_is_a_no_op_when_nothing_is_new() {
+        // An empty config stays empty when only the implicit claude is found:
+        // there is nothing to write.
+        let mut config = Config::default();
+        assert!(
+            config
+                .add_installed_programs(&[AgentKind::Claude])
+                .is_empty()
+        );
+        assert!(config.programs.is_empty());
+        assert!(config.add_installed_programs(&[]).is_empty());
+        assert!(config.programs.is_empty());
     }
 
     #[test]

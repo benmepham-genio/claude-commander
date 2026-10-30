@@ -264,7 +264,7 @@ The status bar surfaces the most useful actions as clickable buttons, with the h
 | `r` or `Alt-r` | Review & comment on a session's diff — see [Usage](docs/usage.md#reviewing--commenting-on-changes) |
 | palette only | Reset session — restart it with **no** resume, so the agent starts a new conversation. Use it when `resume_session = true` but you want a clean slate, or when resuming is itself what breaks the relaunch. The worktree, branch and commits are untouched. Unbound by default so a mistyped `R` can't discard a conversation; bind `reset_session` under `[keybindings]` if you want a key |
 | palette only | Rename session (UI title only; underlying worktree, branch, and tmux session are unchanged) |
-| palette only | Change program (agent) — pick a different program (e.g. `claude`, `codex`, `opencode`, `omp`) for the selected session and relaunch it with a fresh conversation |
+| palette only | Change program (agent) — pick a different program (e.g. `claude`, `codex`, `opencode`, `omp`, `muse-code`) for the selected session and relaunch it with a fresh conversation |
 | palette only | Set session base (restack) — re-point the selected session at a different stack parent, or unstack it onto the project's main branch |
 | `g` | Generate AI summary (available while an Info surface is showing — the modal or the right pane's Info tab) |
 | `Tab` / `Shift-Tab` | Cycle the right pane forward / back through Preview, Info and Shell (list views only; the board is full-screen). A project row has no agent pane, so it cycles Shell ↔ Info |

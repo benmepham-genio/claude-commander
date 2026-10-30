@@ -1,7 +1,7 @@
 //! Agent harness abstraction.
 //!
 //! Claude Commander launches different agent CLIs (Claude Code, OpenAI Codex,
-//! OpenCode, Oh My Pi) inside tmux sessions. Each harness differs in how it is
+//! OpenCode, Oh My Pi, Muse Code) inside tmux sessions. Each harness differs in how it is
 //! resumed, whether it accepts a positional prompt, and what it renders in the
 //! tmux pane while working or waiting for the user.
 //!
@@ -10,6 +10,8 @@
 //! live in one place. Adding a new harness is a new enum variant plus filling in
 //! its methods — the compiler then flags every behaviour left unimplemented.
 
+use std::ffi::OsStr;
+use std::path::Path;
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -197,6 +199,53 @@ const OPENCODE_FOOTER_LINES: usize = 3;
 /// when the agent is blocked on a user approval decision.
 const OPENCODE_PERMISSION_MARKER: &str = "Permission required";
 
+/// Muse Code's status line while a turn is in flight: a phase glyph, the phase
+/// (`Thinking`, `Working`, `Calling tools`, `Double checking`, …), and a live
+/// duration plus interrupt hint — `◈ Working (13m 52s · esc to interrupt)`. The
+/// line is dropped the moment the turn ends, leaving `◆ Worked for 2m 04s`.
+///
+/// Matching the shape anywhere in the pane is not enough: a diff line
+/// (`  1 +◆ Thinking (5s · …)`) or a markdown bullet quoting it fits any
+/// single-glyph pattern. So [`muse_content_state`] reads only the status line's
+/// *slot* — see [`muse_status_slot`] — and this regex then checks that line
+/// whole. The hour and millisecond units were not observed and are accepted on
+/// the shape of the others.
+///
+/// Receipts (Muse Code 1.4.14): `◈ Working (13m 52s · …)` from the user's
+/// working session; `◆ Thinking (5s · …)` from a local `--provider echo
+/// --echo-delay-ms 30000` turn; `◇ Calling tools (39s · …)` and `◇ Double
+/// checking (1m 27s · …)` from a throwaway session driven to a shell-approval
+/// prompt.
+static MUSE_WORKING_STATUS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[◆◇◈]\s+[^(\n]+\((?:\d+(?:ms|[hms])\s+)*\d+(?:ms|[hms]) · esc to interrupt\)\s*$")
+        .expect("valid regex")
+});
+
+/// Footer lines Muse Code renders under an overlay that is blocking on the
+/// user: the shell-command approval card, the `request_user_input` question,
+/// and the workspace-trust prompt shown at launch in an untrusted directory —
+/// which a fresh commander worktree usually is.
+///
+/// Receipts (Muse Code 1.4.14), each captured live: the approval card from a
+/// throwaway session run with `--approval-mode untrusted --approval-judge off`
+/// and asked to `ls -la`; the question from the same session asked to call
+/// `request_user_input`; the trust prompt from a fresh local launch. File
+/// writes were not gated in that mode, so no edit-approval card was seen; it is
+/// assumed, not verified, to share the approval card's footer.
+const MUSE_ATTENTION_FOOTERS: [&str; 3] = [
+    "Change approval defaults in /permissions",
+    "Enter to select · ↑/↓ to move",
+    "Use Up/Down or 1/2, then Enter.",
+];
+
+/// How many trailing non-empty lines of the pane may hold a
+/// [`MUSE_ATTENTION_FOOTERS`] marker. Each footer sits at the bottom of the
+/// screen — the approval card's is 3rd from the last line and replaces the
+/// composer, the question's 5th (above the composer's two rules, prompt row and
+/// statusline), the trust prompt's last — so the window keeps transcript text
+/// quoting one out, with slack for a multi-line draft in the composer.
+const MUSE_FOOTER_LINES: usize = 8;
+
 /// The agent CLI harness backing a session, derived from its `program` command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentKind {
@@ -208,12 +257,53 @@ pub enum AgentKind {
     OpenCode,
     /// Oh My Pi (`omp`).
     Omp,
+    /// Muse Code (`muse-code`). Its real binary is `muse`, which `muse-code`
+    /// symlinks to, but that name is too generic to claim: an existing entry
+    /// running some other `muse` would be relaunched as `muse resume --last`.
+    Muse,
     /// Any other program (a bare shell, an unrecognised agent, …). We launch it
     /// but make no assumptions about its flags or TUI output.
     Unknown,
 }
 
 impl AgentKind {
+    /// Every recognised harness — all variants but [`Self::Unknown`] — in the
+    /// order program discovery appends them to the picker.
+    pub const KNOWN: [Self; 5] = [
+        Self::Claude,
+        Self::Codex,
+        Self::OpenCode,
+        Self::Omp,
+        Self::Muse,
+    ];
+
+    /// The executable name this harness answers to: what
+    /// [`Self::from_program`] matches, what [`Self::installed_on`] looks for,
+    /// and the command a discovered program entry launches. `None` for
+    /// [`Self::Unknown`].
+    pub fn binary_name(self) -> Option<&'static str> {
+        match self {
+            Self::Claude => Some("claude"),
+            Self::Codex => Some("codex"),
+            Self::OpenCode => Some("opencode"),
+            Self::Omp => Some("omp"),
+            Self::Muse => Some("muse-code"),
+            Self::Unknown => None,
+        }
+    }
+
+    /// Human-readable name, used as the label of a discovered program entry.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude Code",
+            Self::Codex => "Codex",
+            Self::OpenCode => "OpenCode",
+            Self::Omp => "Oh My Pi",
+            Self::Muse => "Muse Code",
+            Self::Unknown => "Unknown",
+        }
+    }
+
     /// Derive the harness from a program command string by its first token,
     /// tolerating path prefixes and trailing arguments — e.g. `claude`,
     /// `Claude --resume`, and `/usr/local/bin/codex -m gpt-5` all resolve.
@@ -223,17 +313,27 @@ impl AgentKind {
             .next()
             .and_then(|tok| tok.rsplit('/').next())
             .unwrap_or("");
-        if name.eq_ignore_ascii_case("claude") {
-            Self::Claude
-        } else if name.eq_ignore_ascii_case("codex") {
-            Self::Codex
-        } else if name.eq_ignore_ascii_case("opencode") {
-            Self::OpenCode
-        } else if name.eq_ignore_ascii_case("omp") {
-            Self::Omp
-        } else {
-            Self::Unknown
-        }
+        Self::KNOWN
+            .into_iter()
+            .find(|kind| {
+                kind.binary_name()
+                    .is_some_and(|b| name.eq_ignore_ascii_case(b))
+            })
+            .unwrap_or(Self::Unknown)
+    }
+
+    /// The recognised harnesses whose binary is an executable file
+    /// in one of `path`'s directories (a `PATH`-style list), in [`Self::KNOWN`]
+    /// order.
+    pub fn installed_on(path: &OsStr) -> Vec<Self> {
+        let dirs: Vec<_> = std::env::split_paths(path).collect();
+        Self::KNOWN
+            .into_iter()
+            .filter(|kind| {
+                kind.binary_name()
+                    .is_some_and(|binary| dirs.iter().any(|dir| is_executable(&dir.join(binary))))
+            })
+            .collect()
     }
 
     /// Whether this harness is Claude Code. Claude-only launch flags
@@ -243,24 +343,27 @@ impl AgentKind {
     }
 
     /// Whether the harness accepts a single positional prompt argument at
-    /// launch. Claude, Codex and Oh My Pi do (`claude '<prompt>'`,
-    /// `codex '<prompt>'`, `omp '<prompt>'`); an unknown program (e.g. a bare
-    /// shell) does not, so we must not append a prompt it would mis-parse.
+    /// launch. Claude, Codex, Oh My Pi and Muse do (`claude '<prompt>'`,
+    /// `codex '<prompt>'`, `omp '<prompt>'`, `muse-code '<prompt>'`); an unknown
+    /// program (e.g. a bare shell) does not, so we must not append a prompt it
+    /// would mis-parse.
     ///
     /// Receipt for omp (17.2.15): its `--help` documents a positional
     /// `MESSAGES` argument and the example `omp "List all .ts files in src/"`.
+    /// Receipt for Muse (1.4.14): its `--help` usage line is `muse [OPTIONS]
+    /// [PROMPT]`, "pass a prompt to start a session".
     pub fn accepts_positional_prompt(self) -> bool {
-        matches!(self, Self::Claude | Self::Codex | Self::Omp)
+        matches!(self, Self::Claude | Self::Codex | Self::Omp | Self::Muse)
     }
 
     /// Whether this harness accepts a `--model <name>` launch flag. Claude,
-    /// Codex, OpenCode and Oh My Pi support it; an unknown program's flags are
-    /// unconstrained.
+    /// Codex, OpenCode, Oh My Pi and Muse support it (Muse 1.4.14's `--help`:
+    /// `--model <MODEL>`); an unknown program's flags are unconstrained.
     pub fn supports_model_flag(self) -> bool {
-        matches!(
-            self,
-            Self::Claude | Self::Codex | Self::OpenCode | Self::Omp
-        )
+        match self {
+            Self::Claude | Self::Codex | Self::OpenCode | Self::Omp | Self::Muse => true,
+            Self::Unknown => false,
+        }
     }
 
     /// Delay to wait between injecting prompt *text* into the pane and sending
@@ -288,9 +391,15 @@ impl AgentKind {
     /// against omp 17.2.15, each time leaving an empty composer and dispatching
     /// the turn; and a 300-char text+`\r` single PTY write submitted against
     /// omp 18.1.17.
+    ///
+    /// Muse Code folds the Enter at *every* length, verified against 1.4.14
+    /// with `--provider echo`: a single `send-keys '<text>' Enter` submitted
+    /// 0/15 times across 40, 300 and 1200 chars — each Enter became a newline,
+    /// and the prompts piled up in the composer — while a 250ms gap before the
+    /// Enter submitted 9/9.
     pub fn submit_key_delay(self) -> Option<Duration> {
         match self {
-            Self::Codex | Self::Claude => Some(Duration::from_millis(250)),
+            Self::Codex | Self::Claude | Self::Muse => Some(Duration::from_millis(250)),
             _ => None,
         }
     }
@@ -299,9 +408,14 @@ impl AgentKind {
     /// preserving any flags on the base command. Returns `None` when the harness
     /// has no resume mechanism we can drive (so the caller launches fresh).
     ///
-    /// Claude appends a `--resume` flag; Codex uses a `resume --last` subcommand
-    /// that must follow the binary, before its other flags; OpenCode and Oh My
-    /// Pi append `--continue`.
+    /// Claude appends a `--resume` flag; Codex and Muse use a `resume --last`
+    /// subcommand that must follow the binary, before its other flags; OpenCode
+    /// and Oh My Pi append `--continue`.
+    ///
+    /// Receipt for Muse (1.4.14): `muse resume --help` documents `--last` as
+    /// "Resume the most recent session in this workspace" and that root options
+    /// "may appear on either side of `resume`", so the base command's flags can
+    /// follow it. A bare `resume` opens a picker instead.
     ///
     /// Receipt for omp (17.2.15): `--help` documents `-c, --continue  Continue
     /// previous session` and the example `omp --continue "What did we
@@ -316,7 +430,7 @@ impl AgentKind {
                 Some(r) => format!("{binary} {r} --resume"),
                 None => format!("{binary} --resume"),
             }),
-            Self::Codex => Some(match rest {
+            Self::Codex | Self::Muse => Some(match rest {
                 Some(r) => format!("{binary} resume --last {r}"),
                 None => format!("{binary} resume --last"),
             }),
@@ -361,6 +475,18 @@ impl AgentKind {
                 Some(AgentState::Working)
             }
             Self::Omp => omp_title_state(title),
+            // Muse animates a braille spinner before its label while a turn is
+            // in flight (`⠙ ws`) and shows the bare label when idle — but the
+            // spinner keeps going while an overlay waits on the user, so it
+            // can't be taken as `Working` (see the soundness note above), and
+            // the bare label can't vouch for `Idle` either. Content decides.
+            //
+            // Receipt (Muse Code 1.4.14): 40/40 title samples at 50ms carried a
+            // spinner frame — all ten cycling — with the shell-approval card on
+            // screen, and 20/20 with the `request_user_input` question up.
+            // tmux flattens the glyph to `_` on a non-UTF-8 client, as it does
+            // omp's: the user's working session read `_ build-3794954b`.
+            Self::Muse => None,
             // OpenCode's title reports which *view* it is showing, never the
             // agent state: `OC | <session title>` on a session that has been
             // titled (truncated to 40 chars), `OC | <plugin id>` on a plugin
@@ -394,6 +520,7 @@ impl AgentKind {
             Self::Codex => codex_content_state(&content),
             Self::OpenCode => opencode_content_state(&content),
             Self::Omp => omp_content_state(&content),
+            Self::Muse => muse_content_state(&content),
             Self::Unknown => AgentState::Idle,
         }
     }
@@ -582,6 +709,82 @@ fn omp_content_state(content: &str) -> AgentState {
     AgentState::Idle
 }
 
+/// Muse Code content patterns. An overlay waiting on the user is recognised by
+/// its footer at the bottom of the pane ([`MUSE_ATTENTION_FOOTERS`]); a turn in
+/// flight by its status line ([`MUSE_WORKING_STATUS_RE`]). Waiting takes
+/// precedence, and here it must: the approval card is drawn *beneath* a working
+/// status line that stays on screen until it is answered.
+///
+/// Falls back to `Idle` rather than `Unknown`, as omp's does, because Muse has
+/// a durable idle signal: the status line exists only while a turn is in
+/// flight (verified — a finished turn leaves `◆ Worked for 2m 04s` and no
+/// interrupt hint), so its absence is a positive reading.
+fn muse_content_state(content: &str) -> AgentState {
+    if trailing_nonempty_lines(content, MUSE_FOOTER_LINES)
+        .iter()
+        .any(|line| MUSE_ATTENTION_FOOTERS.iter().any(|m| line.contains(m)))
+    {
+        return AgentState::WaitingForInput;
+    }
+    if muse_status_slot(content).is_some_and(|line| MUSE_WORKING_STATUS_RE.is_match(line)) {
+        return AgentState::Working;
+    }
+    AgentState::Idle
+}
+
+/// The line in the slot Muse Code draws its working status line in, if any:
+/// the last column-0 line above the composer's top rule.
+///
+/// The composer is framed by two full-width rules (`─`), so its top rule is the
+/// second-to-last rule on the pane. Between it and the status line Muse draws
+/// only indented rows — the task list (`  ✓ …`, `  ◆ …`) — and `└ last event …`
+/// sub-lines, which are skipped. Everything else at column 0 is transcript, and
+/// a reply always starts there with its own `◆`, so the slot holds the status
+/// line only while the status line is the newest thing on screen: a quoted copy
+/// further up is behind a later reply, and one inside a diff or a list is
+/// indented or carries a different first glyph.
+///
+/// Receipt (Muse Code 1.4.14): the working, approval, question and idle panes
+/// captured for the fixtures in this file's tests all have this layout.
+fn muse_status_slot(content: &str) -> Option<&str> {
+    let lines: Vec<&str> = content.lines().collect();
+    let is_rule = |line: &&str| {
+        let t = line.trim();
+        !t.is_empty() && t.chars().all(|c| c == '─')
+    };
+    let top_rule = lines
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, l)| is_rule(l))
+        .nth(1)?
+        .0;
+    lines[..top_rule]
+        .iter()
+        .rev()
+        .find(|l| {
+            !l.trim().is_empty() && !l.starts_with(char::is_whitespace) && !l.starts_with('└')
+        })
+        .copied()
+}
+
+/// Whether `path` is a file someone may execute. Off Unix, being a file is
+/// taken as enough.
+fn is_executable(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        meta.is_file()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -637,6 +840,20 @@ mod tests {
     }
 
     #[test]
+    fn from_program_detects_muse() {
+        assert_eq!(AgentKind::from_program("muse-code"), AgentKind::Muse);
+        assert_eq!(
+            AgentKind::from_program("muse-code --model muse-spark-1.3"),
+            AgentKind::Muse
+        );
+        assert_eq!(AgentKind::from_program("Muse-Code"), AgentKind::Muse);
+        assert_eq!(
+            AgentKind::from_program("/usr/bin/muse-code -w"),
+            AgentKind::Muse
+        );
+    }
+
+    #[test]
     fn from_program_unknown_for_others() {
         assert_eq!(AgentKind::from_program("bash"), AgentKind::Unknown);
         assert_eq!(AgentKind::from_program(""), AgentKind::Unknown);
@@ -646,6 +863,73 @@ mod tests {
         assert_eq!(AgentKind::from_program("opencode-ai"), AgentKind::Unknown);
         assert_eq!(AgentKind::from_program("ompx"), AgentKind::Unknown);
         assert_eq!(AgentKind::from_program("omp-wrapper"), AgentKind::Unknown);
+        assert_eq!(AgentKind::from_program("muse-codex"), AgentKind::Unknown);
+        assert_eq!(AgentKind::from_program("muse-import"), AgentKind::Unknown);
+        // Muse Code's real binary is `muse`, but so might be any other tool's;
+        // an existing entry running one must stay a plain program rather than
+        // be relaunched as `muse resume --last`.
+        assert_eq!(AgentKind::from_program("muse"), AgentKind::Unknown);
+        assert_eq!(
+            AgentKind::from_program("/usr/bin/muse -w"),
+            AgentKind::Unknown
+        );
+    }
+
+    #[test]
+    fn every_known_harness_round_trips_through_its_binary_name() {
+        // Discovery adds an entry whose command is the binary name, so that
+        // name must resolve back to the same harness — or a discovered entry
+        // would launch with no launch/resume/state handling at all.
+        for kind in AgentKind::KNOWN {
+            let name = kind.binary_name().expect("known harness has a binary");
+            assert_eq!(AgentKind::from_program(name), kind, "{name}");
+        }
+        assert_eq!(AgentKind::Unknown.binary_name(), None);
+        assert!(!AgentKind::KNOWN.contains(&AgentKind::Unknown));
+    }
+
+    // --- installed_on ---
+
+    #[cfg(unix)]
+    fn touch(dir: &std::path::Path, name: &str, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, "").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_on_finds_executables_across_path_entries() {
+        let a = tempfile::TempDir::new().unwrap();
+        let b = tempfile::TempDir::new().unwrap();
+        touch(a.path(), "codex", 0o755);
+        touch(b.path(), "muse-code", 0o755);
+        // Present but not runnable, and a directory wearing the name: neither
+        // is an install.
+        touch(b.path(), "omp", 0o644);
+        std::fs::create_dir(a.path().join("opencode")).unwrap();
+        let path = std::env::join_paths([a.path(), b.path()]).unwrap();
+        // KNOWN order, not PATH order.
+        assert_eq!(
+            AgentKind::installed_on(&path),
+            vec![AgentKind::Codex, AgentKind::Muse]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_on_ignores_a_bare_muse() {
+        // `muse` is a generic name; only `muse-code` is taken as evidence that
+        // Muse Code is installed.
+        let dir = tempfile::TempDir::new().unwrap();
+        touch(dir.path(), "muse", 0o755);
+        assert_eq!(AgentKind::installed_on(dir.path().as_os_str()), vec![]);
+    }
+
+    #[test]
+    fn installed_on_empty_path_finds_nothing() {
+        assert_eq!(AgentKind::installed_on(std::ffi::OsStr::new("")), vec![]);
     }
 
     // --- capability flags ---
@@ -659,6 +943,8 @@ mod tests {
         assert!(!AgentKind::OpenCode.accepts_positional_prompt());
         // omp takes a positional `MESSAGES` argument, like Claude and Codex.
         assert!(AgentKind::Omp.accepts_positional_prompt());
+        // So does Muse (`muse [OPTIONS] [PROMPT]`).
+        assert!(AgentKind::Muse.accepts_positional_prompt());
         assert!(!AgentKind::Unknown.accepts_positional_prompt());
     }
 
@@ -668,6 +954,7 @@ mod tests {
         assert!(!AgentKind::Codex.is_claude());
         assert!(!AgentKind::OpenCode.is_claude());
         assert!(!AgentKind::Omp.is_claude());
+        assert!(!AgentKind::Muse.is_claude());
         assert!(!AgentKind::Unknown.is_claude());
     }
 
@@ -677,6 +964,7 @@ mod tests {
         assert!(AgentKind::Codex.supports_model_flag());
         assert!(AgentKind::OpenCode.supports_model_flag());
         assert!(AgentKind::Omp.supports_model_flag());
+        assert!(AgentKind::Muse.supports_model_flag());
         assert!(!AgentKind::Unknown.supports_model_flag());
     }
 
@@ -686,10 +974,11 @@ mod tests {
         // injected prompt text, or they read the whole burst as a paste and the
         // Enter lands as a newline in the composer instead of a submit (Claude
         // only once the text is past ~60 chars, which is why short prompts hid
-        // it). OpenCode and omp submit on the carriage-return regardless.
-        // Removing either delay reintroduces "the prompt sits unsent in the
-        // composer" — for dictation auto-submit and comment apply alike.
-        for kind in [AgentKind::Codex, AgentKind::Claude] {
+        // it). Muse folds it at every length. OpenCode and omp submit on the
+        // carriage-return regardless. Removing any of these delays reintroduces
+        // "the prompt sits unsent in the composer" — for dictation auto-submit
+        // and comment apply alike.
+        for kind in [AgentKind::Codex, AgentKind::Claude, AgentKind::Muse] {
             assert_eq!(
                 kind.submit_key_delay(),
                 Some(Duration::from_millis(250)),
@@ -726,6 +1015,18 @@ mod tests {
         assert_eq!(
             AgentKind::Codex.resume_command("codex -m gpt-5"),
             Some("codex resume --last -m gpt-5".to_string())
+        );
+    }
+
+    #[test]
+    fn resume_command_muse_uses_subcommand_after_binary() {
+        assert_eq!(
+            AgentKind::Muse.resume_command("muse-code"),
+            Some("muse-code resume --last".to_string())
+        );
+        assert_eq!(
+            AgentKind::Muse.resume_command("muse-code --model muse-spark-1.3"),
+            Some("muse-code resume --last --model muse-spark-1.3".to_string())
         );
     }
 
@@ -993,6 +1294,20 @@ mod tests {
         // Switched off (`OPENCODE_DISABLE_TERMINAL_TITLE` or the in-app
         // toggle), the title is cleared to the empty string.
         assert_eq!(AgentKind::OpenCode.title_state(""), None);
+    }
+
+    #[test]
+    fn title_state_muse_spinner_is_inconclusive() {
+        // Muse keeps spinning its title while an approval or question overlay
+        // waits on the user, so a spinner must NOT short-circuit to Working —
+        // that would mask every WaitingForInput (see `muse_content_state`).
+        for frame in ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] {
+            assert_eq!(AgentKind::Muse.title_state(&format!("{frame} ws")), None);
+        }
+        // tmux's non-UTF-8 flattening of the same title.
+        assert_eq!(AgentKind::Muse.title_state("_ build-3794954b"), None);
+        // Idle: the bare label.
+        assert_eq!(AgentKind::Muse.title_state("dev-94767866"), None);
     }
 
     // --- content_state: Claude ---
@@ -1489,6 +1804,210 @@ mod tests {
         assert_eq!(
             AgentKind::OpenCode.content_state(" \u{2834} Working\u{2026} \u{27E6}esc\u{27E7}\n"),
             AgentState::Unknown
+        );
+    }
+
+    // --- content_state: Muse ---
+    //
+    // Every fixture below is a verbatim `capture-pane -p` of Muse Code 1.4.14
+    // (blank lines dropped, long rules shortened). See `muse_content_state` for
+    // where each was captured.
+
+    const MUSE_RULE: &str = "────────────────────────────────────────";
+
+    fn muse_pane(body: &str) -> String {
+        format!(
+            "  Muse Code 1.4.14\n{body}\n{MUSE_RULE}\n❯\n{MUSE_RULE}\n  muse-spark-1.3 · xhigh · /tmp/ws · Launch overrides\n"
+        )
+    }
+
+    #[test]
+    fn muse_content_working_from_status_line() {
+        // The status line names the phase and carries a live duration; it is
+        // separated from the composer by an arbitrarily long task list.
+        let pane = muse_pane(
+            "◈ Working (13m 52s · esc to interrupt)\n\
+             \n\
+             \x20 ✓ Finish T-25.4 Mind draw review (field 8→9 heads)\n\
+             \x20 ◆ Implement T-25.5 Tile draw (LABEL_WIDTH 10→11, colon, dim labels)\n\
+             \x20 ◇ T-25.6 golden re-bless review (19 colon goldens)\n\
+             \x20 ◇ T-25.7 milestone check and merge",
+        );
+        assert_eq!(AgentKind::Muse.content_state(&pane), AgentState::Working);
+        for line in [
+            "◆ Thinking (5s · esc to interrupt)",
+            "◇ Calling tools (39s · esc to interrupt)\n└ last event 33s ago",
+            "◇ Double checking (1m 27s · esc to interrupt)",
+            "◈ Working (2h 3m 4s · esc to interrupt)",
+        ] {
+            assert_eq!(
+                AgentKind::Muse.content_state(&muse_pane(line)),
+                AgentState::Working,
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn muse_content_idle_when_the_status_line_is_gone() {
+        let pane = muse_pane(
+            "❯ Now create a new file b.txt containing the word hello.\n\
+             ◆ Creating that file for you.\n\
+             ◆ Wrote b.txt (+1)\n\
+             \x20 1 +hello\n\
+             ◆ Created b.txt.\n\
+             ◆ Worked for 2m 04s · 10:58 AM · 30/Oct",
+        );
+        assert_eq!(AgentKind::Muse.content_state(&pane), AgentState::Idle);
+        // A fresh session, before any turn.
+        assert_eq!(
+            AgentKind::Muse.content_state(&muse_pane("")),
+            AgentState::Idle
+        );
+    }
+
+    #[test]
+    fn muse_content_interrupt_hint_in_transcript_prose_is_not_working() {
+        // The status line is matched as a whole line, so prose that merely
+        // mentions the hint — or quotes the line inside other text — is inert.
+        let pane = muse_pane(
+            "◆ The footer reads (5s · esc to interrupt) while a turn runs.\n\
+             \x20 20 +    \"◆ Thinking (5s · esc to interrupt)\",",
+        );
+        assert_eq!(AgentKind::Muse.content_state(&pane), AgentState::Idle);
+        // A one-digit diff line number and a markdown bullet both put a single
+        // character and a space before the quoted status line.
+        for line in [
+            "◆ Wrote x.rs (+1)\n\x20 1 +◆ Thinking (5s · esc to interrupt)",
+            "◆ Notes:\n- The status line reads (5s · esc to interrupt)",
+            "◆ Thinking (5s · esc to interrupt)\n◆ That is what the status line shows.",
+        ] {
+            assert_eq!(
+                AgentKind::Muse.content_state(&muse_pane(line)),
+                AgentState::Idle,
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn muse_content_status_line_must_sit_above_the_composer() {
+        // Without the composer's rules there is no status-line slot to read.
+        assert_eq!(
+            AgentKind::Muse.content_state("◆ Thinking (5s · esc to interrupt)\n"),
+            AgentState::Idle
+        );
+        // Sub-second durations are accepted on the shape of the other units.
+        assert_eq!(
+            AgentKind::Muse.content_state(&muse_pane("◆ Thinking (500ms · esc to interrupt)")),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn muse_content_command_approval_is_waiting() {
+        // The approval card replaces the composer, under a still-rendered
+        // working status line — waiting must win.
+        let pane = "\
+  Muse Code 1.4.14
+❯ Run the shell command: ls -la
+◆ I'll run that directory listing for you.
+◇ Calling tools (39s · esc to interrupt)
+└ last event 33s ago
+────────────────────────────────────────
+Would you like to run the following command?
+  $ ls -la
+  Stage 1/1
+  Current argv: [\"ls\",\"-la\"]
+⟩ 1. Allow this stage once (y)
+  2. Always allow in this workspace: ls ... (p)
+  3. Abort the entire command (esc)
+Change approval defaults in /permissions
+────────────────────────────────────────
+  muse-spark-1.3 · xhigh · /tmp/ws · Launch overrides
+";
+        assert_eq!(
+            AgentKind::Muse.content_state(pane),
+            AgentState::WaitingForInput
+        );
+    }
+
+    #[test]
+    fn muse_content_question_overlay_is_waiting() {
+        let pane = muse_pane(
+            "❯ Ask me whether I prefer red or blue.\n\
+             ◈ Request user input Color — running (33s)\n\
+             \x20 Do you prefer red or blue?\n\
+             \x20 ⟩ 1. Red                Warm, bold choice.\n\
+             \x20   2. Blue               Cool, calm choice.\n\
+             \x20   3. None of the above  Optionally, add details in notes (tab).\n\
+             \x20 Enter to select · ↑/↓ to move · Tab for an optional note · Esc to interrupt",
+        );
+        assert_eq!(
+            AgentKind::Muse.content_state(&pane),
+            AgentState::WaitingForInput
+        );
+    }
+
+    #[test]
+    fn muse_content_workspace_trust_prompt_is_waiting() {
+        // Shown at launch in a workspace Muse has not been told to trust —
+        // which a fresh commander worktree usually is.
+        let pane = "\
+Do you trust this workspace?
+Workspace:
+/tmp/ws
+Trusting allows project-local skills, rules, hooks, and plugin config to load before the model runs.
+Only trust this workspace when you trust its contents.
+⟩ 1  Trust and continue
+  2  Quit
+Use Up/Down or 1/2, then Enter. Esc quits.
+";
+        assert_eq!(
+            AgentKind::Muse.content_state(pane),
+            AgentState::WaitingForInput
+        );
+    }
+
+    #[test]
+    fn muse_content_overlay_footers_in_transcript_are_not_waiting() {
+        // The overlay markers are matched against the bottom of the pane only:
+        // a transcript quoting one, far above the composer, is not a prompt.
+        let mut body = String::from(
+            "◆ The card ends with Change approval defaults in /permissions\n\
+             \x20 Enter to select · ↑/↓ to move · Tab for an optional note\n\
+             \x20 Use Up/Down or 1/2, then Enter. Esc quits.\n",
+        );
+        for i in 0..8 {
+            body.push_str(&format!("◆ Line {i} of an ordinary reply.\n"));
+        }
+        assert_eq!(
+            AgentKind::Muse.content_state(&muse_pane(body.trim_end())),
+            AgentState::Idle
+        );
+    }
+
+    #[test]
+    fn muse_content_strips_ansi_before_matching() {
+        assert_eq!(
+            AgentKind::Muse.content_state(&muse_pane(
+                "\x1B[35m◆\x1B[0m Thinking \x1B[2m(5s · esc to interrupt)\x1B[0m"
+            )),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn muse_content_patterns_are_inert_for_other_harnesses() {
+        // OpenCode's interrupt hint is "esc interrupt", and its footer window
+        // must not be satisfied by Muse's differently-worded status line.
+        assert_eq!(
+            AgentKind::OpenCode.content_state(&muse_pane("◆ Thinking (5s · esc to interrupt)")),
+            AgentState::Unknown
+        );
+        assert_eq!(
+            AgentKind::Omp.content_state(&muse_pane("Change approval defaults in /permissions")),
+            AgentState::Idle
         );
     }
 
