@@ -517,148 +517,148 @@ jobs:
       #   - name: Run Linux End-to-End Tests
       #     run: nix develop .#clientCi -c bash -c 'mkdir -p ~/.cargo/bin && ln -sf "$(command -v rustup)" ~/.cargo/bin/rustup && xvfb-run -a client/tool/e2e.sh'
 
-  client-apple:
-    name: Client Apple Builds
-    # GitHub's macOS runners are free for public repositories, and they are
-    # arm64 — so this is also the only coverage the Apple-silicon side of
-    # flake.nix gets. Xcode is preinstalled, which is the one prerequisite Nix
-    # cannot supply (see `clientXcrunShim`).
-    runs-on: macos-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          # Not just the icon masters this time: .gitattributes sends *.png to
-          # LFS, which includes every AppIcon asset in the two runners. Without
-          # this, `actool` compiles pointer files into the asset catalog.
-          lfs: true
+  # client-apple:
+  #   name: Client Apple Builds
+  #   # GitHub's macOS runners are free for public repositories, and they are
+  #   # arm64 — so this is also the only coverage the Apple-silicon side of
+  #   # flake.nix gets. Xcode is preinstalled, which is the one prerequisite Nix
+  #   # cannot supply (see `clientXcrunShim`).
+  #   runs-on: macos-latest
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v4
+  #       with:
+  #         # Not just the icon masters this time: .gitattributes sends *.png to
+  #         # LFS, which includes every AppIcon asset in the two runners. Without
+  #         # this, `actool` compiles pointer files into the asset catalog.
+  #         lfs: true
 
-      - name: Install Nix
-        uses: nixbuild/nix-quick-install-action@v30
-        with:
-          nix_conf: |
-            keep-env-derivations = true
-            keep-outputs = true
+  #     - name: Install Nix
+  #       uses: nixbuild/nix-quick-install-action@v30
+  #       with:
+  #         nix_conf: |
+  #           keep-env-derivations = true
+  #           keep-outputs = true
 
-      - name: Restore Nix Store Cache
-        uses: nix-community/cache-nix-action@v7
-        with:
-          primary-key: nix-client-apple-${{ runner.os }}-${{ hashFiles('**/flake.lock', '**/Cargo.lock', 'client/pubspec.lock') }}
-          restore-prefixes-first-match: nix-client-apple-${{ runner.os }}-
+  #     - name: Restore Nix Store Cache
+  #       uses: nix-community/cache-nix-action@v7
+  #       with:
+  #         primary-key: nix-client-apple-${{ runner.os }}-${{ hashFiles('**/flake.lock', '**/Cargo.lock', 'client/pubspec.lock') }}
+  #         restore-prefixes-first-match: nix-client-apple-${{ runner.os }}-
 
-      - name: Restore Cargo Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: client/rust
+  #     - name: Restore Cargo Cache
+  #       uses: Swatinem/rust-cache@v2
+  #       with:
+  #         workspaces: client/rust
 
-      - name: Restore Pub Cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.pub-cache
-          key: pub-${{ runner.os }}-${{ hashFiles('client/pubspec.lock') }}
-          restore-keys: pub-${{ runner.os }}-
+  #     - name: Restore Pub Cache
+  #       uses: actions/cache@v4
+  #       with:
+  #         path: ~/.pub-cache
+  #         key: pub-${{ runner.os }}-${{ hashFiles('client/pubspec.lock') }}
+  #         restore-keys: pub-${{ runner.os }}-
 
-      # The one thing this job does NOT take from the flake, and only for the iOS
-      # build: the Flutter SDK. nixpkgs' `flutter-artifacts-ios-aarch64-darwin` is
-      # mis-assembled. At
-      #   bin/cache/artifacts/engine/ios/Flutter.xcframework/ios-arm64_x86_64-simulator/Flutter.framework/Flutter
-      # it holds a 26,320-byte non-executable stub whose fat header claims an
-      # arm64 slice past EOF, so `ld` stops at "X86_64 slice extends beyond end of
-      # file". The same path in the x86_64-darwin artifact is the real
-      # 78,153,424-byte engine, and on aarch64-darwin that binary does exist —
-      # filed under `extension_safe/` instead. Checkable without a Mac:
-      #   nix store ls -lR --store https://cache.nixos.org <ios-artifact-path>
-      #
-      # So it is upstream and iOS-specific. Not a cache artefact (this job's first
-      # two runs built the store cold and failed identically), and not "nixpkgs
-      # Flutter is broken on arm64" — the macOS engine artifacts are the same
-      # sizes on both darwin systems, which is why Build macOS below still uses
-      # the flake's Flutter, as does `flutter pub get`.
-      #
-      # The version is read back out of the flake rather than restated here, so
-      # the iOS SDK cannot drift from the one a maintainer uses — that being the
-      # whole reason these builds go through the dev shell.
-      - name: Resolve The Flake's Flutter Version
-        id: flutter
-        run: |
-          v="$(nix develop .#clientApple -c flutter --version --machine \
-                 | python3 -c 'import json,sys; print(json.load(sys.stdin)["frameworkVersion"])')"
-          echo "Flake provides Flutter $v"
-          echo "version=$v" >> "$GITHUB_OUTPUT"
+  #     # The one thing this job does NOT take from the flake, and only for the iOS
+  #     # build: the Flutter SDK. nixpkgs' `flutter-artifacts-ios-aarch64-darwin` is
+  #     # mis-assembled. At
+  #     #   bin/cache/artifacts/engine/ios/Flutter.xcframework/ios-arm64_x86_64-simulator/Flutter.framework/Flutter
+  #     # it holds a 26,320-byte non-executable stub whose fat header claims an
+  #     # arm64 slice past EOF, so `ld` stops at "X86_64 slice extends beyond end of
+  #     # file". The same path in the x86_64-darwin artifact is the real
+  #     # 78,153,424-byte engine, and on aarch64-darwin that binary does exist —
+  #     # filed under `extension_safe/` instead. Checkable without a Mac:
+  #     #   nix store ls -lR --store https://cache.nixos.org <ios-artifact-path>
+  #     #
+  #     # So it is upstream and iOS-specific. Not a cache artefact (this job's first
+  #     # two runs built the store cold and failed identically), and not "nixpkgs
+  #     # Flutter is broken on arm64" — the macOS engine artifacts are the same
+  #     # sizes on both darwin systems, which is why Build macOS below still uses
+  #     # the flake's Flutter, as does `flutter pub get`.
+  #     #
+  #     # The version is read back out of the flake rather than restated here, so
+  #     # the iOS SDK cannot drift from the one a maintainer uses — that being the
+  #     # whole reason these builds go through the dev shell.
+  #     - name: Resolve The Flake's Flutter Version
+  #       id: flutter
+  #       run: |
+  #         v="$(nix develop .#clientApple -c flutter --version --machine \
+  #                | python3 -c 'import json,sys; print(json.load(sys.stdin)["frameworkVersion"])')"
+  #         echo "Flake provides Flutter $v"
+  #         echo "version=$v" >> "$GITHUB_OUTPUT"
 
-      - name: Install Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ steps.flutter.outputs.version }}
-          cache: true
+  #     - name: Install Flutter
+  #       uses: subosito/flutter-action@v2
+  #       with:
+  #         flutter-version: ${{ steps.flutter.outputs.version }}
+  #         cache: true
 
-      # Captured from `command -v` rather than trusting the action's FLUTTER_ROOT:
-      # `nix develop` prepends its own bin dirs, so the flake's flutter would win
-      # on PATH inside every step below unless this one is re-prepended by hand.
-      - name: Record The Flutter SDK Path
-        run: echo "CC_FLUTTER_BIN=$(dirname "$(command -v flutter)")" >> "$GITHUB_ENV"
+  #     # Captured from `command -v` rather than trusting the action's FLUTTER_ROOT:
+  #     # `nix develop` prepends its own bin dirs, so the flake's flutter would win
+  #     # on PATH inside every step below unless this one is re-prepended by hand.
+  #     - name: Record The Flutter SDK Path
+  #       run: echo "CC_FLUTTER_BIN=$(dirname "$(command -v flutter)")" >> "$GITHUB_ENV"
 
-      # Same stale-git-dep hazard as the Linux client job; see the note there.
-      - name: Fetch Flutter Packages
-        run: nix develop .#clientApple -c bash -c 'rm -rf ~/.pub-cache/git && cd client && flutter pub get'
+  #     # Same stale-git-dep hazard as the Linux client job; see the note there.
+  #     - name: Fetch Flutter Packages
+  #       run: nix develop .#clientApple -c bash -c 'rm -rf ~/.pub-cache/git && cd client && flutter pub get'
 
-      # cargokit's rustup.dart resolves `rustup` from ~/.cargo/bin *before* PATH
-      # (see flake.nix's `mkRustupShim`), and GitHub's macOS images ship a real
-      # one there — the Restore Cargo Cache step above relies on that same
-      # preinstalled Rust. Left alone, both builds below would `rustup target
-      # add` the iOS triples over the network and compile with the runner's
-      # toolchain, so `clientAppleRust`/`clientAppleTargets` would never be
-      # exercised and dropping a triple from the flake would leave CI green.
-      - name: Shadow Rustup With The Flake Toolchain
-        run: nix develop .#clientApple -c bash -c 'mkdir -p ~/.cargo/bin && ln -sf "$(command -v rustup)" ~/.cargo/bin/rustup'
+  #     # cargokit's rustup.dart resolves `rustup` from ~/.cargo/bin *before* PATH
+  #     # (see flake.nix's `mkRustupShim`), and GitHub's macOS images ship a real
+  #     # one there — the Restore Cargo Cache step above relies on that same
+  #     # preinstalled Rust. Left alone, both builds below would `rustup target
+  #     # add` the iOS triples over the network and compile with the runner's
+  #     # toolchain, so `clientAppleRust`/`clientAppleTargets` would never be
+  #     # exercised and dropping a triple from the flake would leave CI green.
+  #     - name: Shadow Rustup With The Flake Toolchain
+  #       run: nix develop .#clientApple -c bash -c 'mkdir -p ~/.cargo/bin && ln -sf "$(command -v rustup)" ~/.cargo/bin/rustup'
 
-      # Which toolchain actually did the work, recorded before anything can fail
-      # with it. Both prior failures here were toolchain-resolution problems
-      # whose logs named no version, so this is cheap insurance rather than
-      # decoration.
-      # Which toolchain actually did the work, recorded before anything can fail
-      # with it. Every failure in this job so far has been a toolchain-resolution
-      # problem whose log named no version or path, and each cost a full macOS run
-      # to place — so this is insurance, not decoration. It also prints the flake
-      # Flutter's iOS engine binary, whose 26,320-byte stub is the whole reason the
-      # SDK above comes from the action; the day nixpkgs ships an intact
-      # aarch64-darwin artifact, that line says so.
-      #
-      # Via a quoted heredoc rather than `bash -c '...'`: an apostrophe in a
-      # comment inside such a block closes the quote, and the rest of the script
-      # then runs outside the dev shell against the runner's own tools. That is
-      # not hypothetical — it is what broke this step once already.
-      - name: Report The Apple Toolchain
-        run: |
-          echo "iOS-build SDK (action): $("$CC_FLUTTER_BIN/flutter" --version | head -1)"
-          cat > "$RUNNER_TEMP/apple-report.sh" <<'REPORT'
-          set -u
-          cc-xcode-env sh -c 'echo "DEVELOPER_DIR=$DEVELOPER_DIR"; echo "xcrun=$(command -v xcrun)"; xcodebuild -version; /usr/bin/arch -arm64e xcrun xcodebuild -version >/dev/null 2>&1 && echo arm64e-xcrun=ok || echo arm64e-xcrun=FAILED'
-          engine="$(dirname "$(command -v flutter)")/../bin/cache/artifacts/engine/ios/Flutter.xcframework/ios-arm64_x86_64-simulator/Flutter.framework/Flutter"
-          ls -lL "$engine" 2>/dev/null || echo "flake engine binary not found at $engine"
-          cc-xcode-env lipo -detailed_info "$engine" 2>&1 | head -5 || true
-          for t in flutter dart xcodebuild xcrun rustc cargo rustup pod; do
-            printf '%-10s %s\n' "$t" "$(command -v "$t" || echo MISSING)"
-          done
-          flutter --version
-          rustc -vV | head -3
-          REPORT
-          nix develop .#clientApple -c bash "$RUNNER_TEMP/apple-report.sh"
+  #     # Which toolchain actually did the work, recorded before anything can fail
+  #     # with it. Both prior failures here were toolchain-resolution problems
+  #     # whose logs named no version, so this is cheap insurance rather than
+  #     # decoration.
+  #     # Which toolchain actually did the work, recorded before anything can fail
+  #     # with it. Every failure in this job so far has been a toolchain-resolution
+  #     # problem whose log named no version or path, and each cost a full macOS run
+  #     # to place — so this is insurance, not decoration. It also prints the flake
+  #     # Flutter's iOS engine binary, whose 26,320-byte stub is the whole reason the
+  #     # SDK above comes from the action; the day nixpkgs ships an intact
+  #     # aarch64-darwin artifact, that line says so.
+  #     #
+  #     # Via a quoted heredoc rather than `bash -c '...'`: an apostrophe in a
+  #     # comment inside such a block closes the quote, and the rest of the script
+  #     # then runs outside the dev shell against the runner's own tools. That is
+  #     # not hypothetical — it is what broke this step once already.
+  #     - name: Report The Apple Toolchain
+  #       run: |
+  #         echo "iOS-build SDK (action): $("$CC_FLUTTER_BIN/flutter" --version | head -1)"
+  #         cat > "$RUNNER_TEMP/apple-report.sh" <<'REPORT'
+  #         set -u
+  #         cc-xcode-env sh -c 'echo "DEVELOPER_DIR=$DEVELOPER_DIR"; echo "xcrun=$(command -v xcrun)"; xcodebuild -version; /usr/bin/arch -arm64e xcrun xcodebuild -version >/dev/null 2>&1 && echo arm64e-xcrun=ok || echo arm64e-xcrun=FAILED'
+  #         engine="$(dirname "$(command -v flutter)")/../bin/cache/artifacts/engine/ios/Flutter.xcframework/ios-arm64_x86_64-simulator/Flutter.framework/Flutter"
+  #         ls -lL "$engine" 2>/dev/null || echo "flake engine binary not found at $engine"
+  #         cc-xcode-env lipo -detailed_info "$engine" 2>&1 | head -5 || true
+  #         for t in flutter dart xcodebuild xcrun rustc cargo rustup pod; do
+  #           printf '%-10s %s\n' "$t" "$(command -v "$t" || echo MISSING)"
+  #         done
+  #         flutter --version
+  #         rustc -vV | head -3
+  #         REPORT
+  #         nix develop .#clientApple -c bash "$RUNNER_TEMP/apple-report.sh"
 
-      # The simulator build is the one that exercises the whole Apple path end
-      # to end: CocoaPods, cargokit's Rust staticlib for the iOS triples, and
-      # the xcrun shim's delegation to the host Xcode. It needs no signing
-      # identity, so it runs on a bare runner.
-      - name: Build iOS (Simulator)
-        run: nix develop .#clientApple -c bash -c 'export PATH="$CC_FLUTTER_BIN:$PATH" && cd client && cc-xcode-env flutter build ios --simulator --debug'
+  #     # The simulator build is the one that exercises the whole Apple path end
+  #     # to end: CocoaPods, cargokit's Rust staticlib for the iOS triples, and
+  #     # the xcrun shim's delegation to the host Xcode. It needs no signing
+  #     # identity, so it runs on a bare runner.
+  #     - name: Build iOS (Simulator)
+  #       run: nix develop .#clientApple -c bash -c 'export PATH="$CC_FLUTTER_BIN:$PATH" && cd client && cc-xcode-env flutter build ios --simulator --debug'
 
-      # The macOS runner signs ad-hoc (CODE_SIGN_IDENTITY = "-"), so this needs
-      # no Developer ID either.
-      - name: Build macOS
-        run: nix develop .#clientApple -c bash -c 'cd client && cc-xcode-env flutter build macos --debug'
+  #     # The macOS runner signs ad-hoc (CODE_SIGN_IDENTITY = "-"), so this needs
+  #     # no Developer ID either.
+  #     - name: Build macOS
+  #       run: nix develop .#clientApple -c bash -c 'cd client && cc-xcode-env flutter build macos --debug'
 
-      # Not covered here: launching either app. The iOS app boots and runs in a
-      # simulator locally, but doing it in CI means booting a runtime and
-      # waiting on SpringBoard, which is slow and flaky enough to want its own
-      # task. Device builds are also out of scope — they need a signing
-      # identity, which a fork's PR cannot have.
+  #     # Not covered here: launching either app. The iOS app boots and runs in a
+  #     # simulator locally, but doing it in CI means booting a runtime and
+  #     # waiting on SpringBoard, which is slow and flaky enough to want its own
+  #     # task. Device builds are also out of scope — they need a signing
+  #     # identity, which a fork's PR cannot have.
