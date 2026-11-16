@@ -41,12 +41,13 @@ brew install claude-commander
 yay -S claude-commander
 ```
 
-### Main-branch builds
+### Prebuilt binaries
 
 Every commit to `main` that passes CI is built for Linux (x86_64, aarch64) and
 macOS (Apple silicon) and published as the [`main-build` prerelease](https://github.com/sizeak/claude-commander/releases/tag/main-build).
 Each archive holds `claude-commander` and `claude-commander-server`. These are
-builds of `main`, not releases.
+builds of `main`, not releases. Each tagged release carries the same archives,
+built from the tag.
 
 - `tmux` and `git` must be on `PATH`.
 - On Linux, `claude-commander` needs the ALSA and PipeWire libraries

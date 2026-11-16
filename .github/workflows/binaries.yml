@@ -1,7 +1,7 @@
 name: Binaries
 
-# Prebuilt binaries for every main commit that passes CI, as the rolling `main-build` prerelease.
-# PRs touching this file run the build only.
+# Prebuilt binaries: every main commit that passes CI as the rolling `main-build` prerelease,
+# and every stable `v*` tag attached to its release. PRs touching this file run the build only.
 on:
   workflow_run:
     workflows: [CI]
@@ -10,6 +10,8 @@ on:
   pull_request:
     paths:
       - .github/workflows/binaries.yml
+  push:
+    tags: ['v*']
 
 concurrency:
   group: binaries-${{ github.ref }}
@@ -18,7 +20,7 @@ concurrency:
 env:
   DO_NOT_TRACK: "1"
   # workflow_run's GITHUB_SHA is main's tip, not the commit CI passed.
-  BUILD_SHA: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
+  BUILD_SHA: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha || github.sha }}
 
 jobs:
   build:
@@ -28,7 +30,8 @@ jobs:
       github.event_name == 'pull_request' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push' &&
-       github.event.workflow_run.head_repository.full_name == github.repository)
+       github.event.workflow_run.head_repository.full_name == github.repository) ||
+      (github.event_name == 'push' && !contains(github.ref_name, '-'))
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -65,7 +68,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: binaries-${{ matrix.target }}
-          save-if: ${{ github.event_name == 'workflow_run' }}
+          save-if: ${{ github.event_name != 'pull_request' }}
 
       - name: Build
         run: >-
@@ -77,7 +80,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          name="claude-commander-main-${BUILD_SHA::7}-${{ matrix.target }}"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then label="$GITHUB_REF_NAME"; else label="main-${BUILD_SHA::7}"; fi
+          name="claude-commander-$label-${{ matrix.target }}"
           mkdir -p "dist/$name"
           cp "target/${{ matrix.target }}/release/claude-commander" \
              "target/${{ matrix.target }}/release/claude-commander-server" \
@@ -147,3 +151,29 @@ jobs:
             --title "Main build (${short})" \
             --notes-file notes.md \
             dist/*
+
+  release:
+    name: Publish Release Binaries
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Archives
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      # publish-tap.yml usually creates the release first; create it only if missing.
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --verify-tag --generate-notes
+          gh release upload "$TAG" dist/* --clobber
