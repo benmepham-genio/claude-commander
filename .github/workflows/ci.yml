@@ -108,6 +108,10 @@ jobs:
       - name: Run Clippy
         run: nix develop -c cargo clippy --workspace --all-targets -- -D warnings
 
+      # The -novoice build (core without `audio`), which the workspace pass never compiles.
+      - name: Run Clippy Without Audio
+        run: nix develop -c cargo clippy -p claude-commander --no-default-features --all-targets -- -D warnings
+
   nix:
     name: Nix Build
     runs-on: ubuntu-latest

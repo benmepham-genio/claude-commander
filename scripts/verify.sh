@@ -126,7 +126,11 @@ lane_fmt() {
   # `--all` never reaches it. rustfmt needs no client toolchain.
   cc_run_in_shell "" cargo "cargo fmt --manifest-path client/rust/Cargo.toml --all -- --check"
 }
-lane_clippy() { cc_run_in_shell "" cargo "cargo clippy --workspace --all-targets -- -D warnings"; }
+lane_clippy() {
+  cc_run_in_shell "" cargo "cargo clippy --workspace --all-targets -- -D warnings" || return $?
+  # The -novoice build (core without `audio`), which the workspace pass never compiles.
+  cc_run_in_shell "" cargo "cargo clippy -p claude-commander --no-default-features --all-targets -- -D warnings"
+}
 lane_build() {
   cc_run_in_shell "" cargo "cargo build --workspace --all-targets" || return $?
   # Core's `test-support` must reach the build over dev edges only; see

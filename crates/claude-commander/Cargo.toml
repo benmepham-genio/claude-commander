@@ -14,11 +14,14 @@ name = "claude-commander"
 path = "src/main.rs"
 
 [dependencies]
-claude-commander-core = { path = "../claude-commander-core" }
+# `audio` is forwarded so `--no-default-features` builds the -novoice binary.
+claude-commander-core = { path = "../claude-commander-core", default-features = false, features = [
+    "clipboard",
+] }
 # The ratatui frontend (`App`, and the Alt+Tab `picker` popup). Lives outside
 # core so consumers that render nothing — the server, the remote client, the
 # Flutter cdylib — don't compile a terminal UI.
-claude-commander-tui = { path = "../claude-commander-tui" }
+claude-commander-tui = { path = "../claude-commander-tui", default-features = false }
 # HTTP client backend for remote servers. The binary owns this dependency (core
 # does not) and injects a factory closure into the TUI, so the dependency
 # direction stays bin → {core, tui, remote}.
@@ -47,6 +50,10 @@ color-eyre = "0.6"
 # Observability
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+default = ["audio"]
+audio = ["claude-commander-core/audio", "claude-commander-tui/audio"]
 
 [dev-dependencies]
 # Hermetic temp dirs for the `serve` module tests (they write a config.toml).

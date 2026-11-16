@@ -99,6 +99,31 @@ jobs:
           "${{ steps.package.outputs.dir }}/claude-commander" --version
           "${{ steps.package.outputs.dir }}/claude-commander-server" --version
 
+      # Voice compiled out, so no ALSA/PipeWire needed (servers, ssh). Reuses the server binary.
+      - name: Build Without Audio
+        if: runner.os == 'Linux'
+        run: >-
+          cargo build --locked --release --target ${{ matrix.target }}
+          -p claude-commander --no-default-features
+
+      - name: Package Without Audio
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="${{ steps.package.outputs.name }}-novoice"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/claude-commander" \
+             "${{ steps.package.outputs.dir }}/claude-commander-server" \
+             README.md LICENSE "dist/$name/"
+          if readelf -d "dist/$name/claude-commander" | grep -E 'libasound|libpipewire'; then
+            echo "::error::the -novoice binary still links an audio library"
+            exit 1
+          fi
+          "dist/$name/claude-commander" --version
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+
       - name: Upload Archive
         uses: actions/upload-artifact@v7
         with:
@@ -141,7 +166,7 @@ jobs:
           Build of [\`${short}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${BUILD_SHA}) on \`main\`. Not a release.
 
           - Needs \`tmux\` and \`git\`.
-          - Linux: glibc 2.39+; \`claude-commander\` needs ALSA and PipeWire.
+          - Linux: glibc 2.39+; \`claude-commander\` needs ALSA and PipeWire. \`-novoice\` archives drop voice and need neither.
           - macOS: unsigned — \`xattr -d com.apple.quarantine claude-commander*\`.
           EOF
           gh release delete main-build --cleanup-tag --yes || true
