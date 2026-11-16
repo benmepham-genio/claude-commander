@@ -168,7 +168,7 @@ cc_exit_code_for_lane() {
 cc_lane_description() {
   case "${1:-}" in
     fmt) printf 'cargo fmt --check (workspace + client/rust)\n' ;;
-    clippy) printf 'cargo clippy --workspace --all-targets -- -D warnings\n' ;;
+    clippy) printf 'cargo clippy --workspace --all-targets, then -p claude-commander --no-default-features (-D warnings)\n' ;;
     build) printf 'cargo build --workspace --all-targets\n' ;;
     test) printf 'cargo test --workspace\n' ;;
     pub-get) printf 'flutter pub get (client lanes need resolved packages)\n' ;;

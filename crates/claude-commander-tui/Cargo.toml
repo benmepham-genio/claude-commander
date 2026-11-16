@@ -20,11 +20,10 @@ name = "claude_commander_tui"
 path = "src/lib.rs"
 
 [dependencies]
-# The library this frontend renders. Default features stay ON here (unlike the
-# server/remote/client, which take core with `default-features = false`): this
-# IS the desktop frontend, so it is the consumer that genuinely wants core's
-# `audio` (mic/speaker for conversation mode) and `clipboard` (Ctrl+V paste).
-claude-commander-core = { path = "../claude-commander-core" }
+# The library this frontend renders. `audio` is forwarded (default on) so the -novoice build can drop libasound/libpipewire.
+claude-commander-core = { path = "../claude-commander-core", default-features = false, features = [
+    "clipboard",
+] }
 # The wire contracts, taken directly rather than through core's legacy DTO
 # re-exports. Per CLAUDE.md a shared *rule* lives in protocol, not core — the
 # add-project-from-GitHub flow uses its `github` slug validation and
@@ -116,6 +115,10 @@ thiserror = { workspace = true }
 
 # Observability
 tracing = { workspace = true }
+
+[features]
+default = ["audio"]
+audio = ["claude-commander-core/audio"]
 
 [dev-dependencies]
 # Re-state core with `test-support` to reach its test scaffolding

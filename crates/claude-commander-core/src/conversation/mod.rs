@@ -32,6 +32,9 @@
 //! commander's UI" and "sub-reply latency" are mutually exclusive (short of
 //! fragile pane-scraping). See [`session`] for the actual protocol handling.
 
+/// Whether this build has core's `audio` feature (off in the server, cdylib and -novoice TUI).
+pub const AUDIO_SUPPORTED: bool = cfg!(feature = "audio");
+
 pub mod audio;
 pub mod dictation;
 pub mod extract;
