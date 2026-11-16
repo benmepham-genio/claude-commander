@@ -1,6 +1,8 @@
 name: CI
 
+# Fork: slow jobs only run on manual dispatch; push/PR runs Format, Clippy, Build & Test.
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
@@ -114,6 +116,7 @@ jobs:
 
   nix:
     name: Nix Build
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       # cache purging
@@ -231,6 +234,7 @@ jobs:
 
   test-macos:
     name: macOS Build & Test
+    if: github.event_name == 'workflow_dispatch'
     # Every other Rust job runs on Linux, and Client Apple Builds only compiles
     # client/rust, which does not depend on core. So nothing compiled core for
     # macOS, and a Linux-only type (`TIOCNOTTY` is `u32` there, where `ioctl`
@@ -277,6 +281,7 @@ jobs:
 
   packaging:
     name: Packaging Install
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -330,6 +335,7 @@ jobs:
 
   web:
     name: Web
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     # The e2e lane bounds itself (CC_WEB_E2E_TIMEOUT), but a cold Nix store or
     # cargo cache can hang elsewhere; don't hold a runner for GitHub's 6h default.
@@ -416,6 +422,7 @@ jobs:
 
   client:
     name: Client Tests
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       # cache purging
