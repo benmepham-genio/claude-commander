@@ -20,6 +20,38 @@ void main() {
     home: ReviewPage(api: api, handle: testHandle, session: sessionInfo()),
   );
 
+  testWidgets('many-file reviews mount only visible collapsed headers', (
+    tester,
+  ) async {
+    api.openReviewResponse = reviewSnapshot(
+      files: [
+        for (var i = 0; i < 1000; i++) reviewFile(displayPath: 'file-$i.dart'),
+      ],
+    );
+    await tester.pumpWidget(wrap());
+    await tester.pumpAndSettle();
+    expect(find.textContaining(RegExp(r'^file-')), findsWidgets);
+    expect(
+      find.textContaining(RegExp(r'^file-')).evaluate().length,
+      lessThan(40),
+    );
+    await tester.tap(find.text('file-0.dart'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('file-0.dart'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('file-999.dart'),
+      1000,
+      maxScrolls: 150,
+    );
+    expect(find.text('file-999.dart'), findsOneWidget);
+    expect(
+      find.textContaining(RegExp(r'^file-')).evaluate().length,
+      lessThan(40),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('a snapshot renders file cards and diff rows', (tester) async {
     api.openReviewResponse = reviewSnapshot(
       files: [

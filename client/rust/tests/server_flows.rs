@@ -513,6 +513,7 @@ fn clone_from_a_local_bare_repo_registers_a_project() {
             source: CloneSourceDto {
                 kind: CloneSourceKind::Url,
                 value: remote.to_string_lossy().into_owned(),
+                hostname: None,
             },
             dest_name: Some("cloned-by-client".to_string()),
             // The app's active workspace rides along and tags the result.

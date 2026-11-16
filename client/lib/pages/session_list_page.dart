@@ -322,20 +322,90 @@ class _SessionListBodyState extends State<SessionListBody> {
     bool multi,
     String? workspace,
   ) {
-    return ListView(
-      padding: const EdgeInsets.only(top: 6, bottom: 12),
-      children: [
-        for (final store in servers)
-          _ServerSection(
+    final rows = <(String, Widget Function(BuildContext))>[];
+    for (final store in servers) {
+      final prefix = store.config.id;
+      if (store.snapshot == null) {
+        rows.add((
+          '$prefix/loading',
+          (context) => _ServerSection(
             store: store,
             workspace: workspace,
             showHeader: multi,
-            selectedId: widget.selectedId,
-            onSelect: widget.onSelect,
-            query: _query,
-            quick: _quick,
           ),
-      ],
+        ));
+        continue;
+      }
+      if (multi) {
+        rows.add((
+          '$prefix/header',
+          (context) => _ServerHeader(
+            store: store,
+            count: store.sessionsIn(workspace).length,
+          ),
+        ));
+      }
+      if (store.cascadePaused != null) {
+        rows.add((
+          '$prefix/cascade',
+          (context) =>
+              CommanderStoreScope(store: store, child: CascadeBanner()),
+        ));
+      }
+      var matches = 0;
+      for (final group in store.sessionsByProjectIn(workspace)) {
+        final sessions = matchingSessions(group.sessions, _query)
+            .where(
+              (session) =>
+                  (_quick == null || _matchesQuick(_quick!, store, session)),
+            )
+            .toList();
+        if (sessions.isEmpty) continue;
+        matches += sessions.length;
+        rows.add((
+          '$prefix/project/${group.project.id}',
+          (context) => ChromeEyebrow(
+            '${group.project.name.toUpperCase()} · ${sessions.length}',
+          ),
+        ));
+        for (final (i, session) in sessions.indexed) {
+          rows.add((
+            '$prefix/session/${session.id}',
+            (context) => Padding(
+              padding: const EdgeInsets.fromLTRB(14, 0, 12, 6),
+              child: _groupedRow(
+                context,
+                store: store,
+                session: session,
+                selected: session.id == widget.selectedId,
+                position: _rowPosition(i, sessions.length),
+                onTap: () => widget.onSelect(store, session),
+              ),
+            ),
+          ));
+        }
+      }
+      if (matches == 0) {
+        rows.add((
+          '$prefix/empty',
+          (context) => _InlineNote(
+            icon: _query.isNotEmpty || _quick != null
+                ? Icons.search_off
+                : Icons.inbox_outlined,
+            text: _query.isNotEmpty || _quick != null
+                ? 'No matches'
+                : 'No sessions',
+          ),
+        ));
+      }
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.only(top: 6, bottom: 12),
+      itemCount: rows.length,
+      itemBuilder: (context, index) => KeyedSubtree(
+        key: ValueKey(rows[index].$1),
+        child: rows[index].$2(context),
+      ),
     );
   }
 
@@ -377,12 +447,14 @@ class _SessionListBodyState extends State<SessionListBody> {
     if (pairs.isEmpty) {
       return ListView(children: [_recentEmptyState(context, servers)]);
     }
-    return ListView(
+    return ListView.builder(
       padding: const EdgeInsets.fromLTRB(12, 2, 12, 12),
-      children: [
-        // One flat run, so the position is the index in the whole list.
-        for (final (i, (store, session)) in pairs.indexed)
-          _recentRow(
+      itemCount: pairs.length,
+      itemBuilder: (context, i) {
+        final (store, session) = pairs[i];
+        return KeyedSubtree(
+          key: ValueKey('${store.config.id}/${session.id}'),
+          child: _recentRow(
             context,
             store: store,
             session: session,
@@ -390,7 +462,8 @@ class _SessionListBodyState extends State<SessionListBody> {
             position: _rowPosition(i, pairs.length),
             onTap: () => widget.onSelect(store, session),
           ),
-      ],
+        );
+      },
     );
   }
 
@@ -493,24 +566,10 @@ class _ServerSection extends StatelessWidget {
   /// The active workspace (null = Main): only its projects are listed.
   final String? workspace;
   final bool showHeader;
-  final String? selectedId;
-  final void Function(CommanderStore store, SessionInfo session) onSelect;
-
-  /// The active search query. Empty shows the full grouped list; otherwise each
-  /// group is fuzzy-filtered and emptied groups drop out.
-  final String query;
-
-  /// The active quick filter (or null), applied on top of [query].
-  final _Quick? quick;
-
   const _ServerSection({
     required this.store,
     required this.workspace,
     required this.showHeader,
-    required this.selectedId,
-    required this.onSelect,
-    required this.query,
-    required this.quick,
   });
 
   @override
@@ -556,48 +615,7 @@ class _ServerSection extends StatelessWidget {
         ),
       ];
     }
-    final groups = <ProjectSessions>[];
-    for (final g in store.sessionsByProjectIn(workspace)) {
-      var sessions = matchingSessions(g.sessions, query);
-      if (quick != null) {
-        sessions = [
-          for (final s in sessions)
-            if (_matchesQuick(quick!, store, s)) s,
-        ];
-      }
-      if (sessions.isNotEmpty) {
-        groups.add(ProjectSessions(project: g.project, sessions: sessions));
-      }
-    }
-    final filtering = query.isNotEmpty || quick != null;
-    return [
-      if (store.cascadePaused != null) const CascadeBanner(),
-      if (groups.isEmpty)
-        _InlineNote(
-          icon: filtering ? Icons.search_off : Icons.inbox_outlined,
-          text: filtering ? 'No matches' : 'No sessions',
-        )
-      else
-        for (final group in groups) ...[
-          ChromeEyebrow(
-            '${group.project.name.toUpperCase()} · ${group.sessions.length}',
-          ),
-          // Each project group is its own run, so a row's position is its index
-          // within the group rather than within the whole server section.
-          for (final (i, session) in group.sessions.indexed)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(14, 0, 12, 6),
-              child: _groupedRow(
-                context,
-                store: store,
-                session: session,
-                selected: session.id == selectedId,
-                position: _rowPosition(i, group.sessions.length),
-                onTap: () => onSelect(store, session),
-              ),
-            ),
-        ],
-    ];
+    return const [];
   }
 }
 

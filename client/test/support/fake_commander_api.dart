@@ -66,6 +66,10 @@ class FakeCommanderApi implements CommanderApi {
     skipped: 0,
   );
   List<GithubRepo> githubReposResponse = const [];
+  RepositoryListing repositoriesResponse = const RepositoryListing(
+    host: CodeHost(provider: CodeHostProvider.github, hostname: null),
+    repositories: [],
+  );
 
   /// What `startClone` answers. Defaults to a `Running` job, which is what the
   /// real route always returns (every outcome arrives via `cloneJob`).
@@ -186,6 +190,13 @@ class FakeCommanderApi implements CommanderApi {
   );
 
   /// The default snapshot echoes [listSessionsResponse] so a test that
+  CodeHostStatus codeHostStatusResponse = const CodeHostStatus(
+    provider: CodeHostProvider.github,
+    hostname: null,
+    cliAvailable: true,
+  );
+
+  /// The default workspace snapshot echoes [listSessionsResponse] so a test that
   /// only sets sessions gets a coherent snapshot for free. It synthesizes one
   /// project per distinct session `projectId` (in first-seen order) so grouped
   /// views — which read `sessionsByProject` — have projects to group under, as a
@@ -213,8 +224,9 @@ class FakeCommanderApi implements CommanderApi {
       pendingCommentSessions: const [],
       projectPull: const [],
       operations: const [],
-      server: const ServerStatus(
+      server: ServerStatus(
         ghAvailable: true,
+        codeHost: codeHostStatusResponse,
         tmuxOk: true,
         version: '0.0.0-test',
       ),
@@ -313,6 +325,8 @@ class FakeCommanderApi implements CommanderApi {
   /// [onSnapshot] runs, so a hook can arm the gate for the *next* fetch
   /// without parking its own.
   Completer<void>? snapshotGate;
+  final snapshotGates = <String, Completer<void>>{};
+  final snapshotErrors = <String, Object>{};
 
   /// Called on every [snapshot] — the seam for a test that needs
   /// something to happen *while* a refresh is in flight (e.g. [emitChange],
@@ -323,6 +337,8 @@ class FakeCommanderApi implements CommanderApi {
   Future<SnapshotDto> snapshot({required String handle}) async {
     _record('snapshot', {'handle': handle});
     if (snapshotGate != null) await snapshotGate!.future;
+    await snapshotGates[handle]?.future;
+    if (snapshotErrors[handle] case final error?) throw error;
     onSnapshot?.call();
     if (snapshotError != null) throw snapshotError!;
     return snapshotResponse;
@@ -467,6 +483,16 @@ class FakeCommanderApi implements CommanderApi {
   }) async {
     _record('deleteSession', {'id': id});
     if (deleteSessionError != null) throw deleteSessionError!;
+  }
+
+  @override
+  Future<String?> editSession({
+    required String handle,
+    required String id,
+    required String patchJson,
+  }) async {
+    _record('editSession', {'id': id, 'patchJson': patchJson});
+    return null;
   }
 
   @override
@@ -699,6 +725,37 @@ class FakeCommanderApi implements CommanderApi {
     _record('githubRepos');
     if (githubReposError != null) throw githubReposError!;
     return githubReposResponse;
+  }
+
+  @override
+  Future<RepositoryListing> repositories({required String handle}) async {
+    _record('repositories');
+    if (githubReposError != null) throw githubReposError!;
+    if (repositoriesResponse.repositories.isEmpty &&
+        githubReposResponse.isNotEmpty) {
+      return RepositoryListing(
+        host: const CodeHost(provider: CodeHostProvider.github, hostname: null),
+        repositories: [
+          for (final repo in githubReposResponse)
+            HostedRepository(
+              fullName: repo.fullName,
+              namespace: repo.owner,
+              name: repo.name,
+              description: repo.description,
+              visibility: repo.private
+                  ? RepositoryVisibility.private
+                  : RepositoryVisibility.public,
+              fork: repo.fork,
+              archived: repo.archived,
+              defaultBranch: repo.defaultBranch,
+              cloneUrl: repo.cloneUrl,
+              sshUrl: repo.sshUrl,
+              activityAt: repo.pushedAt,
+            ),
+        ],
+      );
+    }
+    return repositoriesResponse;
   }
 
   @override

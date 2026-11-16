@@ -165,6 +165,16 @@ impl SessionManager {
 
     /// Get diff for a project (uncommitted changes in repo)
     pub async fn get_project_diff(&self, project_id: &ProjectId) -> Result<Arc<DiffInfo>> {
+        self.get_project_diff_part(project_id, false).await
+    }
+    pub async fn get_project_diff_stats(&self, project_id: &ProjectId) -> Result<Arc<DiffInfo>> {
+        self.get_project_diff_part(project_id, true).await
+    }
+    async fn get_project_diff_part(
+        &self,
+        project_id: &ProjectId,
+        stats_only: bool,
+    ) -> Result<Arc<DiffInfo>> {
         let repo_path = {
             let state = self.store.read().await;
             let project = state
@@ -173,8 +183,14 @@ impl SessionManager {
             project.repo_path.clone()
         };
 
-        self.project_diff_cache
-            .get_diff(project_id, &repo_path)
-            .await
+        if stats_only {
+            self.project_diff_cache
+                .get_stats(project_id, &repo_path)
+                .await
+        } else {
+            self.project_diff_cache
+                .get_diff(project_id, &repo_path)
+                .await
+        }
     }
 }

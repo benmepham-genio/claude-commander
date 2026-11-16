@@ -412,6 +412,7 @@ mod tests {
             project_pull: BTreeMap::new(),
             operations: Vec::new(),
             server: ServerStatus {
+                code_host: Default::default(),
                 gh_available: false,
                 tmux_ok: true,
                 version: "0".to_string(),

@@ -534,6 +534,25 @@ async fn main() -> Result<()> {
             }
         }
 
+        Some(Commands::RefreshPr { session }) => {
+            setup_logging(cli.debug, false)?;
+            let service =
+                claude_commander_core::api::CommanderService::for_cli(config, frontend())?;
+            let id = match session {
+                Some(query) => match service.find_session(&query).await? {
+                    Some(info) => Some(info.session_id),
+                    None => {
+                        eprintln!("Session not found: {query}");
+                        eprintln!("Use 'claude-commander list' to see available sessions.");
+                        std::process::exit(1);
+                    }
+                },
+                None => None,
+            };
+            let count = service.refresh_pr_status(id.as_ref()).await?;
+            println!("Refreshed PR/MR metadata for {count} session(s).");
+        }
+
         Some(Commands::Status { session, json }) => {
             setup_logging(cli.debug, false)?;
 

@@ -40,3 +40,6 @@ pub use spec::{RemoteServerSpec, SecretString};
 /// `claude-commander-protocol` (which owns the definition) and, in turn, by
 /// `claude-commander-core::backend`, so all three crates share one type.
 pub use claude_commander_protocol::connection::ConnectionState;
+
+#[cfg(test)]
+mod test_server;

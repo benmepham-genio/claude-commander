@@ -189,6 +189,7 @@ enum TextField<'a> {
 /// only has one while a comment draft is open.
 fn text_field(modal: &mut Modal) -> Option<TextField<'_>> {
     Some(match modal {
+        Modal::EditSession(editor) if editor.focus == 0 => TextField::Line(&mut editor.name),
         Modal::Input { value, .. } => TextField::Line(value),
         Modal::Conversation { input, .. } => TextField::Line(input),
         Modal::PathInput {
@@ -688,6 +689,7 @@ impl App {
                     // positions the diff cursor, depending on which pane it hits.
                     let body = self.ui_state.review_body_rect;
                     let files = self.ui_state.review_file_list_rect;
+                    let file_pane = self.ui_state.review_file_pane_rect;
                     if matches!(self.ui_state.modal, Modal::ReviewDiff(_)) {
                         let (col, row) = (mouse.column, mouse.row);
                         // A footer button replays the key it labels through the
@@ -706,16 +708,15 @@ impl App {
                         }
                         let mut selected_file = false;
                         if let Modal::ReviewDiff(state) = &mut self.ui_state.modal {
-                            let in_files = files.is_some_and(|r| {
-                                col >= r.x
-                                    && col < r.x + r.width
-                                    && row >= r.y
-                                    && row < r.y + r.height
-                            });
-                            if let Some(rect) = files.filter(|_| in_files) {
+                            if let Some(rect) = files.filter(|r| r.contains((col, row).into())) {
                                 self.ui_state.review_last_click = None;
                                 state.click_file_list_at(col, row, rect);
                                 selected_file = true;
+                            } else if file_pane.is_some_and(|r| r.contains((col, row).into())) {
+                                // The pane's heading bar: focus the list, select
+                                // nothing.
+                                self.ui_state.review_last_click = None;
+                                state.focus_file_list();
                             } else if let Some(rect) = body {
                                 // A double-click on the same body row selects that
                                 // line and opens its comment box (like right-click);
@@ -853,6 +854,13 @@ impl App {
             return;
         }
 
+        if matches!(
+            self.ui_state.modal,
+            Modal::EditSession(_) | Modal::EditSessionRestart(_)
+        ) {
+            self.handle_edit_session_key(key);
+            return;
+        }
         match &mut self.ui_state.modal {
             Modal::Input { .. } => {
                 // All in-modal routing (focus, dropdown expand/collapse, filter
@@ -991,6 +999,7 @@ impl App {
                 _ => {}
             },
 
+            Modal::EditSession(_) | Modal::EditSessionRestart(_) => {}
             Modal::Loading { .. } => {
                 // Non-interactive — swallow all keys while loading
             }
@@ -1053,13 +1062,13 @@ impl App {
                 // Ctrl-R re-lists the repo picker. It has to be a *modified* key:
                 // the picker is fuzzy-filterable, so a plain `r` is query text
                 // (see the branch above) and could never mean "refresh".
-                if *mode == PaletteMode::GithubRepoPicker
+                if *mode == PaletteMode::RepositoryPicker
                     && key.code == KeyCode::Char('r')
                     && key
                         .modifiers
                         .contains(crossterm::event::KeyModifiers::CONTROL)
                 {
-                    self.refetch_github_repos();
+                    self.refetch_repositories();
                     return;
                 }
 
@@ -1455,7 +1464,7 @@ impl App {
                 // The workspace pickers use it the same way, as a new name.
                 matches!(
                     mode,
-                    PaletteMode::GithubRepoPicker
+                    PaletteMode::RepositoryPicker
                         | PaletteMode::WorkspacePicker
                         | PaletteMode::MoveProjectPicker { .. }
                 )
@@ -1515,7 +1524,7 @@ impl App {
                     on_confirm: ConfirmAction::RemoveRemoteServer { name },
                 };
             }
-            Some(QuickSwitchItem::GithubRepo {
+            Some(QuickSwitchItem::HostedRepository {
                 full_name,
                 dir_name,
                 ..
@@ -1523,8 +1532,18 @@ impl App {
                 let backend = self.ui_state.repo_picker.backend;
                 self.open_clone_dest_prompt(
                     backend,
-                    claude_commander_protocol::github::CloneSource::Github {
-                        full_name: full_name.clone(),
+                    match self.ui_state.repo_picker.host.provider {
+                        claude_commander_protocol::hosting::CodeHostProvider::Github => {
+                            claude_commander_protocol::hosting::CloneSource::Github {
+                                full_name: full_name.clone(),
+                            }
+                        }
+                        claude_commander_protocol::hosting::CodeHostProvider::Gitlab => {
+                            claude_commander_protocol::hosting::CloneSource::Gitlab {
+                                full_name: full_name.clone(),
+                                hostname: self.ui_state.repo_picker.host.hostname.clone(),
+                            }
+                        }
                     },
                     &full_name,
                     &dir_name,
@@ -1546,7 +1565,15 @@ impl App {
                     .unwrap_or_else(|| "this session".to_string());
                 self.ui_state.modal = Modal::Confirm {
                     title: "Set Session Base".to_string(),
-                    message: super::actions::set_session_base_confirm_message(&title, &base_branch),
+                    message: super::actions::set_session_base_confirm_message(
+                        self.view_for(self.backend_of_session(session_id))
+                            .snapshot
+                            .server
+                            .effective_code_host()
+                            .provider,
+                        &title,
+                        &base_branch,
+                    ),
                     on_confirm: ConfirmAction::SetSessionBase { session_id, target },
                 };
             }
@@ -1580,7 +1607,7 @@ impl App {
             // typed text is a clone URL (validated in `open_clone_url_prompt`,
             // which leaves the picker open and says why if it's refused).
             None => match (mode, unmatched) {
-                (PaletteMode::GithubRepoPicker, Some(typed)) => {
+                (PaletteMode::RepositoryPicker, Some(typed)) => {
                     self.open_clone_url_prompt(&typed);
                 }
                 // A name no workspace matches: create it, then act on it.
@@ -1661,15 +1688,13 @@ impl App {
             .await;
     }
 
-    /// Whether a review-view wheel event landed over the file-list pane (so it
-    /// should scroll the file list rather than the diff body).
+    /// Whether a review-view wheel event landed over the file-list pane,
+    /// heading bar included (so it should scroll the file list rather than the
+    /// diff body).
     fn review_wheel_over_file_list(&self, mouse: &crossterm::event::MouseEvent) -> bool {
-        self.ui_state.review_file_list_rect.is_some_and(|r| {
-            mouse.column >= r.x
-                && mouse.column < r.x + r.width
-                && mouse.row >= r.y
-                && mouse.row < r.y + r.height
-        })
+        self.ui_state
+            .review_file_pane_rect
+            .is_some_and(|r| r.contains((mouse.column, mouse.row).into()))
     }
 
     /// Mouse wheel while a (non-review) modal is open. List modals move the
@@ -1804,6 +1829,7 @@ impl App {
             UserCommand::DeleteMergedPrSessions => {
                 self.handle_delete_merged_pr_sessions().await;
             }
+            UserCommand::EditSession => self.handle_edit_session(),
             UserCommand::RenameSession => {
                 self.handle_rename_session().await;
             }

@@ -10,7 +10,7 @@
 //! Here the call is user-initiated and its whole output is the screen: a picker
 //! that silently shows zero repos when `gh` is missing or unauthenticated is
 //! indistinguishable from a user with no repos. So failures propagate, with
-//! "gh is not installed" carved out as its own [`GitError::GhUnavailable`]
+//! "gh is not installed" carved out as its own [`GitError::CodeHostCliUnavailable`]
 //! because it is the one case the user can act on directly.
 //!
 //! **The run is bounded, and the bound kills the process group.** `--paginate`
@@ -21,13 +21,14 @@
 //! press of the picker's retry button stacked another live `gh` on the server.
 //! The budget is [`Config::repo_list_timeout_secs`](crate::config::Config), the
 //! mechanism is [`crate::git::bounded`], and a timeout is its own
-//! [`GitError::RepoListTimedOut`] rather than a `GhUnavailable` — telling a user
+//! [`GitError::RepoListTimedOut`] rather than CLI unavailability — telling a user
 //! to install a `gh` they already have is worse than saying nothing.
 
 use crate::git::gh_command;
 use std::time::Duration;
 
 use claude_commander_protocol::github::GithubRepo;
+use claude_commander_protocol::hosting::CodeHostProvider;
 use tokio::process::Command;
 use tracing::debug;
 
@@ -60,7 +61,7 @@ const REPOS_ENDPOINT: &str = "/user/repos\
 
 /// List every GitHub repo the authenticated user can clone, within `timeout`.
 ///
-/// Returns [`GitError::GhUnavailable`] when `gh` is missing,
+/// Returns [`GitError::CodeHostCliUnavailable`] when `gh` is missing,
 /// [`GitError::RepoListTimedOut`] when the listing overran `timeout` (and was
 /// killed, along with anything it spawned); any other failure (not
 /// authenticated, network, rate limit) surfaces as
@@ -77,7 +78,10 @@ const REPOS_ENDPOINT: &str = "/user/repos\
 /// for direct callers and costs one `gh --version` per picker open.
 pub async fn list_repos(timeout: Duration) -> Result<Vec<GithubRepo>> {
     if !is_gh_available().await {
-        return Err(GitError::GhUnavailable.into());
+        return Err(GitError::CodeHostCliUnavailable {
+            provider: CodeHostProvider::Github,
+        }
+        .into());
     }
     repos_from(gh_api_command(), timeout).await
 }
@@ -101,7 +105,9 @@ async fn repos_from(cmd: Command, timeout: Duration) -> Result<Vec<GithubRepo>> 
             // gh passed `--version` moments ago, so a spawn failure here means
             // it vanished or became unexecutable mid-flight — still "no gh".
             debug!("gh api spawn failed: {e}");
-            GitError::GhUnavailable
+            GitError::CodeHostCliUnavailable {
+                provider: CodeHostProvider::Github,
+            }
         })?;
 
     let Bounded::Finished {
@@ -114,6 +120,7 @@ async fn repos_from(cmd: Command, timeout: Duration) -> Result<Vec<GithubRepo>> 
         // it just had more to fetch than the budget allowed. See
         // `GitError::RepoListTimedOut`.
         return Err(GitError::RepoListTimedOut {
+            provider: CodeHostProvider::Github,
             secs: timeout.as_secs(),
         }
         .into());
@@ -240,7 +247,10 @@ mod tests {
         .await
         .unwrap_err();
         assert!(
-            !matches!(err, crate::error::Error::Git(GitError::GhUnavailable)),
+            !matches!(
+                err,
+                crate::error::Error::Git(GitError::CodeHostCliUnavailable { .. })
+            ),
             "a timeout must not masquerade as GhUnavailable"
         );
         assert!(err.to_string().contains("timed out"), "{err}");
@@ -316,6 +326,12 @@ mod tests {
 
     #[test]
     fn gh_unavailable_error_displays() {
-        assert!(!GitError::GhUnavailable.to_string().is_empty());
+        assert!(
+            !GitError::CodeHostCliUnavailable {
+                provider: CodeHostProvider::Github
+            }
+            .to_string()
+            .is_empty()
+        );
     }
 }

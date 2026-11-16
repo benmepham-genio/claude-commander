@@ -509,6 +509,7 @@ fn test_info_view_session_with_pr() {
                 pr_number: Some(42),
                 pr_url: Some("https://github.com/org/repo/pull/42".into()),
                 pr_merged: false,
+                review_label: "PR",
                 enriched_pr: Some(&pr),
                 ai_summary: Some(&AiSummary::Ready {
                     text: "Adds OAuth2 authentication.".into(),
@@ -569,6 +570,7 @@ fn test_info_view_long_text_wraps() {
                 pr_number: Some(99),
                 pr_url: Some("https://github.com/org/repo/pull/99".into()),
                 pr_merged: false,
+                review_label: "PR",
                 enriched_pr: Some(&pr),
                 ai_summary: Some(&AiSummary::Ready {
                     text: "This summary is intentionally long to verify that the info pane correctly wraps text at the pane boundary instead of clipping it.".into(),
@@ -609,6 +611,7 @@ fn test_info_view_summary_placeholder() {
                 pr_number: None,
                 pr_url: None,
                 pr_merged: false,
+                review_label: "PR",
                 enriched_pr: None,
                 ai_summary: None,
                 summary_key_hint: Some("g".into()),
@@ -1228,6 +1231,7 @@ fn test_preview_to_info_view_switch_no_clear() {
                 pr_number: None,
                 pr_url: None,
                 pr_merged: false,
+                review_label: "PR",
                 enriched_pr: None,
                 ai_summary: None,
                 summary_key_hint: Some("g".into()),

@@ -7,10 +7,9 @@ import '../state/commander_store.dart';
 import '../theme/tokens.dart';
 import '../util/error_text.dart';
 
-/// How often a running clone job is polled. Flat, with no backoff: a job is
-/// already bounded server-side by `clone_timeout_secs`, so there is no runaway
-/// to protect against, and a clone the user is watching should feel live.
-const _pollInterval = Duration(seconds: 1);
+/// Reconciliation timeout while watching a clone. Server change notifications
+/// wake the wait early; this deadline also supports servers without the feed.
+const _changeWaitFallback = Duration(seconds: 1);
 
 /// Prefix characters a client-derived directory name may contain. Deliberately
 /// narrower than the server's `check_dir_name` (which only bars `/`, `\`, `.`,
@@ -22,17 +21,18 @@ const _pollInterval = Duration(seconds: 1);
 /// prefill and the user types one.
 final _safeDirName = RegExp(r'^[A-Za-z0-9._][A-Za-z0-9._-]*$');
 
-/// Picks a GitHub repo (or takes a clone URL) and clones it into the server's
+/// Picks a repository from the server's selected code host (or takes a clone URL)
+/// and clones it into the server's
 /// projects directory, registering the result as a project.
 ///
-/// The repo list is the *server's* — `gh` runs where the checkout lands — so this
-/// works from a phone with no `gh` and no GitHub credentials. Everything the page
+/// The repo list is the *server's* — `gh` or `glab` runs where the checkout lands — so this
+/// works from a phone with no hosting CLI or credentials. Everything the page
 /// does with that list is local: the search field filters an already-fetched
 /// list rather than issuing a request per keystroke, and pull-to-refresh (or the
 /// retry button on the error banner) is the only refetch.
 ///
 /// **The "Clone from URL" field is pinned above the list and never waits on it.**
-/// Listing shells out to `gh api --paginate`, which on a large account can take
+/// Listing shells out to the selected provider CLI, which on a large account can take
 /// longer than the client's request ceiling; the URL path involves no `gh` at
 /// all, so a failed or slow listing must not take it down with it.
 ///
@@ -80,7 +80,8 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
   final _url = TextEditingController();
   final _search = TextEditingController();
 
-  List<GithubRepo>? _repos;
+  CodeHost? _host;
+  List<HostedRepository>? _repos;
   Object? _reposError;
   bool _loadingRepos = false;
 
@@ -118,6 +119,15 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
 
   CommanderStore get _store => widget.store;
 
+  CodeHost get _effectiveHost =>
+      _host ??
+      CodeHost(
+        provider:
+            _store.snapshot?.server.codeHost.provider ??
+            CodeHostProvider.github,
+        hostname: _store.snapshot?.server.codeHost.hostname,
+      );
+
   bool get _busy => _flowActive;
 
   @override
@@ -151,13 +161,15 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
       _reposError = null;
     });
     try {
-      final repos = await _store.githubRepos();
+      final listing = await _store.repositories();
+      final repos = listing.repositories;
       final slugs = <String, String?>{};
       for (final repo in repos) {
         slugs[repo.fullName] = await _store.canonicalRepoSlug(repo.cloneUrl);
       }
       if (!mounted) return;
       setState(() {
+        _host = listing.host;
         _repos = repos;
         _repoSlugs = slugs;
         _reposError = null;
@@ -199,7 +211,7 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
   }
 
   /// Whether this row is already registered as a project.
-  bool _isAdded(GithubRepo repo) {
+  bool _isAdded(HostedRepository repo) {
     final slug = _repoSlugs[repo.fullName];
     // A null slug means "no GitHub identity", not "an identity that happens to
     // be unknown". It can never match anything, including another null.
@@ -208,8 +220,8 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
   }
 
   /// The rows matching the search box, filtered locally over the fetched list.
-  List<GithubRepo> get _filtered {
-    final repos = _repos ?? const <GithubRepo>[];
+  List<HostedRepository> get _filtered {
+    final repos = _repos ?? const <HostedRepository>[];
     final query = _search.text.trim().toLowerCase();
     if (query.isEmpty) return repos;
     return [
@@ -223,20 +235,32 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
   /// [repos] grouped under their owner. Insertion order is preserved on both
   /// levels, so owners appear in the order the server listed their repos
   /// (`sort=pushed`) and the account being worked in stays near the top.
-  List<(String, List<GithubRepo>)> _grouped(List<GithubRepo> repos) {
-    final groups = <String, List<GithubRepo>>{};
+  List<(String, List<HostedRepository>)> _grouped(
+    List<HostedRepository> repos,
+  ) {
+    final groups = <String, List<HostedRepository>>{};
     for (final repo in repos) {
-      groups.putIfAbsent(repo.owner, () => []).add(repo);
+      groups.putIfAbsent(repo.namespace, () => []).add(repo);
     }
     return [for (final e in groups.entries) (e.key, e.value)];
   }
 
   // --- clone flow ---------------------------------------------------------
 
-  Future<void> _cloneRepo(GithubRepo repo) => _cloneFlow(
-    CloneSourceDto(kind: CloneSourceKind.github, value: repo.fullName),
-    repo.name,
-  );
+  Future<void> _cloneRepo(HostedRepository repo) {
+    final host = _effectiveHost;
+    final kind = host.provider == CodeHostProvider.gitlab
+        ? CloneSourceKind.gitlab
+        : CloneSourceKind.github;
+    return _cloneFlow(
+      CloneSourceDto(
+        kind: kind,
+        value: repo.fullName,
+        hostname: kind == CloneSourceKind.gitlab ? host.hostname : null,
+      ),
+      repo.name,
+    );
+  }
 
   Future<void> _cloneUrl() async {
     // Checked before the field is cleared, so a submit that is going to be
@@ -256,7 +280,7 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
               : segment)
         : '';
     await _cloneFlow(
-      CloneSourceDto(kind: CloneSourceKind.url, value: url),
+      CloneSourceDto(kind: CloneSourceKind.url, value: url, hostname: null),
       derived,
     );
   }
@@ -321,7 +345,7 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
       while (true) {
         switch (current.status.kind) {
           case CloneStatusKind.running:
-            await Future<void>.delayed(_pollInterval);
+            await _store.waitForChange(_changeWaitFallback);
             if (!mounted) return _Attempt.done;
             final CloneJobDto? polled;
             try {
@@ -407,7 +431,6 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
     if (register != true) return _Attempt.rename;
     try {
       await _store.ensureProject(dest, workspace: widget.workspace);
-      await _store.refresh();
       if (!mounted) return _Attempt.done;
       Navigator.of(context).pop(true);
     } catch (e) {
@@ -456,9 +479,11 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
                   controller: _url,
                   enabled: !_busy,
                   style: t.meta(size: 13, color: t.text),
-                  decoration: const InputDecoration(
+                  decoration: InputDecoration(
                     labelText: 'Clone from URL',
-                    hintText: 'https://github.com/owner/repo.git',
+                    hintText: _effectiveHost.provider == CodeHostProvider.gitlab
+                        ? 'https://${_effectiveHost.hostname ?? 'gitlab.com'}/group/project.git'
+                        : 'https://github.com/owner/repo.git',
                     isDense: true,
                   ),
                   onSubmitted: (_) => _busy ? null : _cloneUrl(),
@@ -543,7 +568,9 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
                 Center(
                   child: Text(
                     _search.text.trim().isEmpty
-                        ? 'No repositories'
+                        ? (_effectiveHost.provider == CodeHostProvider.gitlab
+                              ? 'No GitLab projects'
+                              : 'No repositories')
                         : 'No repositories match "${_search.text.trim()}"',
                   ),
                 ),
@@ -582,10 +609,10 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
     final t = CommanderTokens.of(context);
     final message = errorText(error);
     // A timeout on this route is nearly always the *listing* overrunning, not a
-    // dead server, so word it that way. The server bounds its `gh api --paginate`
+    // dead server, so word it that way. The server bounds provider pagination
     // (`repo_list_timeout_secs`, 90s by default —
     // `crates/claude-commander-core/src/git/bounded.rs`) and answers with
-    // "listing GitHub repos timed out after 90s"
+    // with a provider-aware timeout error
     // (`GitError::RepoListTimedOut`), while the client deliberately gives this
     // one route a longer budget than the server's so the server wins the race
     // and its real reason arrives instead of a transport timeout
@@ -630,7 +657,7 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
                     ? 'Listing a large account can take longer than the '
                           'request limit. The clone-from-URL field above still '
                           'works.'
-                    : 'The picker needs `gh` installed and authenticated on '
+                    : 'The picker needs `${_effectiveHost.provider == CodeHostProvider.gitlab ? 'glab' : 'gh'}` installed and authenticated on '
                           'the server. The clone-from-URL field above still '
                           'works without it.',
                 style: t.meta(size: 11, color: t.textFaint),
@@ -657,7 +684,7 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
 /// already exists, so cloning it again would only fail on an occupied
 /// destination.
 class _RepoRow extends StatelessWidget {
-  final GithubRepo repo;
+  final HostedRepository repo;
   final bool added;
   final VoidCallback? onTap;
 
@@ -677,9 +704,15 @@ class _RepoRow extends StatelessWidget {
       enabled: !added,
       onTap: added ? null : onTap,
       leading: Icon(
-        repo.private ? Icons.lock_outline : Icons.folder_outlined,
+        repo.visibility == RepositoryVisibility.private
+            ? Icons.lock_outline
+            : Icons.folder_outlined,
         size: 18,
-        color: muted ?? (repo.private ? t.attention : t.textMuted),
+        color:
+            muted ??
+            (repo.visibility == RepositoryVisibility.private
+                ? t.attention
+                : t.textMuted),
       ),
       title: Text(
         repo.fullName,
@@ -705,9 +738,10 @@ class _RepoRow extends StatelessWidget {
               ),
               child: Text('Added', style: t.meta(size: 10, color: t.textMuted)),
             )
-          : (repo.archived
-                ? Text('archived', style: t.meta(size: 10, color: t.textFaint))
-                : null),
+          : Text(
+              '${repo.visibility.name}${repo.archived ? ' · archived' : ''}',
+              style: t.meta(size: 10, color: t.textFaint),
+            ),
     );
   }
 }

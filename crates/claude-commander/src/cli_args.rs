@@ -70,6 +70,12 @@ pub enum Commands {
         workspace: Option<String>,
     },
 
+    /// Refresh and save PR/MR metadata now (all sessions if SESSION is omitted)
+    #[command(visible_alias = "refresh-pr-status")]
+    RefreshPr {
+        /// Session name or ID prefix; omit to refresh all sessions
+        session: Option<String>,
+    },
     /// Show detailed status of a session
     Status {
         /// Session name or ID prefix
@@ -324,6 +330,23 @@ fn generate_cli_reference(cmd: &clap::Command) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refresh_pr_accepts_all_or_one_session() {
+        for args in [
+            vec!["claude-commander", "refresh-pr"],
+            vec!["claude-commander", "refresh-pr-status"],
+        ] {
+            assert!(matches!(
+                Cli::try_parse_from(args).unwrap().command,
+                Some(Commands::RefreshPr { session: None })
+            ));
+        }
+        assert!(
+            matches!(Cli::try_parse_from(["claude-commander", "refresh-pr", "fix-auth"]).unwrap().command,
+            Some(Commands::RefreshPr { session: Some(s) }) if s == "fix-auth")
+        );
+    }
 
     #[test]
     fn version_flag_reports_this_packages_name_and_version() {

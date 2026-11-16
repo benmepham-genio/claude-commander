@@ -343,39 +343,8 @@ async fn delete_session_mutates_state_once_removal_first() {
     // generation counter: the fix mutates state exactly once (the removal),
     // whereas the old kill-first path mutated twice (a `Stopped` transition
     // inside `kill_session`, then the removal).
-    let mut config = Config::default();
-    config.telemetry.enabled = false;
-    // Isolate tmux onto a throwaway socket dir so the teardown never touches the
-    // developer's real tmux server (see the test-isolation rules in CLAUDE.md).
-    let tmux_tmpdir = TempDir::new().unwrap();
-    config.tmux_tmpdir = Some(tmux_tmpdir.path().to_path_buf());
-    let (_cdir, config_store) = test_config_store(config);
-    let (_dir, store) = test_store();
-    let manager = SessionManager::new(config_store, store.clone(), "");
-
-    // Seed a project + session with bogus repo/worktree paths so worktree
-    // removal is a no-op (`GitBackend::open` fails on a non-repo path).
-    let project = Project::new(
-        "repo",
-        std::path::PathBuf::from("/nonexistent/repo"),
-        "main",
-    );
-    let pid = project.id;
-    let session = WorktreeSession::new(
-        pid,
-        "task",
-        "task",
-        std::path::PathBuf::from("/nonexistent/wt"),
-        "claude",
-    );
-    let sid = session.id;
-    store
-        .mutate(move |state| {
-            state.add_project(project);
-            state.add_session(session);
-        })
-        .await
-        .unwrap();
+    let (_dirs, manager, _pid, sid) = manager_with_watched_session().await;
+    let store = manager.store.clone();
 
     let gen_before = *store.subscribe().borrow();
     manager.delete_session(&sid).await.unwrap();
@@ -387,6 +356,71 @@ async fn delete_session_mutates_state_once_removal_first() {
         "delete must mutate state once (removal), not transition through Stopped first"
     );
     assert!(store.read().await.get_session(&sid).is_none());
+}
+
+/// A manager whose tmux teardown is isolated, plus a seeded project and
+/// session whose worktree and repo paths exist (so a diff watch can be held)
+/// but are not repositories (so worktree removal is a no-op).
+async fn manager_with_watched_session() -> (Vec<TempDir>, SessionManager, ProjectId, SessionId) {
+    let mut config = Config::default();
+    config.telemetry.enabled = false;
+    let tmux_tmpdir = TempDir::new().unwrap();
+    config.tmux_tmpdir = Some(tmux_tmpdir.path().to_path_buf());
+    let (cdir, config_store) = test_config_store(config);
+    let (dir, store) = test_store();
+    let manager = SessionManager::new(config_store, store.clone(), "");
+    let repo = TempDir::new().unwrap();
+    let worktree = TempDir::new().unwrap();
+    let project = Project::new("repo", repo.path().to_path_buf(), "main");
+    let pid = project.id;
+    let session =
+        WorktreeSession::new(pid, "task", "task", worktree.path().to_path_buf(), "claude");
+    let sid = session.id;
+    store
+        .mutate(move |state| {
+            state.add_project(project);
+            state.add_session(session);
+        })
+        .await
+        .unwrap();
+    manager
+        .diff_cache
+        .watch_for_test(sid, worktree.path())
+        .await;
+    manager
+        .project_diff_cache
+        .watch_for_test(pid, repo.path())
+        .await;
+    assert!(manager.diff_cache.is_watching(&sid));
+    assert!(manager.project_diff_cache.is_watching(&pid));
+    (
+        vec![tmux_tmpdir, cdir, dir, repo, worktree],
+        manager,
+        pid,
+        sid,
+    )
+}
+
+#[tokio::test]
+async fn delete_session_releases_its_diff_watcher() {
+    let (_dirs, manager, _pid, sid) = manager_with_watched_session().await;
+    manager.delete_session(&sid).await.unwrap();
+    assert!(!manager.diff_cache.is_watching(&sid));
+}
+
+#[tokio::test]
+async fn remove_creating_session_releases_its_diff_watcher() {
+    let (_dirs, manager, _pid, sid) = manager_with_watched_session().await;
+    manager.remove_creating_session(&sid).await.unwrap();
+    assert!(!manager.diff_cache.is_watching(&sid));
+}
+
+#[tokio::test]
+async fn remove_project_releases_project_and_session_diff_watchers() {
+    let (_dirs, manager, pid, sid) = manager_with_watched_session().await;
+    manager.remove_project(&pid).await.unwrap();
+    assert!(!manager.project_diff_cache.is_watching(&pid));
+    assert!(!manager.diff_cache.is_watching(&sid));
 }
 
 // -- `Project.origin_url` capture and backfill --

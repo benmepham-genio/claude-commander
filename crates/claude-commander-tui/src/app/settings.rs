@@ -133,6 +133,18 @@ impl App {
                     ),
                     SettingsRow::header("Pull Requests & Sync"),
                     SettingsRow::text(
+                        "Code Host",
+                        c.code_host_provider.display_name(),
+                        "code_host_provider",
+                    ),
+                    SettingsRow::text(
+                        "GitLab Hostname",
+                        c.gitlab_hostname
+                            .clone()
+                            .unwrap_or_else(|| "(default)".into()),
+                        "gitlab_hostname",
+                    ),
+                    SettingsRow::text(
                         "PR Check Interval (s)",
                         c.pr_check_interval_secs.to_string(),
                         "pr_check_interval_secs",
@@ -1738,6 +1750,72 @@ impl App {
         self.persist_config();
     }
 
+    /// Parse the GitLab hostname editor's value (`None` inside = the default
+    /// host). An invalid hostname opens an error dialog and returns `None`.
+    pub(super) fn parse_gitlab_hostname_setting(&mut self, value: &str) -> Option<Option<String>> {
+        let hostname = (!value.is_empty() && value != "(default)").then(|| value.to_string());
+        if let Some(hostname) = hostname.as_deref()
+            && let Err(reason) =
+                claude_commander_protocol::hosting::validate_gitlab_hostname(hostname)
+        {
+            self.ui_state.modal = Modal::Error {
+                message: format!("Invalid GitLab hostname: {reason}"),
+            };
+            return None;
+        }
+        Some(hostname)
+    }
+
+    /// Apply an edit and finish code-host changes (provider and GitLab
+    /// hostname) through the service's serialized cache-invalidation path,
+    /// which also resets the glab probe and refetches PRs.
+    async fn apply_settings_edit_live(&mut self, tab: SettingsTab, field_key: &str, value: &str) {
+        match (tab, field_key) {
+            (SettingsTab::General, "code_host_provider") => {
+                use claude_commander_protocol::hosting::CodeHostProvider;
+                let provider = match value {
+                    "GitHub" | "github" => CodeHostProvider::Github,
+                    "GitLab" | "gitlab" => CodeHostProvider::Gitlab,
+                    _ => return,
+                };
+                self.spawn_code_host_edit(move |config| config.code_host_provider = provider);
+            }
+            (SettingsTab::General, "gitlab_hostname") => {
+                let Some(hostname) = self.parse_gitlab_hostname_setting(value) else {
+                    return;
+                };
+                self.spawn_code_host_edit(move |config| {
+                    config.gitlab_hostname = hostname.clone();
+                });
+            }
+            _ => self.apply_settings_edit(tab, field_key, value),
+        }
+    }
+
+    /// Run a code-host config edit through the service's serialized path in
+    /// the background, reporting the outcome as `CodeHostConfigUpdated`.
+    fn spawn_code_host_edit(
+        &self,
+        edit: impl Fn(&mut claude_commander_core::config::Config) + Send + 'static,
+    ) {
+        let service = self.service.clone();
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let result = service
+                .edit_code_host_config(move |config| {
+                    edit(config);
+                    Ok(())
+                })
+                .await
+                .map_err(|error| error.to_string());
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::CodeHostConfigUpdated {
+                    result,
+                }))
+                .await;
+        });
+    }
+
     /// Set a boolean General-tab setting to a typed value and persist.
     ///
     /// Booleans are stored as real `bool`s on [`Config`]; this avoids the
@@ -1772,13 +1850,46 @@ impl App {
         self.persist_config();
     }
 
-    /// Persist the current config via the store (updates mtime so hot-reload
-    /// won't re-read our own write).
-    pub(super) fn persist_config(&mut self) {
-        let updated = self.config.clone();
-        if let Err(e) = self.service.update_config(updated) {
-            warn!("Failed to save config: {}", e);
+    /// Re-read the cached config from the service before applying a settings
+    /// edit, so the edit lands on the latest values rather than on a cache
+    /// another writer has since moved past: under `--serve` a web/Flutter
+    /// `PATCH /config` (or `PUT /config/programs`) changes the shared service
+    /// without the hot-reload noticing, and [`persist_config`](Self::persist_config)
+    /// writes the whole cached config — so a stale cache would revert those
+    /// fields (and a stale provider would be rejected outright).
+    ///
+    /// The cached `remote_servers` is also the list the live backends were
+    /// last reconciled against, which [`apply_config_reload`](Self::apply_config_reload)
+    /// diffs to connect or drop servers. The hot-reload loads the service in a
+    /// spawned task before `ConfigReloaded` reaches the TUI, so a sync in that
+    /// gap would hide the change from the diff; reconcile it here instead.
+    pub(super) fn sync_config_from_service(&mut self) {
+        let old = std::mem::replace(&mut self.config, self.service.read_config()).remote_servers;
+        if old != self.config.remote_servers {
+            let new = self.config.remote_servers.clone();
+            self.apply_remote_servers_reload(&old, &new);
         }
+    }
+
+    /// Persist the current config via the store (updates mtime so hot-reload
+    /// won't re-read our own write). Callers apply their edit on a cache
+    /// freshly [synced](Self::sync_config_from_service) from the service.
+    ///
+    /// A rejected or unsaved write leaves the service's config untouched, so
+    /// on failure the cache is reset to it — discarding the edit — and the
+    /// user told, never only a log line.
+    pub(super) fn persist_config(&mut self) {
+        let Err(e) = self.service.update_config(self.config.clone()) else {
+            return;
+        };
+        warn!("Failed to save config: {}", e);
+        self.sync_config_from_service();
+        // A theme edit has already been applied to the screen.
+        self.reload_theme();
+        self.ui_state.status_message = Some((
+            format!("Failed to save settings: {e} (change not applied)"),
+            Instant::now() + Duration::from_secs(10),
+        ));
     }
 
     /// Switch the settings modal to the next (`forward`) or previous tab,
@@ -1803,9 +1914,25 @@ impl App {
     pub(super) async fn handle_settings_key(
         &mut self,
         key: crossterm::event::KeyEvent,
+        state: SettingsState,
+    ) {
+        self.dispatch_settings_key(key, state).await;
+        // Several settings shape the session list (hide empty sections, the
+        // recent-sessions limit, the section set) and nothing else rebuilds it
+        // after the modal's own edits: the tick only does so when config.toml
+        // changed behind our back.
+        self.refresh_list_items().await;
+    }
+
+    async fn dispatch_settings_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
         mut state: SettingsState,
     ) {
         use crossterm::event::KeyCode;
+
+        // Every tab's edits mutate the cached config and persist all of it.
+        self.sync_config_from_service();
 
         if state.tab == SettingsTab::Sections {
             self.handle_sections_key(key, state).await;
@@ -1820,6 +1947,22 @@ impl App {
         if state.tab == SettingsTab::Programs {
             self.handle_programs_key(key, state);
             return;
+        }
+
+        // Rebuild the rows from the synced config so a toggle flips, and an
+        // editor prefills, the current value rather than the one rendered
+        // before another writer changed it. A Keybindings list may hold a
+        // search-filtered view (kept after `Enter`), and none of its edits
+        // read the rendered value, so it is left as is.
+        if state.tab != SettingsTab::Keybindings {
+            let selected = state
+                .rows
+                .get(state.selected_row)
+                .map(|r| r.field_key.clone());
+            state.rows = self.settings_rows(&state);
+            state.selected_row = selected
+                .and_then(|k| state.rows.iter().position(|r| r.field_key == k))
+                .unwrap_or_else(|| first_selectable_from(&state.rows, 0));
         }
 
         // Keybindings-tab search: while the filter box is focused, typing
@@ -1848,7 +1991,8 @@ impl App {
                         let val = value.value().to_string();
                         let field_key = state.rows[state.selected_row].field_key.clone();
                         state.editing = None;
-                        self.apply_settings_edit(state.tab, &field_key, &val);
+                        self.apply_settings_edit_live(state.tab, &field_key, &val)
+                            .await;
                         // Refresh rows after applying
                         state.rows = self.settings_rows(&state);
                         self.ui_state.modal = Modal::Settings(state);
@@ -1920,7 +2064,8 @@ impl App {
                             return;
                         }
                         let prev_input_device = self.config.stt.input_device.clone();
-                        self.apply_settings_edit(state.tab, &field_key, &val);
+                        self.apply_settings_edit_live(state.tab, &field_key, &val)
+                            .await;
                         // Selecting a *different* microphone rebuilds the running
                         // listener so the new device is used on the next recording,
                         // live. Skip the respawn when the id is unchanged (e.g.
@@ -2012,7 +2157,15 @@ impl App {
                     KeyCode::Enter => {
                         if !state.rows.is_empty() {
                             let field_key = &state.rows[state.selected_row].field_key;
-                            if field_key == "conversation_speak_scope" {
+                            if field_key == "code_host_provider" {
+                                let options = code_host_options();
+                                let selected = usize::from(
+                                    self.config.code_host_provider
+                                        == claude_commander_protocol::hosting::CodeHostProvider::Gitlab,
+                                );
+                                state.editing =
+                                    Some(SettingsEditing::OptionPicker { options, selected });
+                            } else if field_key == "conversation_speak_scope" {
                                 // Inline option picker for the speak-scope enum.
                                 use claude_commander_core::conversation::SpeakScope;
                                 let options: Vec<PickerOption> = SpeakScope::ALL
@@ -2436,10 +2589,7 @@ impl App {
 
     /// Persist the current sections config to disk and reconcile session assignments.
     async fn save_sections_config(&mut self) {
-        let updated = self.config.clone();
-        if let Err(e) = self.service.update_config(updated) {
-            warn!("Failed to save sections config: {}", e);
-        }
+        self.persist_config();
         self.reconcile_section_assignments().await;
     }
 
@@ -3712,6 +3862,19 @@ fn format_color(color: ratatui::style::Color) -> String {
     }
 }
 
+fn code_host_options() -> Vec<PickerOption> {
+    vec![
+        PickerOption {
+            label: "GitHub".into(),
+            value: "github".into(),
+        },
+        PickerOption {
+            label: "GitLab".into(),
+            value: "gitlab".into(),
+        },
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3733,6 +3896,16 @@ mod tests {
             w, 33,
             "label column should fit the longest label plus a space"
         );
+    }
+
+    #[test]
+    fn code_host_is_an_exact_two_value_option_picker() {
+        let options = code_host_options();
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].label, "GitHub");
+        assert_eq!(options[0].value, "github");
+        assert_eq!(options[1].label, "GitLab");
+        assert_eq!(options[1].value, "gitlab");
     }
 
     #[test]

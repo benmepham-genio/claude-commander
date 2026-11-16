@@ -108,6 +108,11 @@ abstract class CommanderApi {
 
   Future<void> deleteSession({required String handle, required String id});
 
+  Future<String?> editSession({
+    required String handle,
+    required String id,
+    required String patchJson,
+  });
   Future<void> renameSession({
     required String handle,
     required String id,
@@ -253,6 +258,10 @@ abstract class CommanderApi {
   /// `gh` throws, which the picker words as an inline banner rather than a dead
   /// screen.
   Future<List<GithubRepo>> githubRepos({required String handle});
+
+  /// Repositories from the server's selected code host. The envelope retains
+  /// provider and hostname even when the list is empty.
+  Future<RepositoryListing> repositories({required String handle});
 
   /// Start a clone. The returned job's status is **not** terminal — every
   /// outcome arrives through [cloneJob], so the caller polls from here.
@@ -551,6 +560,12 @@ class RustCommanderApi implements CommanderApi {
       simple.deleteSession(handle: handle, id: id);
 
   @override
+  Future<String?> editSession({
+    required String handle,
+    required String id,
+    required String patchJson,
+  }) => simple.editSession(handle: handle, id: id, patchJson: patchJson);
+  @override
   Future<void> renameSession({
     required String handle,
     required String id,
@@ -689,6 +704,10 @@ class RustCommanderApi implements CommanderApi {
   @override
   Future<List<GithubRepo>> githubRepos({required String handle}) =>
       simple.githubRepos(handle: handle);
+
+  @override
+  Future<RepositoryListing> repositories({required String handle}) =>
+      simple.repositories(handle: handle);
 
   @override
   Future<CloneJobDto> startClone({

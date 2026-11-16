@@ -105,12 +105,20 @@ struct Entry {
 #[derive(Clone, Default)]
 pub struct CloneJobs {
     jobs: Arc<RwLock<HashMap<CloneJobId, Entry>>>,
+    notify: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl CloneJobs {
     /// An empty registry.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn with_notifier(notify: Arc<dyn Fn() + Send + Sync>) -> Self {
+        Self {
+            notify: Some(notify),
+            ..Self::new()
+        }
     }
 
     /// Register a clone and drive `run` to completion in the background.
@@ -177,6 +185,9 @@ impl CloneJobs {
             id
         };
 
+        if let Some(notify) = &self.notify {
+            notify();
+        }
         let task = tokio::spawn(run);
         let registry = self.clone();
         tokio::spawn(async move {
@@ -227,6 +238,9 @@ impl CloneJobs {
             // asserted so a future `prune` that broke that invariant leaves a
             // trace instead of losing the outcome silently.
             None => debug!("clone job {id} vanished before its outcome was recorded"),
+        }
+        if let Some(notify) = &self.notify {
+            notify();
         }
     }
 

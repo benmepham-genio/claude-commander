@@ -3,4 +3,4 @@
 /**
  * Why an attach ended. Serialized as part of [`ServerControl::Detached`].
  */
-export type DetachReason = "client_request" | "session_ended" | "transport";
+export type DetachReason = "client_request" | "session_ended" | "client_detached" | "transport";

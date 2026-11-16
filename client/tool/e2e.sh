@@ -81,6 +81,15 @@ echo "# e2e" > "$REPO/README.md"
 git -C "$REPO" add README.md
 git -C "$REPO" commit -q -m "Initial commit"
 
+# Keep the creation journey independent of locally discovered agent programs.
+# The first configured program is the server's default in create-options.
+mkdir -p "$XDG_CONFIG_HOME/claude-commander"
+cat > "$XDG_CONFIG_HOME/claude-commander/config.toml" <<'EOF'
+[[programs]]
+label = "E2E shell"
+command = "bash"
+EOF
+
 # -- build + launch the server against the hermetic XDG tree --
 echo "e2e: building server…"
 cargo build -q -p claude-commander-server

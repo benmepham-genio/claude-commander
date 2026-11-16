@@ -87,22 +87,25 @@ impl From<CoreError> for BackendError {
             CoreError::Session(
                 SessionError::InvalidName { .. }
                 | SessionError::InvalidProgram(_)
+                | SessionError::InvalidEdit(_)
                 | SessionError::FileSelectionRejected { .. },
             ) => BackendError::InvalidRequest(err.to_string()),
 
             // A refused clone source/destination name: nothing failed, the
             // *request* is unusable. Its message is redacted at construction
             // (`clone_source_rejected`), so surfacing it cannot echo a credential.
-            CoreError::Git(GitError::CloneSourceRejected(_)) => {
-                BackendError::InvalidRequest(err.to_string())
-            }
+            CoreError::Git(
+                GitError::CloneSourceRejected(_) | GitError::CodeHostHostnameRejected(_),
+            ) => BackendError::InvalidRequest(err.to_string()),
 
             // A missing backing tool, joining tmux: `gh` is installable, which is
             // why core carved this out of `OperationFailed`.
             CoreError::Tmux(TmuxError::NotInstalled | TmuxError::ServerNotRunning)
-            | CoreError::Git(GitError::GhUnavailable) => BackendError::Unavailable {
-                reason: err.to_string(),
-            },
+            | CoreError::Git(GitError::CodeHostCliUnavailable { .. }) => {
+                BackendError::Unavailable {
+                    reason: err.to_string(),
+                }
+            }
 
             _ => BackendError::Local(err),
         }
@@ -157,6 +160,11 @@ mod tests {
             BackendError::InvalidRequest(_)
         ));
         let e = CoreError::Session(SessionError::InvalidProgram("vim".into()));
+        assert!(matches!(
+            BackendError::from(e),
+            BackendError::InvalidRequest(_)
+        ));
+        let e = CoreError::Session(SessionError::InvalidEdit("no name".into()));
         assert!(matches!(
             BackendError::from(e),
             BackendError::InvalidRequest(_)
@@ -219,6 +227,15 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn a_refused_code_host_hostname_maps_to_invalid_request() {
+        let error = CoreError::Git(GitError::CodeHostHostnameRejected("bad host".into()));
+        assert!(matches!(
+            BackendError::from(error),
+            BackendError::InvalidRequest(message) if message.contains("bad host")
+        ));
+    }
+
     /// A missing `gh` joins missing tmux in `Unavailable`: it is a backing tool
     /// the user can install, which is why core carved it out of
     /// `OperationFailed`, and the server maps it to a 503 the remote backend
@@ -226,21 +243,24 @@ mod tests {
     #[test]
     fn missing_gh_maps_to_unavailable() {
         assert!(matches!(
-            BackendError::from(CoreError::Git(GitError::GhUnavailable)),
+            BackendError::from(CoreError::Git(GitError::CodeHostCliUnavailable {
+                provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+            })),
             BackendError::Unavailable { .. }
         ));
     }
 
-    /// A repo listing that overran must **not** join it there. `Unavailable` is
-    /// what frontends word as "install gh", so a timeout landing in that bucket
-    /// would tell a user to install a `gh` they demonstrably have. It falls to
-    /// `Local`, carrying its own message, exactly as `CloneTimedOut` does.
+    /// Repository listing timeout remains an operation failure and
+    /// keeps its precise reason so frontends do not mistake it for a missing CLI.
     #[test]
-    fn a_timed_out_repo_listing_is_not_unavailable() {
-        let err = BackendError::from(CoreError::Git(GitError::RepoListTimedOut { secs: 90 }));
+    fn a_timed_out_repo_listing_is_local_with_its_reason() {
+        let err = BackendError::from(CoreError::Git(GitError::RepoListTimedOut {
+            provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+            secs: 90,
+        }));
         assert!(
             matches!(err, BackendError::Local(_)),
-            "a timeout is a failure with a reason, not a missing tool: {err:?}"
+            "a timeout retains the operation-failure category: {err:?}"
         );
         assert!(err.to_string().contains("timed out"), "{err}");
     }

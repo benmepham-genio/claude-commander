@@ -40,6 +40,13 @@ forces it. Writes `client-sessions.png`, `client-terminal.png`,
 `client-lcars.png` (the same fleet list in the LCARS theme) and
 `client-desktop.png`.
 
+The capture also includes `client-edit-session.png` and
+`client-edit-session-warning.png`. Capture just those dialogs with:
+
+```sh
+nix develop .#clientCi -c docs/tool/capture-client.sh edit
+```
+
 ## Hermeticity
 
 Both scripts follow the same contract as `client/tool/e2e.sh`:

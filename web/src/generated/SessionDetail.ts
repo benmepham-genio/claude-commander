@@ -10,7 +10,15 @@ import type { SessionStatus } from "./SessionStatus";
  * A session plus its live detail: agent sub-state, diff summary, and a pane
  * snapshot. `info` is flattened so the JSON is a single object.
  */
-export type SessionDetail = { agent_state: AgentState, diff_stat: string | null, pane_content: string | null, id: string, session_id: SessionId, title: string, branch: string, status: SessionStatus, program: string, project_id: ProjectId, project_name: string, pr_number: number | null, pr_url: string | null, pr_state: PrState, pr_draft: boolean, pr_labels: Array<string>, review_decision: ReviewDecision | null, pr_reviewers: Array<string>, created_at: string, 
+export type SessionDetail = { agent_state: AgentState, diff_stat: string | null, pane_content: string | null, id: string, session_id: SessionId, title: string, branch: string, status: SessionStatus, 
+/**
+ * Program used by the current agent pane.
+ */
+program: string, 
+/**
+ * Program saved for the next fresh restart, if different from the live one.
+ */
+pending_program: string | null, project_id: ProjectId, project_name: string, pr_number: number | null, pr_url: string | null, pr_state: PrState, pr_draft: boolean, pr_labels: Array<string>, review_decision: ReviewDecision | null, pr_reviewers: Array<string>, created_at: string, 
 /**
  * Whether the session has unread output (agent finished, user hasn't
  * attached since).

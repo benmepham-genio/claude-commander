@@ -28,6 +28,7 @@ export interface TerminalHooks {
    * with): take the user to the connect screen, unless it has been replaced.
    */
   onAuthRejected(token: string | null): void;
+  onRecoveryChanged?(): void;
 }
 
 let auth: Auth;
@@ -234,6 +235,7 @@ export function attach(id: string): void {
 export function detach(): void {
   closeSocket();
   halt = null;
+  hooks.onRecoveryChanged?.();
 }
 
 /** How the current attach stands (for a re-click on the selected session). */
@@ -244,7 +246,7 @@ export function haltState(): Halt {
 /**
  * Fed the selected session's status from every poll: an attach that ended
  * "gone" re-attaches once the session has a pane again (another tab or the TUI
- * restarted it, or it was only detached).
+ * restarted it). One that ended "detached" waits for a click instead.
  */
 export function onSelectedStatus(status: string | undefined): void {
   if (halt === "gone" && state.selectedId && recovery.onPoll(status)) {
@@ -287,6 +289,7 @@ export function reattach(): void {
 function startAttach(id: string, user = true): void {
   lifecycle = new AttachLifecycle();
   halt = null;
+  hooks.onRecoveryChanged?.();
   if (user) {
     recovery = new GoneRecovery();
     clearStickyConn();
@@ -378,7 +381,14 @@ function openSocket(id: string): void {
         // saying so in the header until the user attaches again.
         halt = "gone";
         recovery.onGone();
+        hooks.onRecoveryChanged?.();
         stickConn("error", next.message);
+        break;
+      case "detached":
+        // Deliberately no `recovery.onGone()`: its probe would re-attach and
+        // displace whoever took the pane. The user clicks to take it back.
+        halt = "detached";
+        stickConn("error", "detached — click the session to re-attach");
         break;
     }
   };

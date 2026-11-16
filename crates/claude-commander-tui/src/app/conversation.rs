@@ -321,12 +321,13 @@ pub enum DictationOutcome {
 /// dictation with no attached pane to go to.
 ///
 /// Its own unbounded channel rather than a [`StateUpdate`] on the event loop's,
-/// for two reasons. That channel is bounded, and nothing drains it while the
-/// loop is parked in an attach or the editor (the render ticks fill it), so a
-/// hand-off there would stall the consumer — and every dictation queued behind
-/// it. And [`EventLoop::restart_input`] discards whatever it holds when an
-/// attach returns, which would lose the transcript without a word. The UI loop
-/// drains this on every tick instead ([`App::drain_dictations`]).
+/// because that channel is bounded, and nothing drains it while the loop is
+/// parked in an attach or the editor (the render ticks fill it), so a hand-off
+/// there would stall the consumer — and every dictation queued behind it. Loss
+/// is not the concern: [`EventLoop::restart_input`] discards only the input and
+/// ticks queued meanwhile and keeps every other event, so an update that did
+/// get through would survive the attach. The UI loop drains this on every tick
+/// instead ([`App::drain_dictations`]).
 pub struct DictationMailbox {
     tx: tokio::sync::mpsc::UnboundedSender<DictationOutcome>,
     rx: tokio::sync::mpsc::UnboundedReceiver<DictationOutcome>,
@@ -899,10 +900,13 @@ impl App {
 
     /// Place every dictation the transcript consumer has left in the mailbox.
     /// Called on each render tick, so a hand-off waits at most one tick.
-    pub(super) fn drain_dictations(&mut self) {
+    pub(super) fn drain_dictations(&mut self) -> bool {
+        let mut changed = false;
         while let Ok(outcome) = self.conversation.dictations.rx.try_recv() {
             self.apply_dictation(outcome);
+            changed = true;
         }
+        changed
     }
 
     /// Deliver a dictation that had no attached pane to go to: type it into

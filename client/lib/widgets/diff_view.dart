@@ -36,6 +36,7 @@ class DiffView extends StatefulWidget {
     required this.onAddComment,
     required this.onExpand,
     this.dualGutter = false,
+    this.sliver = false,
   });
 
   /// Display path of the file, for the comment the selection produces.
@@ -57,6 +58,7 @@ class DiffView extends StatefulWidget {
   /// Show old *and* new line numbers in the single-column gutter. Off by
   /// default: on a phone the second number costs more than it tells you.
   final bool dualGutter;
+  final bool sliver;
 
   @override
   State<DiffView> createState() => _DiffViewState();
@@ -179,18 +181,30 @@ class _DiffViewState extends State<DiffView> {
         ? (_anchor! > _focus! ? _anchor! : _focus!)
         : null;
 
-    final children = <Widget>[];
-    for (final row in widget.layout.rows) {
-      children.add(_row(t, colors, row, selectable));
-      // The action bar sits directly under the last selected line rather than
-      // at the end of the file, which in a long diff can be a screen away.
-      if (hi != null && (row.left.sel == hi || row.right.sel == hi)) {
-        children.add(_actions());
-      }
+    final actionAfter = hi == null
+        ? null
+        : widget.layout.rows.indexWhere(
+            (row) => row.left.sel == hi || row.right.sel == hi,
+          );
+    final hasActions = actionAfter != null && actionAfter >= 0;
+    Widget rowAt(int index) {
+      if (hasActions && index == actionAfter + 1) return _actions();
+      final source = hasActions && index > actionAfter + 1 ? index - 1 : index;
+      return _row(t, colors, widget.layout.rows[source], selectable);
+    }
+
+    final count = widget.layout.rows.length + (hasActions ? 1 : 0);
+    if (widget.sliver) {
+      return SliverList(
+        delegate: SliverChildBuilderDelegate(
+          (context, index) => rowAt(index),
+          childCount: count,
+        ),
+      );
     }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: children,
+      children: [for (var i = 0; i < count; i++) rowAt(i)],
     );
   }
 
@@ -223,8 +237,7 @@ class _DiffViewState extends State<DiffView> {
     // `IntrinsicHeight` so the two halves — and each half's gutter — share
     // one height. Without it the shorter side's fill stops early and a
     // soft-wrapped line leaves a notch in the gutter band. It costs an extra
-    // layout pass per row; see the eager-build note in `review_page.dart`,
-    // which is the larger cost on a big file.
+    // layout pass per visible row; the sliver list limits that work to the viewport.
     DiffRowKind.line || DiffRowKind.expandedContext => IntrinsicHeight(
       child: widget.sideBySide && !row.fullWidth
           ? Row(

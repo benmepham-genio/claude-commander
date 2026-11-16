@@ -62,6 +62,28 @@ fn cors_layer(allowed_origins: &[String]) -> CorsLayer {
         .allow_headers([AUTHORIZATION, axum::http::header::CONTENT_TYPE])
 }
 
+/// Include successful comment/review writes in the observable generation even
+/// though their persistence stores are separate from state.json. Config writes
+/// do not depend on this: `ConfigStore` wakes the feed itself (wired in
+/// `CommanderService::new`), so an edit from the TUI's settings modal reaches
+/// clients too. A config write through a route therefore bumps twice, which
+/// costs a client at most one extra refetch.
+async fn notify_mutation(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mutation = !matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    );
+    let response = next.run(request).await;
+    if mutation && response.status().is_success() {
+        state.service.store().notify_change();
+    }
+    response
+}
+
 /// Build the full application router.
 pub fn build_router(state: AppState) -> Router {
     let auth = state.auth.clone();
@@ -71,8 +93,14 @@ pub fn build_router(state: AppState) -> Router {
     let api = Router::new()
         // -- workspace surface --
         .route("/workspace", get(snapshot::snapshot))
+        .route("/changes", get(snapshot::changes))
         .route("/agent-states", get(snapshot::agent_states))
         .route("/pr-refresh", post(snapshot::pr_refresh))
+        .route(
+            "/session-editor/model",
+            post(snapshot::session_editor_model),
+        )
+        .route("/session-editor/plan", post(snapshot::plan_session_edit))
         .route("/create-options", get(snapshot::create_options))
         .route("/comments/pending", get(review::pending))
         // -- cascade / push-stack --
@@ -147,6 +175,7 @@ pub fn build_router(state: AppState) -> Router {
         // router and identifies the handler by a message only it produces, so a
         // capture match shows up as a wrong status/body rather than passing
         // quietly.
+        .route("/repositories", get(github::repositories))
         .route("/github/repos", get(github::repos))
         .route("/projects/clone", post(github::clone))
         .route("/projects/clone/{job}", get(github::clone_status))
@@ -168,6 +197,7 @@ pub fn build_router(state: AppState) -> Router {
         // Bearer auth guards the whole `/api` surface; the CORS layer sits
         // outside auth so browser preflight (OPTIONS, unauthenticated) is
         // answered correctly.
+        .layer(from_fn_with_state(state.clone(), notify_mutation))
         .layer(from_fn_with_state(auth, require_bearer))
         .layer(cors);
 
@@ -207,6 +237,77 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::handlers::test_support::test_state;
+
+    #[tokio::test]
+    async fn changes_bootstraps_and_wakes_after_a_mutation() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        let app = super::build_router(state);
+        let response = app
+            .clone()
+            .oneshot(Request::get("/api/changes").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let generation: u64 = serde_json::from_slice(&bytes).unwrap();
+        let waiter = app.clone();
+        let mut waiting = tokio::spawn(async move {
+            waiter
+                .oneshot(
+                    Request::get(format!("/api/changes?since={generation}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), &mut waiting)
+                .await
+                .is_err(),
+            "unchanged generations must wait instead of returning immediately"
+        );
+        let mutation = app
+            .oneshot(
+                Request::post("/api/pr-refresh")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mutation.status(), axum::http::StatusCode::ACCEPTED);
+        let response = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_ne!(serde_json::from_slice::<u64>(&bytes).unwrap(), generation);
+    }
+
+    #[tokio::test]
+    async fn change_waits_require_authentication() {
+        let dir = TempDir::new().unwrap();
+        let mut state = test_state(&dir);
+        state.auth = std::sync::Arc::new(crate::auth::AuthConfig::Token("test-token".into()));
+        let app = super::build_router(state);
+        let response = app
+            .clone()
+            .oneshot(Request::get("/api/changes").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+        let response = app
+            .oneshot(
+                Request::get("/api/changes")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
 
     const ALLOWED: &str = "https://app.example.com";
     const OTHER: &str = "https://evil.example.com";

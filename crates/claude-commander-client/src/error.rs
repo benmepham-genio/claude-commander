@@ -133,7 +133,17 @@ pub(crate) async fn error_message(resp: Response) -> String {
             .to_string()
     };
     match resp.text().await {
-        Ok(text) => parse_error_message(&text).unwrap_or_else(fallback),
+        Ok(text) => parse_error_message(&text)
+            .or_else(|| {
+                // Old axum Json<PatchSession> rejects a new op before its handler.
+                // Preserve only this fixed capability marker, never arbitrary text
+                // (which can quote a credential-bearing value). Pinned by
+                // client::session_edit_tests' real legacy Json extractor.
+                (status == StatusCode::UNPROCESSABLE_ENTITY && text.starts_with(
+                    "Failed to deserialize the JSON body into the target type: op: unknown variant `edit`"
+            )).then(|| "unknown variant `edit`".into())
+            })
+            .unwrap_or_else(fallback),
         Err(_) => fallback(),
     }
 }

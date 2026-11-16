@@ -32,11 +32,13 @@ use claude_commander_core::api::SetProgramsRequest;
 use claude_commander_core::error::SessionError;
 use claude_commander_protocol::api::ConfigReloaded;
 use claude_commander_protocol::config::ConfigPatch;
+use claude_commander_protocol::hosting::validate_gitlab_hostname;
 use claude_commander_protocol::workspace::{
     DeleteWorkspaceRequest, RenameWorkspaceRequest, SetWorkspacesRequest,
 };
 
 use crate::error::ApiError;
+use crate::extract::SafeJson;
 use crate::state::AppState;
 
 /// `GET /config` → `read_config`, with credential fields cleared: the caller
@@ -61,6 +63,8 @@ fn apply_patch(patch: ConfigPatch, cfg: &mut Config) {
     // allow-list fails to compile here until it is applied, rather than being
     // accepted on the wire and silently ignored.
     let ConfigPatch {
+        code_host_provider,
+        gitlab_hostname,
         branch_prefix,
         max_concurrent_tmux,
         capture_cache_ttl_ms,
@@ -91,7 +95,11 @@ fn apply_patch(patch: ConfigPatch, cfg: &mut Config) {
             )*
         };
     }
+    if let Some(value) = gitlab_hostname {
+        cfg.gitlab_hostname = value;
+    }
     set!(
+        code_host_provider,
         branch_prefix,
         max_concurrent_tmux,
         capture_cache_ttl_ms,
@@ -134,6 +142,10 @@ fn validate(cfg: &Config) -> Result<(), ApiError> {
     if cfg.max_concurrent_tmux == 0 {
         return Err(invalid("max_concurrent_tmux", "must be greater than zero"));
     }
+    if let Some(hostname) = cfg.gitlab_hostname.as_deref() {
+        validate_gitlab_hostname(hostname)
+            .map_err(|reason| invalid("gitlab_hostname", &reason.to_string()))?;
+    }
     Ok(())
 }
 
@@ -144,12 +156,15 @@ fn validate(cfg: &Config) -> Result<(), ApiError> {
 /// they cannot be changed here.
 pub async fn update(
     State(state): State<AppState>,
-    Json(patch): Json<ConfigPatch>,
+    SafeJson(patch): SafeJson<ConfigPatch>,
 ) -> Result<StatusCode, ApiError> {
-    let mut merged = state.service.read_config();
-    apply_patch(patch, &mut merged);
-    validate(&merged)?;
-    state.service.update_config(merged)?;
+    state
+        .service
+        .edit_code_host_config(move |merged| {
+            apply_patch(patch.clone(), merged);
+            validate(merged).map_err(|error| error.0)
+        })
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -205,7 +220,7 @@ pub async fn delete_workspace(
 /// `POST /config/reload` → `reload_config` → [`ConfigReloaded`]
 /// (true when the on-disk config differed and was re-read).
 pub async fn reload(State(state): State<AppState>) -> Result<Json<ConfigReloaded>, ApiError> {
-    let reloaded = state.service.reload_config()?;
+    let reloaded = state.service.reload_config().await?;
     Ok(Json(ConfigReloaded { reloaded }))
 }
 
@@ -451,6 +466,89 @@ mod tests {
             "patching [workspace_themes] must be a 4xx, got {status}"
         );
         assert!(state.service.read_config().workspace_themes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn patch_updates_code_host_and_rejects_unsafe_gitlab_hostname() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+
+        let status = patch(
+            state.clone(),
+            serde_json::json!({
+                "code_host_provider": "gitlab",
+                "gitlab_hostname": "gitlab.example.com:8443"
+            }),
+        )
+        .await;
+        assert_eq!(status, 204);
+        let config = state.service.read_config();
+        assert_eq!(
+            config.code_host_provider,
+            claude_commander_protocol::hosting::CodeHostProvider::Gitlab
+        );
+        assert_eq!(
+            config.gitlab_hostname.as_deref(),
+            Some("gitlab.example.com:8443")
+        );
+
+        let status = patch(
+            state.clone(),
+            serde_json::json!({
+                "gitlab_hostname": "https://user:secret@gitlab.example.com/group"
+            }),
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(
+            state.service.read_config().gitlab_hostname.as_deref(),
+            Some("gitlab.example.com:8443")
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_distinguishes_an_omitted_hostname_from_explicit_null() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        let mut config = state.service.read_config();
+        config.gitlab_hostname = Some("gitlab.example.com".into());
+        state.service.update_config(config).unwrap();
+
+        let status = patch(state.clone(), serde_json::json!({})).await;
+        assert_eq!(status, 204);
+        assert_eq!(
+            state.service.read_config().gitlab_hostname.as_deref(),
+            Some("gitlab.example.com"),
+            "an omitted PATCH field must leave the hostname untouched"
+        );
+
+        let status = patch(
+            state.clone(),
+            serde_json::json!({ "gitlab_hostname": null }),
+        )
+        .await;
+        assert_eq!(status, 204);
+        assert_eq!(
+            state.service.read_config().gitlab_hostname,
+            None,
+            "an explicit null must clear the hostname override"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_gitlab_hostname_shape_never_echoes_a_credential() {
+        let dir = TempDir::new().unwrap();
+        let secret = "glpat-secret-value";
+        let req = Request::patch("/config")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"gitlab_hostname":["https://user:{secret}@gitlab.example.com"]}}"#
+            )))
+            .unwrap();
+        let (status, body) = send(router(test_state(&dir)), req).await;
+        assert_eq!(status, 400);
+        let body = String::from_utf8(body).unwrap();
+        assert!(!body.contains(secret), "credential leaked: {body}");
     }
 
     /// A sensitive path field cannot be changed: `deny_unknown_fields` rejects a

@@ -176,30 +176,19 @@ void main() {
     // 'Connect' is the add-a-server button's label; it reads 'Save' only when
     // editing an existing entry (connection_page.dart:286).
     await waitFor(tester, find.text('Connect'));
-    // Focus each field before entering text: under headless xvfb the field
-    // isn't auto-focused as on a real display, so a bare enterText can no-op and
-    // leave the prefilled default URL. Tap → enterText → pump makes it stick.
-    // Fields, in order: Name (0), Server URL (1), Bearer token (2).
-    final urlField = find.byType(TextFormField).at(1);
-    final tokenField = find.byType(TextFormField).at(2);
-    await tester.tap(urlField);
-    await tester.pump();
-    await tester.enterText(urlField, _baseUrl);
-    await tester.pump();
-    await tester.tap(tokenField);
-    await tester.pump();
-    await tester.enterText(tokenField, _token);
+    // Address the fields by their production keys. Positional lookup is brittle
+    // when the connection form gains another input. Assign through the real
+    // form controllers because the Linux integration driver intermittently
+    // drops keyboard-driven `enterText` calls under xvfb, leaving the prefilled
+    // default URL untouched. The Connect action still exercises the production
+    // validation, persistence and authenticated API path below.
+    final urlField = find.byKey(const Key('urlField'));
+    final tokenField = find.byKey(const Key('tokenField'));
+    tester.widget<TextFormField>(urlField).controller!.text = _baseUrl;
+    tester.widget<TextFormField>(tokenField).controller!.text = _token;
     await tester.pump();
     // Guard: the URL must actually be the e2e server before we connect.
-    expect(
-      tester
-          .widget<TextField>(
-            find.descendant(of: urlField, matching: find.byType(TextField)),
-          )
-          .controller
-          ?.text,
-      _baseUrl,
-    );
+    expect(tester.widget<TextFormField>(urlField).controller?.text, _baseUrl);
     await tester.tap(find.widgetWithText(FilledButton, 'Connect'));
     await waitFor(tester, find.text('Fleet'));
     await waitFor(tester, find.text('No sessions')); // fresh hermetic server
@@ -233,9 +222,12 @@ void main() {
       find.widgetWithText(TextFormField, 'Title'),
       'e2e-journey',
     );
-    await tester.enterText(
+    // e2e.sh configures this shell as the default program. Once create-options
+    // arrives, the page uses the alias dropdown instead of its fallback field.
+    await waitFor(tester, find.text('E2E shell'));
+    expect(
       find.widgetWithText(TextFormField, 'Program (optional)'),
-      'bash',
+      findsNothing,
     );
     await tester.tap(find.widgetWithText(FilledButton, 'Create session'));
     // Wait for the actual session row to render — not the create page's Title

@@ -526,53 +526,55 @@ class MissionControlChrome extends Chrome {
     final t = CommanderTokens.of(context);
     final centre = spec.centreAction;
     final settings = spec.settings;
+    // Settings is the last slot in the tab row, a labelled peer of the tabs
+    // rather than a bare icon in the corner.
+    final slots = <Widget>[
+      for (final item in spec.items) _navTab(context, item, t),
+      if (settings != null)
+        Tooltip(
+          message: settings.label,
+          child: Semantics(
+            button: true,
+            child: _footerSlot(
+              onTap: settings.onPressed,
+              // Laid out on the tabs' 17dp glyph line so its label shares
+              // their label row; the icon still paints at its own 20dp.
+              glyph: SizedBox(
+                height: _navGlyphSize,
+                child: OverflowBox(
+                  maxHeight: 20,
+                  child: Icon(settings.icon, size: 20, color: t.textFaint),
+                ),
+              ),
+              label: settings.label.toUpperCase(),
+              labelStyle: _navLabelStyle(t, t.textFaint),
+            ),
+          ),
+        ),
+    ];
     // The gap the FAB sits in goes where the shell put it: between the tabs.
-    final gapAt = centre == null ? -1 : spec.items.length ~/ 2;
+    // The FAB is centred on the Scaffold, not on this row, so the gap must be
+    // centred on the bar however many slots fall either side of it: each side
+    // is an equal half, and its slots share that half.
+    final gapAt = centre == null ? slots.length : spec.items.length ~/ 2;
+    Widget half(List<Widget> children) => Expanded(
+      child: Row(children: [for (final c in children) Expanded(child: c)]),
+    );
     final bar = BottomAppBar(
       color: t.canvasRaised,
       height: 62,
       padding: EdgeInsets.zero,
       child: SafeArea(
         top: false,
-        child: Row(
-          children: [
-            if (settings != null)
-              SizedBox(
-                width: _barActionWidth,
-                // Bar-tall, so the tap target keeps the bar's full height
-                // even though the glyph rides high in it. This replaced an
-                // `IconButton`, which brought its own centred 48-square target
-                // — and centring is what dropped the gear below the tabs.
-                height: double.infinity,
-                // Tooltip outside, button semantics in: the shape `IconButton`
-                // built for itself, kept so nothing about the control changes
-                // but where its glyph lands.
-                child: Tooltip(
-                  message: settings.label,
-                  child: Semantics(
-                    button: true,
-                    child: _footerSlot(
-                      onTap: settings.onPressed,
-                      glyph: Icon(settings.icon, size: 20, color: t.textMuted),
-                      // Labelless, but the tabs' label line is still reserved
-                      // beneath it — that is what lines the glyph rows up.
-                      labelStyle: _navLabelStyle(t, t.textMuted),
-                    ),
-                  ),
-                ),
+        child: centre == null
+            ? Row(children: [for (final c in slots) Expanded(child: c)])
+            : Row(
+                children: [
+                  half(slots.sublist(0, gapAt)),
+                  const SizedBox(width: 64),
+                  half(slots.sublist(gapAt)),
+                ],
               ),
-            for (var i = 0; i < spec.items.length; i++) ...[
-              if (i == gapAt) const SizedBox(width: 64),
-              Expanded(child: _navTab(context, spec.items[i], t)),
-            ],
-            // The counterweight to that leading button. The FAB is centred on the
-            // Scaffold, not on this row, so a leading widget with nothing
-            // opposite it slides the notch — and both tabs — left of the FAB.
-            // Pinned by 'keeps the tabs symmetric about the FAB' in
-            // `phone_shell_test.dart`, which fails by 48px without this box.
-            if (settings != null) const SizedBox(width: _barActionWidth),
-          ],
-        ),
       ),
     );
     // Returns the bar alone. `centreAction` only reserves the notch here; the
@@ -640,7 +642,7 @@ class MissionControlChrome extends Chrome {
       onTap: item.onTap,
       glyph: Text(
         item.glyph,
-        style: TextStyle(fontSize: 17, color: color, height: 1),
+        style: TextStyle(fontSize: _navGlyphSize, color: color, height: 1),
       ),
       label: item.label,
       labelStyle: _navLabelStyle(t, color),
@@ -1023,10 +1025,8 @@ class MissionControlChrome extends Chrome {
 /// closely enough that toggling the frame does not reflow the page beneath it.
 const _windowBarHeight = 32.0;
 
-/// The bottom bar's leading action, and the balancing gap opposite it. Wide
-/// enough for a comfortable touch target without eating into the tabs either
-/// side of the notch.
-const _barActionWidth = 48.0;
+/// The bottom bar tabs' glyph size, and so the height of their glyph line.
+const _navGlyphSize = 17.0;
 
 /// The app bar's height in a short viewport (a phone in landscape), at the
 /// default text scale. Material's 56 buys a comfortable portrait thumb target;

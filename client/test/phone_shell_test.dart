@@ -162,18 +162,54 @@ void main() {
       );
     });
 
-    testWidgets('Mission Control keeps the tabs symmetric about the FAB', (
+    /// A third labelled slot in the tab row, not a bare icon parked in the
+    /// corner — the lone leading gear read as misplaced on a device.
+    testWidgets('Mission Control makes it a labelled tab after the others', (
       tester,
     ) async {
       await pump(tester);
 
-      // The settings button is a leading widget in the bar, so without its
-      // trailing counterweight the notch — and the tabs either side of it —
-      // would sit left of the centre-docked FAB.
+      final label = find.descendant(
+        of: find.byType(BottomAppBar),
+        matching: find.text('SETTINGS'),
+      );
+      expect(label, findsOneWidget);
+      // Same label row as the nav tabs, and the last slot in it.
+      final settings = tester.getCenter(label);
+      final activity = tester.getCenter(find.text('ACTIVITY'));
+      expect(settings.dy, moreOrLessEquals(activity.dy, epsilon: 0.5));
+      expect(settings.dx, greaterThan(activity.dx));
+      // Its glyph is centred over its label, as each tab's is.
+      expect(
+        tester.getCenter(find.byIcon(Icons.settings)).dx,
+        moreOrLessEquals(settings.dx, epsilon: 0.5),
+      );
+    });
+
+    testWidgets('Mission Control opens settings from its tab', (tester) async {
+      await pump(tester);
+
+      await tester.tap(find.text('SETTINGS'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(SettingsPage), findsOneWidget);
+    });
+
+    testWidgets('Mission Control keeps the notch centred under the FAB', (
+      tester,
+    ) async {
+      await pump(tester);
+
+      // The FAB is centred on the Scaffold, not on the bar's row, so the gap
+      // the tabs leave for it must be centred on the screen however many
+      // slots sit either side of it.
       final fab = tester.getCenter(find.byType(FloatingActionButton)).dx;
-      final fleet = tester.getCenter(find.text('FLEET')).dx;
-      final activity = tester.getCenter(find.text('ACTIVITY')).dx;
-      expect(fab - fleet, moreOrLessEquals(activity - fab, epsilon: 0.5));
+      final fleet = tester.getRect(find.text('FLEET'));
+      final activity = tester.getRect(find.text('ACTIVITY'));
+      final width = tester.getSize(find.byType(BottomAppBar)).width;
+      expect(fab, moreOrLessEquals(width / 2, epsilon: 0.5));
+      expect(fleet.right, lessThan(fab - 28));
+      expect(activity.left, greaterThan(fab + 28));
     });
 
     /// The tabs are a glyph over a label, so their glyphs sit *above* the bar's

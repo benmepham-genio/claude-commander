@@ -139,3 +139,31 @@ describe("Poller", () => {
     assert.equal(t.pending.size, 0);
   });
 });
+
+test("the fallback cadence can slow down without delaying explicit refresh", async () => {
+  const f = fakeTimers();
+  let calls = 0;
+  const poller = new Poller(
+    async () => {
+      calls++;
+    },
+    1500,
+    f.timers,
+  );
+  await poller.start();
+  poller.setIntervalMs(30_000);
+  assert.equal([...f.pending.values()][0]?.ms, 30_000);
+  await poller.trigger();
+  assert.equal(calls, 2);
+  poller.stop();
+});
+test("unchanged cadence cannot postpone scheduled reconciliation", async () => {
+  const f = fakeTimers();
+  const poller = new Poller(async () => {}, 30_000, f.timers);
+  await poller.start();
+  const original = [...f.pending.keys()][0];
+  poller.setIntervalMs(30_000);
+  poller.setIntervalMs(30_000);
+  assert.equal([...f.pending.keys()][0], original);
+  poller.stop();
+});

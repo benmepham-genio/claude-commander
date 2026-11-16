@@ -45,14 +45,24 @@ pub enum AnchorResult {
 
 /// Per-session comment store, persisted as one JSON array per session under
 /// a directory (typically `<data_dir>/comments/`).
+struct PendingComments {
+    mtime: Option<std::time::SystemTime>,
+    checked_at: std::time::Instant,
+    sessions: std::collections::HashSet<SessionId>,
+}
+
 pub struct CommentStore {
     dir: PathBuf,
+    pending: tokio::sync::Mutex<Option<PendingComments>>,
 }
 
 impl CommentStore {
     /// Construct a store rooted at `dir` (created lazily on first save).
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
+        Self {
+            dir,
+            pending: tokio::sync::Mutex::new(None),
+        }
     }
 
     fn path_for(&self, sid: SessionId) -> PathBuf {
@@ -80,14 +90,21 @@ impl CommentStore {
             .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
         let json = serde_json::to_string_pretty(anns)
             .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
-        let tmp = self.dir.join(format!(".{}.tmp", sid.as_uuid()));
+        let tmp = self
+            .dir
+            .join(format!(".{}.{}.tmp", sid.as_uuid(), uuid::Uuid::new_v4()));
         fs::write(&tmp, json)
             .await
             .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
         fs::rename(&tmp, self.path_for(sid))
             .await
             .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
+        self.invalidate_pending().await;
         Ok(())
+    }
+
+    pub async fn invalidate_pending(&self) {
+        *self.pending.lock().await = None;
     }
 
     /// Append an comment to a session.
@@ -108,6 +125,17 @@ impl CommentStore {
     /// directory (a missing directory yields an empty set); unreadable or
     /// malformed files are skipped rather than failing the whole scan.
     pub async fn sessions_with_pending(&self) -> Result<std::collections::HashSet<SessionId>> {
+        let mtime = fs::metadata(&self.dir)
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok());
+        let mut cached = self.pending.lock().await;
+        if let Some(previous) = &*cached
+            && previous.mtime == mtime
+            && previous.checked_at.elapsed() < std::time::Duration::from_secs(30)
+        {
+            return Ok(previous.sessions.clone());
+        }
         let mut out = std::collections::HashSet::new();
         let mut entries = match fs::read_dir(&self.dir).await {
             Ok(e) => e,
@@ -139,6 +167,11 @@ impl CommentStore {
                 out.insert(sid);
             }
         }
+        *cached = Some(PendingComments {
+            mtime,
+            checked_at: std::time::Instant::now(),
+            sessions: out.clone(),
+        });
         Ok(out)
     }
 
@@ -371,6 +404,40 @@ mod tests {
     }
 
     // --- store ---
+
+    #[tokio::test]
+    async fn concurrent_saves_use_independent_temporary_files() {
+        let dir = TempDir::new().unwrap();
+        let store = std::sync::Arc::new(CommentStore::new(dir.path().join("store")));
+        let sid = SessionId::new();
+        let mut saves = tokio::task::JoinSet::new();
+        let mut submitted = Vec::new();
+        for i in 0..32 {
+            let payload = {
+                vec![ann(
+                    &format!("file-{i}.rs"),
+                    CommentSide::New,
+                    (1, 1),
+                    "line",
+                )]
+            };
+            submitted.push(payload.clone());
+            let store = store.clone();
+            saves.spawn(async move { store.save(sid, &payload).await });
+        }
+        while let Some(result) = saves.join_next().await {
+            result.unwrap().unwrap();
+        }
+        let final_value = store.load(sid).await.unwrap();
+        assert!(
+            submitted.contains(&final_value),
+            "a complete submitted value must survive"
+        );
+        let files: Vec<_> = std::fs::read_dir(dir.path().join("store"))
+            .unwrap()
+            .collect();
+        assert_eq!(files.len(), 1, "only the final JSON should remain");
+    }
 
     #[tokio::test]
     async fn load_missing_returns_empty() {

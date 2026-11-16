@@ -9,13 +9,12 @@
 //! through exactly the same pipeline, so the two frontends cannot drift apart
 //! about what a diff *is* — only about what colours they paint it in.
 //!
-//! ## Stateless by design
+//! ## Bounded parsing, per-request layout
 //!
-//! Every call re-parses and re-lays-out from the raw text. There is no
-//! Rust-side layout registry, so nothing leaks when a Dart page is disposed and
-//! nothing goes stale when the diff refreshes; the cost is one parse per
-//! *layout change* (file switch, mode flip, gap expansion), not per frame — Dart
-//! holds the returned rows in widget state and scrolls them for free. Expansion
+//! Layout is rebuilt per request. A cache of two raw reviews (at most 8 MiB
+//! of source keys) reuses parsing across file switches, mode flips and gap
+//! expansion. Exact input keys keep changed reviews fresh. Dart holds returned
+//! rows while scrolling. Expansion
 //! state travels as a replayable list of [`DiffExpansion`]s for the same reason.
 //!
 //! ## Why the DTOs are flat
@@ -226,6 +225,59 @@ pub struct DiffLayoutDto {
 // cdylib entry point.
 // ---------------------------------------------------------------------------
 
+/// Two recently-used raw reviews, bounded by bytes as well as entry count.
+/// Mode flips and gap expansion reuse parsing; layout remains per-call.
+type ParsedFiles = std::sync::Arc<Vec<FileDiff<'static>>>;
+#[flutter_rust_bridge::frb(ignore)]
+#[derive(Default)]
+struct ParseCache {
+    entries: std::collections::VecDeque<(String, ParsedFiles)>,
+}
+impl ParseCache {
+    const MAX_BYTES: usize = 8 * 1024 * 1024;
+    fn get(&mut self, raw: &str) -> Option<ParsedFiles> {
+        let index = self.entries.iter().position(|(key, _)| key == raw)?;
+        let entry = self.entries.remove(index)?;
+        let files = entry.1.clone();
+        self.entries.push_back(entry);
+        Some(files)
+    }
+    fn insert(&mut self, raw: &str, files: ParsedFiles) {
+        if raw.len() > Self::MAX_BYTES {
+            return;
+        }
+        if self.get(raw).is_some() {
+            return;
+        }
+        while self.entries.len() >= 2
+            || self.entries.iter().map(|(key, _)| key.len()).sum::<usize>() + raw.len()
+                > Self::MAX_BYTES
+        {
+            self.entries.pop_front();
+        }
+        self.entries.push_back((raw.to_owned(), files));
+    }
+}
+
+fn parsed_review(raw: &str) -> ParsedFiles {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<ParseCache>> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(ParseCache::default()));
+    if let Some(files) = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(raw)
+    {
+        return files;
+    }
+    // Parsing is fallible third-party CPU work: never hold the shared mutex here.
+    let files = std::sync::Arc::new(parse_all(raw));
+    cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(raw, files.clone());
+    files
+}
+
 /// Lay one file of a review diff out into rows of styled runs.
 ///
 /// `raw` is [`crate::api::review::ReviewSnapshotDto::raw`]; when it is `None`
@@ -247,17 +299,12 @@ pub fn diff_rows(
 ) -> Result<DiffLayoutDto> {
     let file = match raw.as_deref() {
         Some(raw) => {
-            let mut files = parse_all(raw);
-            match files
+            let files = parsed_review(raw);
+            files
                 .iter()
-                .position(|f| f.display_path() == fallback.display_path)
-            {
-                Some(i) => files.swap_remove(i),
-                // The raw text and the parsed snapshot disagree about which
-                // files are in the diff. Render what the snapshot listed rather
-                // than an empty view.
-                None => from_wire(&fallback),
-            }
+                .find(|f| f.display_path() == fallback.display_path)
+                .cloned()
+                .unwrap_or_else(|| from_wire(&fallback))
         }
         None => from_wire(&fallback),
     };
@@ -645,6 +692,32 @@ diff --git a/a.rs b/a.rs
 -thirty
 +THIRTY
 ";
+
+    #[test]
+    fn parse_cache_uses_exact_keys_and_bounds_entries_and_bytes() {
+        let mut cache = ParseCache::default();
+        let files = std::sync::Arc::new(Vec::new());
+        cache.insert("old", files.clone());
+        assert!(std::sync::Arc::ptr_eq(&cache.get("old").unwrap(), &files));
+        assert!(cache.get("changed").is_none());
+        cache.insert("second", files.clone());
+        cache.insert("third", files.clone());
+        assert!(cache.get("old").is_none());
+        assert_eq!(cache.entries.len(), 2);
+        let large = "x".repeat(ParseCache::MAX_BYTES);
+        cache.insert(&large, files.clone());
+        assert_eq!(cache.entries.len(), 1);
+        cache.insert(&(large + "x"), files);
+        assert_eq!(cache.entries.len(), 1);
+        assert!(
+            cache
+                .entries
+                .iter()
+                .map(|(key, _)| key.len())
+                .sum::<usize>()
+                <= ParseCache::MAX_BYTES
+        );
+    }
 
     /// Concatenated span text of a cell — what the user actually reads.
     fn text_of(cell: &DiffCellDto) -> String {

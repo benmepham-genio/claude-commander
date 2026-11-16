@@ -216,6 +216,12 @@ impl SessionManager {
             })
             .await?;
 
+        // Release the filesystem watches held for the project and its sessions.
+        self.project_diff_cache.invalidate(project_id).await;
+        for session_id in &project.worktrees {
+            self.diff_cache.invalidate(session_id).await;
+        }
+
         info!("Removed project {}", project_id);
         Ok(())
     }

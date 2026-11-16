@@ -8,7 +8,7 @@ A high-performance terminal UI for managing Claude coding sessions, written in R
 
 - **Async-first architecture** - Non-blocking tmux and git operations
 - **Hierarchical session model** - Projects contain worktree sessions
-- **Add a project from GitHub** - Add a project by picking one of your GitHub repos, or by URL, and it's cloned in ready to go
+- **Add a hosted project** - Pick from GitHub or GitLab (including self-managed GitLab), or clone any Git URL
 - **Git worktree isolation** - Each session has its own worktree and branch
 - **Kanban board UI** - Full-screen board with sections as columns and sessions as project-coloured cards
 - **Live preview pane** - In the list views, a right-hand pane with Preview / Info / Shell tabs: Preview and Shell tail the selected session's agent and shell output as it happens, Info shows its metadata and PR detail (`Tab` cycles, `<`/`>` resizes)
@@ -25,6 +25,13 @@ A high-performance terminal UI for managing Claude coding sessions, written in R
 - **Rust/Cargo** - Required to build from source ([install via rustup](https://rustup.rs/))
 - **tmux** - Required for session management
 - **git** - For worktree operations
+- **gh or glab** - Optional, for repository discovery, hosted clone, and pull-request/merge-request integration on the selected code host
+
+Claude Commander uses one global code-host provider at a time. GitHub is the
+default; choose GitLab in Settings → Pull Requests & Sync, or set
+`code_host_provider = "gitlab"`. A self-managed GitLab can be selected with a
+validated hostname such as `gitlab_hostname = "gitlab.example.com"`. See
+[Configuration](docs/configuration.md) for the limitation and full options.
 
 ## Installation
 
@@ -210,9 +217,9 @@ Indicators are shown in priority order — for example, a running session with u
 
 A `*` after a session's title means it has pending [review comments](docs/usage.md#reviewing--commenting-on-changes) that haven't been applied to the agent yet.
 
-### PR Badges
+### Pull Request / Merge Request Badges
 
-When a session has a GitHub PR, a badge appears next to the session name. The badge color indicates the PR state:
+When a session has a GitHub pull request or GitLab merge request, a badge appears next to the session name. The badge color indicates its state:
 
 | Color | Meaning |
 |-------|---------|
@@ -268,6 +275,7 @@ The status bar surfaces the most useful actions as clickable buttons, with the h
 | palette only | Previous workspace, New workspace…, and Move project to workspace… (moves the selected project; unbound by default) |
 | `i` | Show session info in a modal — metadata, diffstat, PR details, stack chain, `g` for AI summary. Same content as the right pane's Info tab, and the only way to reach it from the board |
 | `n` | New worktree session |
+| `Shift+E` | Edit selected session (name, program, section, stack base, keep alive) |
 | `t` | New session stacked on top of the selected session's stack |
 | `N` | Add new project |
 | `c` | Checkout existing branch into a new worktree session (fetches `origin` in the background, filterable list) |
@@ -353,6 +361,10 @@ Settings → Programs targeting that server. In the Programs tab, `t` cycles whi
 backend (local or a remote server) you're editing; edits are saved to the chosen
 backend as you make them.
 
+### Editing a session
+
+Use **Edit session** in the terminal command palette (`Shift+E`), browser toolbar or session menu, or Flutter session overflow menu. Edit the name, program, section, stack base and keep-alive setting. Program changes can restart fresh immediately or wait for the next restart, leaving the current agent running. A saved change is applied by the next explicit restart, which starts fresh under the new program (no `--resume`, since the previous agent's conversation belongs to a different CLI); waking a hibernated session and re-attaching to one whose agent exited or was killed keep the current program until then. Stack-base changes update metadata and the PR target without rebasing git history.
+
 ## Web UI
 
 The server also serves a browser UI, on the same port as its API: whichever of
@@ -402,6 +414,13 @@ detail, then the live agent terminal. It ships two themes, **Mission Control**
 
 Above it, the same page bodies become a desktop layout: the fleet list beside a
 workspace whose Overview / Agent / Shell / Changes tabs switch in place.
+
+The **Edit session** dialog lets you change the name, configured program, section, stack base, and keep-alive setting. Program changes can restart immediately or wait for an explicit restart, which then starts fresh under the new program (see [Editing a session](#editing-a-session)).
+
+<p align="center">
+  <img src="docs/images/client-edit-session.png" alt="Edit session dialog with configured program aliases and session settings" width="45%">
+  <img src="docs/images/client-edit-session-warning.png" alt="Restart warning offering to restart and clear or save for the next restart" width="45%">
+</p>
 
 ![The client on the desktop: fleet list on the left, the selected session's live agent terminal on the right](docs/images/client-desktop.png)
 

@@ -10,7 +10,7 @@ import 'clone_repo_page.dart';
 /// Manages the server's registered projects (git repos). Lists each project's
 /// name + repo path; adds one by its server-side path (`addProject`), removes one
 /// (`removeProject`), scans a server-side directory for repos (`scanDirectory`),
-/// clones one from GitHub ([CloneRepoPage]), and browses a project's branches on
+/// clones one from the selected code host ([CloneRepoPage]), and browses a project's branches on
 /// demand (`listBranches`).
 ///
 /// Project paths are typed, not picked — the paths live on the server, not the
@@ -66,7 +66,7 @@ class _ProjectsPageState extends State<ProjectsPage> {
             _sheetTile(
               sheetContext,
               Icons.cloud_download_outlined,
-              'Clone from GitHub',
+              'Clone repository',
               'Pick a repo, or paste a clone URL',
               _AddSource.clone,
             ),
@@ -184,7 +184,6 @@ class _ProjectsPageState extends State<ProjectsPage> {
     if (confirmed != true) return;
     await _run(() async {
       await _store.removeProject(project.id.field0.uuid);
-      await _store.refresh();
       _snack('Project removed');
     });
   }

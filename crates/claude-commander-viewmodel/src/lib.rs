@@ -38,3 +38,5 @@ pub mod review;
 pub mod workspace;
 
 pub use query::{fuzzy_score, session_score};
+
+pub mod session_editor;

@@ -131,6 +131,16 @@ impl SessionManager {
 
     /// Get diff for a session
     pub async fn get_diff(&self, session_id: &SessionId) -> Result<Arc<DiffInfo>> {
+        self.get_diff_part(session_id, false).await
+    }
+    pub async fn get_diff_stats(&self, session_id: &SessionId) -> Result<Arc<DiffInfo>> {
+        self.get_diff_part(session_id, true).await
+    }
+    async fn get_diff_part(
+        &self,
+        session_id: &SessionId,
+        stats_only: bool,
+    ) -> Result<Arc<DiffInfo>> {
         let worktree_path = {
             let state = self.store.read().await;
             let session = state
@@ -139,6 +149,10 @@ impl SessionManager {
             session.worktree_path.clone()
         };
 
-        self.diff_cache.get_diff(session_id, &worktree_path).await
+        if stats_only {
+            self.diff_cache.get_stats(session_id, &worktree_path).await
+        } else {
+            self.diff_cache.get_diff(session_id, &worktree_path).await
+        }
     }
 }

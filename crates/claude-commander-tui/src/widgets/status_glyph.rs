@@ -24,6 +24,16 @@ pub const KEEP_ALIVE_MARKER: char = '⚓';
 /// Suffix shown on a session row whose worktree is pulling Git LFS objects.
 pub const LFS_MARKER: &str = " ⇣ LFS";
 
+/// Whether a session in `status` shows the animated spinner regardless of its
+/// agent state (Creating / Merging / Pushing). The tick loop uses this to decide
+/// whether a redraw is needed to advance the animation.
+pub fn status_spins(status: SessionStatus) -> bool {
+    matches!(
+        status,
+        SessionStatus::Creating | SessionStatus::Merging | SessionStatus::Pushing
+    )
+}
+
 /// Pick the single status glyph and colour for a worktree row.
 ///
 /// Priority (first wins):
@@ -41,10 +51,7 @@ pub fn session_status_glyph(
     agent_state: Option<AgentState>,
     unread: bool,
 ) -> Option<(String, Color)> {
-    if matches!(
-        status,
-        SessionStatus::Creating | SessionStatus::Merging | SessionStatus::Pushing
-    ) {
+    if status_spins(status) {
         let step = tick as usize / 3;
         let frame = SPINNER_FRAMES[step % SPINNER_FRAMES.len()];
         return Some((frame.to_string(), theme.status_creating));

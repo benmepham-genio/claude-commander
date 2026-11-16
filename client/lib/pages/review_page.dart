@@ -430,38 +430,107 @@ class _ReviewBodyState extends State<ReviewBody> {
     );
   }
 
+  // Expansion belongs to file identity, not a lazily mounted header's lifetime.
+  final Set<String> _expandedFiles = {};
+
+  Widget _fileHeader(rust.ReviewSnapshotDto snap, int index) {
+    final file = snap.files[index];
+    return _FileCard(
+      key: ValueKey(file.displayPath),
+      file: file,
+      index: index,
+      count: snap.files.length,
+      reviewed: _reviewed.contains(file.displayPath),
+      expanded: _expandedFiles.contains(file.displayPath),
+      onExpand: () => setState(() {
+        if (!_expandedFiles.add(file.displayPath)) {
+          _expandedFiles.remove(file.displayPath);
+        }
+      }),
+      onToggleReviewed: (_busy || _toggling.contains(file.displayPath))
+          ? null
+          : () => _toggleReviewed(file.displayPath),
+    );
+  }
+
+  List<Widget> _fileSlivers(rust.ReviewSnapshotDto snap) {
+    final slivers = <Widget>[];
+    var start = 0;
+    void collapsed(int end) {
+      if (start == end) return;
+      final first = start;
+      slivers.add(
+        SliverList.builder(
+          key: ValueKey('collapsed-$first'),
+          itemCount: end - first,
+          itemBuilder: (context, offset) => _fileHeader(snap, first + offset),
+        ),
+      );
+    }
+
+    for (var i = 0; i < snap.files.length; i++) {
+      final file = snap.files[i];
+      if (!_expandedFiles.contains(file.displayPath)) continue;
+      collapsed(i);
+      slivers.add(
+        SliverMainAxisGroup(
+          key: ValueKey('expanded-${file.displayPath}'),
+          slivers: [
+            SliverToBoxAdapter(child: _fileHeader(snap, i)),
+            SliverPadding(
+              padding: const EdgeInsets.only(bottom: 8),
+              sliver: _FileDiffBody(
+                sliver: true,
+                api: widget.api,
+                raw: snap.raw,
+                file: file,
+                onLoadImage: _loadBlob,
+                onLoadText: _loadText,
+                onAddComment: _busy ? null : _addComment,
+              ),
+            ),
+          ],
+        ),
+      );
+      start = i + 1;
+    }
+    collapsed(snap.files.length);
+    return slivers;
+  }
+
   /// The phone flow: comments, then the expandable per-file rows.
   Widget _narrowBody(BuildContext context, rust.ReviewSnapshotDto snap) {
     final t = CommanderTokens.of(context);
     return RefreshIndicator(
       onRefresh: _open,
-      child: ListView(
-        padding: const EdgeInsets.all(12),
-        children: [
-          Text('Base: ${snap.base}', style: t.meta(color: t.textFaint)),
-          const SizedBox(height: 10),
-          if (snap.comments.isNotEmpty) ...[
-            const ChromeEyebrow('Comments'),
-            ...snap.comments.map((c) => _commentCard(context, c)),
-            const SizedBox(height: 18),
-          ],
-          const ChromeEyebrow('Files changed'),
-          // One flat run, so a row's position is its index in the whole list.
-          for (final (i, f) in snap.files.indexed)
-            _FileCard(
-              api: widget.api,
-              raw: snap.raw,
-              file: f,
-              index: i,
-              count: snap.files.length,
-              reviewed: _reviewed.contains(f.displayPath),
-              onToggleReviewed: (_busy || _toggling.contains(f.displayPath))
-                  ? null
-                  : () => _toggleReviewed(f.displayPath),
-              onLoadImage: _loadBlob,
-              onLoadText: _loadText,
-              onAddComment: _busy ? null : _addComment,
+      child: CustomScrollView(
+        slivers: [
+          SliverPadding(
+            padding: const EdgeInsets.all(12),
+            sliver: SliverMainAxisGroup(
+              slivers: [
+                SliverToBoxAdapter(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(
+                        'Base: ${snap.base}',
+                        style: t.meta(color: t.textFaint),
+                      ),
+                      const SizedBox(height: 10),
+                      if (snap.comments.isNotEmpty) ...[
+                        const ChromeEyebrow('Comments'),
+                        ...snap.comments.map((c) => _commentCard(context, c)),
+                        const SizedBox(height: 18),
+                      ],
+                      const ChromeEyebrow('Files changed'),
+                    ],
+                  ),
+                ),
+                ..._fileSlivers(snap),
+              ],
             ),
+          ),
         ],
       ),
     );
@@ -590,36 +659,41 @@ class _ReviewBodyState extends State<ReviewBody> {
           ),
         ),
         Expanded(
-          child: ListView(
-            children: [
-              if (otherComments.isNotEmpty) ...[
-                const ChromeEyebrow('OTHER COMMENTS'),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  child: Column(
-                    children: otherComments
-                        .map((c) => _commentCard(context, c))
-                        .toList(),
-                  ),
+          child: CustomScrollView(
+            slivers: [
+              SliverToBoxAdapter(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (otherComments.isNotEmpty) ...[
+                      const ChromeEyebrow('OTHER COMMENTS'),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        child: Column(
+                          children: otherComments
+                              .map((c) => _commentCard(context, c))
+                              .toList(),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                    if (fileComments.isNotEmpty) ...[
+                      const ChromeEyebrow('COMMENTS'),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        child: Column(
+                          children: fileComments
+                              .map((c) => _commentCard(context, c))
+                              .toList(),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                  ],
                 ),
-                const SizedBox(height: 8),
-              ],
-              if (fileComments.isNotEmpty) ...[
-                const ChromeEyebrow('COMMENTS'),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  child: Column(
-                    children: fileComments
-                        .map((c) => _commentCard(context, c))
-                        .toList(),
-                  ),
-                ),
-                const SizedBox(height: 8),
-              ],
-              // TODO: _FileDiffBody eagerly builds every hunk of the selected
-              // file up front; move to a lazy/sliver builder if large diffs
-              // become a scroll-perf problem.
+              ),
               _FileDiffBody(
+                sliver: true,
                 api: widget.api,
                 raw: snap.raw,
                 file: file,
@@ -985,105 +1059,61 @@ class _FileRow extends StatelessWidget {
 /// slot — the two themes disagree about a row's shape, not about what hangs below
 /// one — so the expanded/collapsed state is held here and the body rendered
 /// beneath the row rather than inside it.
-class _FileCard extends StatefulWidget {
-  final CommanderApi api;
-
-  /// The snapshot's raw unified diff, laid out in the cdylib. `null` against a
-  /// server that predates the field.
-  final String? raw;
-
+class _FileCard extends StatelessWidget {
   final rust.ReviewFileDto file;
-
-  /// Position in the changed-files run: drives the row's LCARS number and which
-  /// of its corners round.
   final int index;
   final int count;
-
   final bool reviewed;
-
-  /// Toggle this file's reviewed mark; null while busy.
+  final bool expanded;
+  final VoidCallback onExpand;
   final VoidCallback? onToggleReviewed;
 
-  /// Fetch raw bytes for one side of a (binary) file: `(side, path) → bytes`.
-  final Future<Uint8List> Function(String side, String path) onLoadImage;
-
-  /// Fetch the working-tree text of a file, for context expansion.
-  final Future<String> Function(String path) onLoadText;
-
-  /// Stage a comment for a selected line range; null while busy.
-  final AddCommentFn? onAddComment;
-
   const _FileCard({
-    required this.api,
-    required this.raw,
+    super.key,
     required this.file,
     required this.index,
     required this.count,
     required this.reviewed,
+    required this.expanded,
+    required this.onExpand,
     required this.onToggleReviewed,
-    required this.onLoadImage,
-    required this.onLoadText,
-    required this.onAddComment,
   });
-
-  @override
-  State<_FileCard> createState() => _FileCardState();
-}
-
-class _FileCardState extends State<_FileCard> {
-  bool _expanded = false;
 
   @override
   Widget build(BuildContext context) {
     final t = CommanderTokens.of(context);
-    final file = widget.file;
-    final onToggleReviewed = widget.onToggleReviewed;
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          ChromeListRow(
-            ChromeListRowSpec(
-              title: file.displayPath,
-              monoTitle: true,
-              subtitle: _fileSubtitle(file),
-              tone: _statusTone(file.status),
-              glyph: _statusDot(context, file.status),
-              number: _fileNumber(widget.index),
-              position: _rowPosition(widget.index, widget.count),
-              onTap: () => setState(() => _expanded = !_expanded),
-              trailingWidget: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _fileDelta(context, file),
-                  const SizedBox(width: 4),
-                  Checkbox(
-                    visualDensity: VisualDensity.compact,
-                    value: widget.reviewed,
-                    onChanged: onToggleReviewed == null
-                        ? null
-                        : (_) => onToggleReviewed(),
-                  ),
-                  Icon(
-                    _expanded ? Icons.expand_less : Icons.expand_more,
-                    size: 18,
-                    color: t.textMuted,
-                  ),
-                ],
+      child: ChromeListRow(
+        ChromeListRowSpec(
+          title: file.displayPath,
+          monoTitle: true,
+          subtitle: _fileSubtitle(file),
+          tone: _statusTone(file.status),
+          glyph: _statusDot(context, file.status),
+          number: _fileNumber(index),
+          position: _rowPosition(index, count),
+          onTap: onExpand,
+          trailingWidget: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _fileDelta(context, file),
+              const SizedBox(width: 4),
+              Checkbox(
+                visualDensity: VisualDensity.compact,
+                value: reviewed,
+                onChanged: onToggleReviewed == null
+                    ? null
+                    : (_) => onToggleReviewed!(),
               ),
-            ),
+              Icon(
+                expanded ? Icons.expand_less : Icons.expand_more,
+                size: 18,
+                color: t.textMuted,
+              ),
+            ],
           ),
-          if (_expanded)
-            _FileDiffBody(
-              api: widget.api,
-              raw: widget.raw,
-              file: file,
-              onLoadImage: widget.onLoadImage,
-              onLoadText: widget.onLoadText,
-              onAddComment: widget.onAddComment,
-            ),
-        ],
+        ),
       ),
     );
   }
@@ -1097,6 +1127,7 @@ class _FileDiffBody extends StatelessWidget {
   final rust.ReviewFileDto file;
   final bool sideBySide;
   final bool dualGutter;
+  final bool sliver;
   final Future<Uint8List> Function(String side, String path) onLoadImage;
   final Future<String> Function(String path) onLoadText;
   final AddCommentFn? onAddComment;
@@ -1110,6 +1141,7 @@ class _FileDiffBody extends StatelessWidget {
     required this.onAddComment,
     this.sideBySide = false,
     this.dualGutter = false,
+    this.sliver = false,
   });
 
   /// Which side's blob to render: deletions only have an old side; everything
@@ -1124,7 +1156,7 @@ class _FileDiffBody extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = CommanderTokens.of(context);
     if (file.isBinary) {
-      return Padding(
+      final body = Padding(
         padding: const EdgeInsets.all(16),
         child: _isImage
             ? _BinaryImageView(
@@ -1140,6 +1172,7 @@ class _FileDiffBody extends StatelessWidget {
                 style: t.meta(color: t.textFaint),
               ),
       );
+      return sliver ? SliverToBoxAdapter(child: body) : body;
     }
     return _LaidOutDiff(
       api: api,
@@ -1147,6 +1180,7 @@ class _FileDiffBody extends StatelessWidget {
       file: file,
       sideBySide: sideBySide,
       dualGutter: dualGutter,
+      sliver: sliver,
       onLoadText: onLoadText,
       onAddComment: onAddComment,
     );
@@ -1165,6 +1199,7 @@ class _LaidOutDiff extends StatefulWidget {
   final rust.ReviewFileDto file;
   final bool sideBySide;
   final bool dualGutter;
+  final bool sliver;
   final Future<String> Function(String path) onLoadText;
   final AddCommentFn? onAddComment;
 
@@ -1174,6 +1209,7 @@ class _LaidOutDiff extends StatefulWidget {
     required this.file,
     required this.sideBySide,
     required this.dualGutter,
+    this.sliver = false,
     required this.onLoadText,
     required this.onAddComment,
   });
@@ -1286,7 +1322,7 @@ class _LaidOutDiffState extends State<_LaidOutDiff> {
     final error = _error;
     if (error != null) {
       final t = CommanderTokens.of(context);
-      return Padding(
+      final body = Padding(
         padding: const EdgeInsets.all(16),
         child: Text(
           'Could not lay out this diff: ${errorText(error, capitalize: false)}',
@@ -1295,19 +1331,22 @@ class _LaidOutDiffState extends State<_LaidOutDiff> {
           style: t.meta(color: t.danger),
         ),
       );
+      return widget.sliver ? SliverToBoxAdapter(child: body) : body;
     }
     final layout = _layout;
     if (layout == null) {
-      return const Padding(
+      const body = Padding(
         padding: EdgeInsets.all(24),
         child: Center(child: CircularProgressIndicator()),
       );
+      return widget.sliver ? SliverToBoxAdapter(child: body) : body;
     }
     return DiffView(
       file: widget.file.displayPath,
       layout: layout,
       sideBySide: widget.sideBySide,
       dualGutter: widget.dualGutter,
+      sliver: widget.sliver,
       onAddComment: widget.onAddComment,
       onExpand: _expand,
     );

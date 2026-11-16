@@ -21,7 +21,8 @@ use axum::{
     },
     response::Response,
 };
-use claude_commander_core::tmux::HeadlessAttach;
+use claude_commander_core::backend::AttachEnd;
+use claude_commander_core::tmux::{ClientTail, HeadlessAttach};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
@@ -230,6 +231,12 @@ async fn pump(mut socket: WebSocket, bridge: HeadlessAttach) -> DetachReason {
     // client's `refresh` frame, which is how a client that drew over its own
     // terminal (the TUI's in-session switcher) gets the covered region back.
     let refresh = bridge.refresh_handle();
+    // The PTY closing doesn't say why the attach client went: another viewer's
+    // `attach-session -d` displacing it looks exactly like its session dying,
+    // and a client told `session_ended` attaches again, which would displace
+    // that viewer in turn. The client's own exit line does say, so keep the
+    // tail of its output.
+    let mut tail = ClientTail::default();
     let (mut pty_reader, mut pty_writer, resize, mut child) = bridge.split();
     let mut pty_buf = [0u8; 4096];
     let mut ping = tokio::time::interval(ATTACH_PING_INTERVAL);
@@ -246,8 +253,9 @@ async fn pump(mut socket: WebSocket, bridge: HeadlessAttach) -> DetachReason {
             // a slow client pauses this branch, which pauses PTY reads, so memory
             // never grows unbounded (no intermediate channel).
             read = pty_reader.read(&mut pty_buf) => match read {
-                Ok(0) => break DetachReason::SessionEnded,
+                Ok(0) => break detach_reason(&tail),
                 Ok(n) => {
+                    tail.record(&pty_buf[..n]);
                     if socket
                         .send(Message::Binary(pty_buf[..n].to_vec().into()))
                         .await
@@ -262,7 +270,7 @@ async fn pump(mut socket: WebSocket, bridge: HeadlessAttach) -> DetachReason {
                     if e.raw_os_error() != Some(5) {
                         warn!("WS PTY read error: {e}");
                     }
-                    break DetachReason::SessionEnded;
+                    break detach_reason(&tail);
                 }
             },
 
@@ -272,10 +280,12 @@ async fn pump(mut socket: WebSocket, bridge: HeadlessAttach) -> DetachReason {
                 missed_pongs = 0;
                 match frame {
                     Some(Ok(Message::Binary(bytes))) => {
-                        if pty_writer.write_all(&bytes).await.is_err() {
-                            break DetachReason::SessionEnded;
+                        // A failed write means the client is going; don't end
+                        // here, before the PTY branch has read its exit line —
+                        // that branch reaches EOF and reports why.
+                        if pty_writer.write_all(&bytes).await.is_ok() {
+                            let _ = pty_writer.flush().await;
                         }
-                        let _ = pty_writer.flush().await;
                     }
                     Some(Ok(Message::Text(text))) => match ClientControl::from_text(&text) {
                         Ok(ClientControl::Resize { cols, rows }) => resize.resize(cols, rows),
@@ -316,6 +326,17 @@ async fn pump(mut socket: WebSocket, bridge: HeadlessAttach) -> DetachReason {
     let _ = send_control(&mut socket, &ServerControl::Detached { reason }).await;
     let _ = socket.send(Message::Close(None)).await;
     reason
+}
+
+/// Why the attach ended once its `tmux attach-session` client has gone: the
+/// session was destroyed, or the client was detached (displaced by another
+/// viewer, or tmux's detach key) while it lives on.
+fn detach_reason(tail: &ClientTail) -> DetachReason {
+    if tail.end() == AttachEnd::SessionEnded {
+        DetachReason::SessionEnded
+    } else {
+        DetachReason::ClientDetached
+    }
 }
 
 /// Read frames until the next control (text) frame arrives, parsing it. Binary

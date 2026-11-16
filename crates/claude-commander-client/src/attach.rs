@@ -64,13 +64,14 @@ const READ_CHUNK: usize = 8 * 1024;
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// Why an [`AttachConnection`] ended, so a driving loop can decide whether to
-/// auto-restart, return to the tree, etc. Mirrors core's `AttachEnd`; the remote
+/// re-attach, return to the tree, etc. Mirrors core's `AttachEnd`; the remote
 /// adapter maps between them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachEnd {
-    /// The pane's process/session ended (PTY EOF or the child exited non-clean).
+    /// The tmux session was destroyed (the server sent `session_ended`).
     SessionEnded,
-    /// A clean detach — the attach child was killed but the session lives on.
+    /// The attach ended while the session lives on: a requested detach, or
+    /// another viewer taking the pane over (`client_detached`).
     Detached,
     /// The transport failed.
     Error(String),
@@ -501,6 +502,9 @@ fn end_for(reason: DetachReason) -> AttachEnd {
     match reason {
         DetachReason::ClientRequest => AttachEnd::Detached,
         DetachReason::SessionEnded => AttachEnd::SessionEnded,
+        // Displaced by another viewer, or tmux's detach key: the session is
+        // alive, so a quiet detach — never a restart, never a reconnect.
+        DetachReason::ClientDetached => AttachEnd::Detached,
         DetachReason::Transport => transport_lost(),
     }
 }
@@ -536,6 +540,7 @@ mod tests {
     fn detach_reason_maps_to_attach_end() {
         assert_eq!(end_for(DetachReason::ClientRequest), AttachEnd::Detached);
         assert_eq!(end_for(DetachReason::SessionEnded), AttachEnd::SessionEnded);
+        assert_eq!(end_for(DetachReason::ClientDetached), AttachEnd::Detached);
         // A server-side transport detach surfaces as an error end.
         assert!(matches!(
             end_for(DetachReason::Transport),

@@ -307,6 +307,12 @@ impl App {
         }
 
         match &self.ui_state.modal {
+            Modal::EditSession(editor) => {
+                super::edit_session::render(frame, area, editor, false, &self.theme)
+            }
+            Modal::EditSessionRestart(editor) => {
+                super::edit_session::render(frame, area, editor, true, &self.theme)
+            }
             Modal::None => {}
 
             // Full-screen takeovers are rendered directly in `render()`, not here.
@@ -859,7 +865,7 @@ impl App {
         lines.push(Line::from(""));
         lines.push(Line::from("Clone Repository:"));
         lines.push(Line::from(format!(
-            "  {:<width$}Re-list the host's GitHub repos (the listing can be slow)",
+            "  {:<width$}Re-list the selected code host's repos (the listing can be slow)",
             "Ctrl+R",
             width = key_col_width,
         )));
@@ -1280,11 +1286,26 @@ impl App {
             PaletteMode::WorkspacePicker => " Switch Workspace — or type a new name ",
             PaletteMode::MoveProjectPicker { .. } => " Move Project to Workspace ",
             // The fetch state lives in the title (as the Checkout modal
-            // does with "fetching origin…") so a slow or failed `gh`
+            // does with "fetching origin…") so a slow or failed provider
             // listing is visible rather than reading as an empty account.
             // The failure's detail goes to the status bar.
-            PaletteMode::GithubRepoPicker => match self.ui_state.repo_picker.fetch {
-                RepoFetch::Loading => " Clone Repository — listing GitHub repos… ",
+            PaletteMode::RepositoryPicker
+                if self.ui_state.repo_picker.host.provider
+                    == claude_commander_protocol::hosting::CodeHostProvider::Gitlab =>
+            {
+                match self.ui_state.repo_picker.fetch {
+                    RepoFetch::Loading => " Clone Repository — listing GitLab projects… ",
+                    RepoFetch::Ready if self.ui_state.repo_picker.repos.is_empty() => {
+                        " Clone Repository — no GitLab projects; type a URL "
+                    }
+                    RepoFetch::Ready => " Clone Repository — Enter a GitLab project or URL ",
+                    RepoFetch::Failed(_) => {
+                        " Clone Repository — GitLab list unavailable; type a URL "
+                    }
+                }
+            }
+            PaletteMode::RepositoryPicker => match self.ui_state.repo_picker.fetch {
+                RepoFetch::Loading => " Clone Repository — listing hosted repositories… ",
                 RepoFetch::Ready => " Clone Repository — Enter a repo, or type a URL ",
                 RepoFetch::Failed(_) => " Clone Repository — no repo list; type a URL ",
             },
@@ -1432,7 +1453,7 @@ impl App {
                 }
                 QuickSwitchItem::SectionMove { label, .. }
                 | QuickSwitchItem::RemoteServerRemove { label, .. }
-                | QuickSwitchItem::GithubRepo { label, .. }
+                | QuickSwitchItem::HostedRepository { label, .. }
                 | QuickSwitchItem::BaseChange { label, .. }
                 | QuickSwitchItem::ProgramChange { label, .. }
                 | QuickSwitchItem::Workspace { label, .. }

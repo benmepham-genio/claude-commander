@@ -50,8 +50,8 @@ pub(crate) enum Bounded {
 ///
 /// The `Err` case is *only* a failure to spawn, which is why it is an
 /// [`std::io::Error`] rather than one of our own: the two callers disagree about
-/// what an unspawnable program means (a missing `gh` is
-/// [`GhUnavailable`](crate::error::GitError::GhUnavailable), an unspawnable
+/// what an unspawnable program means (a missing hosting CLI is
+/// [`CodeHostCliUnavailable`](crate::error::GitError::CodeHostCliUnavailable), an unspawnable
 /// `git` is an operation failure), and that judgement is theirs to make.
 pub(crate) async fn run_bounded(
     mut cmd: Command,

@@ -12,6 +12,8 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 
+use claude_commander_protocol::hosting::{CodeHostProvider, validate_gitlab_hostname};
+
 use crate::agent::AgentKind;
 use crate::config::keybindings::KeyBindings;
 use crate::config::migrations;
@@ -102,6 +104,14 @@ impl std::fmt::Debug for RemoteServerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Provider used for repository discovery, hosted clones, and PR/MR integration.
+    #[serde(default)]
+    pub code_host_provider: CodeHostProvider,
+
+    /// Optional self-managed GitLab hostname. Omitted means glab's configured default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gitlab_hostname: Option<String>,
+
     /// Legacy default program setting. Config files are migrated to put this
     /// command first in `programs`; runtime code should use
     /// [`Config::default_session_program`] instead.
@@ -146,8 +156,8 @@ pub struct Config {
     #[serde(default = "default_clone_timeout_secs")]
     pub clone_timeout_secs: u64,
 
-    /// Timeout in seconds for listing GitHub repos in the clone picker
-    /// (`gh api --paginate`) before the process group is killed. Default 90 —
+    /// Timeout in seconds for listing hosted repos in the clone picker before
+    /// the provider CLI process group is killed. Default 90 —
     /// see [`DEFAULT_REPO_LIST_TIMEOUT_SECS`] for why it is generous rather than
     /// snappy, and note that raising it past
     /// [`REPO_LIST_HTTP_TIMEOUT_SECS`] hands the race back to a remote client's
@@ -188,7 +198,7 @@ pub struct Config {
     /// Shell program for shell sessions
     pub shell_program: String,
 
-    /// Interval in seconds between GitHub PR checks (0 = disabled)
+    /// Interval in seconds between pull-request / merge-request checks (0 = disabled)
     pub pr_check_interval_secs: u64,
 
     /// Enable periodic fast-forward of each project's main branch from origin.
@@ -609,6 +619,8 @@ impl Default for TelemetryConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            code_host_provider: CodeHostProvider::default(),
+            gitlab_hostname: None,
             default_program: None,
             programs: Vec::new(),
             branch_prefix: String::new(),
@@ -757,9 +769,22 @@ impl Config {
             .extract()
             .map_err(|e| ConfigError::LoadFailed(e.to_string()))?;
 
+        config.validate_code_host()?;
         config.validate_remote_servers()?;
 
         Ok(config)
+    }
+
+    /// Validate the optional value passed to `glab --hostname`/`GITLAB_HOST`.
+    pub fn validate_code_host(&self) -> Result<()> {
+        if let Some(hostname) = self.gitlab_hostname.as_deref() {
+            validate_gitlab_hostname(hostname).map_err(|reason| ConfigError::InvalidValue {
+                key: "gitlab_hostname".to_string(),
+                // Do not echo the invalid value: it may contain credentials.
+                reason: reason.to_string(),
+            })?;
+        }
+        Ok(())
     }
 
     /// Validate the configured [`remote_servers`](Self::remote_servers): names
@@ -1823,6 +1848,47 @@ show_session_program = false
             claude_commander_protocol::github::DEFAULT_REPO_LIST_TIMEOUT_SECS
         );
         assert!(config.projects_dir.is_none());
+    }
+
+    #[test]
+    fn code_host_provider_defaults_to_github_for_existing_configs() {
+        let config: Config = toml::from_str("branch_prefix = \"cc/\"\n").unwrap();
+        assert_eq!(
+            config.code_host_provider,
+            claude_commander_protocol::hosting::CodeHostProvider::Github
+        );
+        assert!(config.gitlab_hostname.is_none());
+    }
+
+    #[test]
+    fn code_host_provider_and_gitlab_hostname_load_from_toml() {
+        let config: Config = toml::from_str(
+            "code_host_provider = \"gitlab\"\ngitlab_hostname = \"gitlab.example.com:8443\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.code_host_provider,
+            claude_commander_protocol::hosting::CodeHostProvider::Gitlab
+        );
+        assert_eq!(
+            config.gitlab_hostname.as_deref(),
+            Some("gitlab.example.com:8443")
+        );
+    }
+
+    #[test]
+    fn invalid_gitlab_hostname_is_rejected_by_config_loading() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "code_host_provider = \"gitlab\"\ngitlab_hostname = \"https://user:secret@gitlab.example.com/group\"\n",
+        )
+        .unwrap();
+        let err = Config::load_from_path(&path).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("gitlab_hostname"), "{message}");
+        assert!(!message.contains("secret"), "credential leaked: {message}");
     }
 
     /// `agent_temp_dir` was once `paste_images_dir` (it now also holds the

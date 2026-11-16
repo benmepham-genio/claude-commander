@@ -147,6 +147,10 @@ impl App {
     /// session) and project-shell attach both fall out of the sidebar case
     /// unchanged.
     pub(super) fn update_selection(&mut self) {
+        let previous = (
+            self.ui_state.selected_session_id,
+            self.ui_state.selected_project_id,
+        );
         // Read the raw (session, project) ids from whichever view is active.
         let (session, project) = if self.ui_state.view_mode.is_board() {
             match self.ui_state.board_state.selected() {
@@ -202,6 +206,21 @@ impl App {
             }
         }
 
+        if previous
+            != (
+                self.ui_state.selected_session_id,
+                self.ui_state.selected_project_id,
+            )
+        {
+            if let Some(task) = self.ui_state.preview_task.take() {
+                task.abort();
+            }
+            self.ui_state.preview_update_spawned_at = None;
+            self.ui_state.preview_content.clear();
+            self.ui_state.shell_content.clear();
+            self.ui_state.diff_info =
+                std::sync::Arc::new(claude_commander_core::git::DiffInfo::empty());
+        }
         // Fetch info-modal data if applicable (gated on the Info modal being
         // open — `spawn_info_fetch` is a no-op otherwise).
         self.spawn_info_fetch();

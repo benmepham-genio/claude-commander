@@ -42,6 +42,89 @@ void main() {
 
   CommanderStore build() => CommanderStore(api: api, config: testConfig);
 
+  test('snapshot indexes reuse reads and discard removed membership', () async {
+    final session = sessionInfo(
+      id: id,
+      projectId: 'aaaaaaaa-2222-3333-4444-555555555555',
+    );
+    api.listSessionsResponse = [session];
+    api.projectsResponse = [projectInfo(workspace: 'work')];
+    final store = build();
+    addTearDown(store.dispose);
+    await store.connect();
+    final grouped = store.sessionsByProject;
+    final members = store.sessionsIn('work');
+    expect(identical(grouped, store.sessionsByProject), isTrue);
+    expect(identical(members, store.sessionsIn('work')), isTrue);
+    expect(store.sessionById(id), session);
+    expect(members, [session]);
+    expect(store.sessionsIn(null), isEmpty);
+    api.listSessionsResponse = [];
+    api.projectsResponse = [projectInfo(workspace: null)];
+    await store.refresh();
+    expect(store.sessionById(id), isNull);
+    expect(store.sessionsIn('work'), isEmpty);
+    expect(store.sessionsByProject.single.sessions, isEmpty);
+    expect(identical(grouped, store.sessionsByProject), isFalse);
+  });
+
+  test('timed-out clone waits release their subscriptions', () async {
+    final store = build();
+    addTearDown(store.dispose);
+    for (var i = 0; i < 3; i++) {
+      await store.waitForChange(const Duration(milliseconds: 1));
+      expect(store.hasPendingChangeWaiters, isFalse);
+    }
+  });
+
+  test('clone tracking wakes on a server invalidation', () async {
+    final store = build();
+    addTearDown(store.dispose);
+    await store.connect();
+    final wake = store.waitForChange(const Duration(seconds: 30));
+    api.emitChange();
+    await wake.timeout(const Duration(seconds: 1));
+  });
+
+  test(
+    'superseded refresh failures cannot overwrite a reconnected store',
+    () async {
+      final store = build();
+      addTearDown(store.dispose);
+      await store.connect();
+      final oldHandle = store.handle!;
+      final oldGate = Completer<void>();
+      final newGate = Completer<void>();
+      addTearDown(() {
+        if (!newGate.isCompleted) newGate.complete();
+      });
+      api.snapshotGates[oldHandle] = oldGate;
+      api.snapshotErrors[oldHandle] = StateError('old server');
+      final oldRefresh = store.refresh();
+      await Future<void>.delayed(Duration.zero);
+      await store.reconnect(otherConfig);
+      api.snapshotGates[store.handle!] = newGate;
+      oldGate.complete();
+      await oldRefresh;
+      expect(store.error, isNull);
+      newGate.complete();
+      await Future<void>.delayed(Duration.zero);
+      expect(store.config.baseUrl, otherConfig.baseUrl);
+    },
+  );
+
+  test(
+    'a successful mutation refreshes without waiting for the change feed',
+    () async {
+      final store = build();
+      addTearDown(store.dispose);
+      await store.connect();
+      final before = api.countOf('snapshot');
+      await store.renameSession(id, 'new name');
+      expect(api.countOf('snapshot'), greaterThan(before));
+    },
+  );
+
   test('a superseded in-flight connect releases its handle (no leak)', () async {
     final store = build();
     addTearDown(store.dispose);

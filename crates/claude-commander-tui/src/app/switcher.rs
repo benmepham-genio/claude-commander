@@ -31,8 +31,12 @@
 //! navigation works regardless, so that trade isn't worth making.
 
 use crossterm::event::KeyEventKind;
-use ratatui::{Terminal, TerminalOptions, Viewport, backend::CrosstermBackend, layout::Rect};
-use std::io::{Stdout, Write};
+use ratatui::{
+    Terminal, TerminalOptions, Viewport,
+    backend::{Backend, CrosstermBackend},
+    layout::Rect,
+};
+use std::io::Write;
 use tracing::{debug, info, warn};
 
 use super::*;
@@ -41,7 +45,7 @@ use claude_commander_core::tmux::{AttachConfig, AttachOutcome, AttachResult, Att
 
 /// How the palette overlay closed.
 #[derive(Debug)]
-enum OverlayExit {
+pub(super) enum OverlayExit {
     /// Esc, or an activation that left nothing on screen — put the user straight
     /// back in the pane they came from.
     ///
@@ -201,9 +205,28 @@ impl App {
     /// [`Self::handle_input`], so with `Modal::QuickSwitch` open the palette's
     /// own handling — fuzzy filtering, navigation, Tab-completion, wheel and
     /// double-click — applies unchanged; there is no second key map to drift.
-    async fn switcher_event_loop(
+    ///
+    /// Background results are not applied under the palette, but they are not
+    /// dropped either: each is the only report of its task, and some clear an
+    /// in-flight flag (`lfs_pull_in_flight`, `reviewed_poll_in_flight`) that
+    /// nothing else resets. They are handed back to the event queue on exit, so
+    /// the main loop applies them once the attach ends.
+    pub(super) async fn switcher_event_loop<B: Backend>(
         &mut self,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+        terminal: &mut Terminal<B>,
+    ) -> OverlayExit {
+        let mut deferred = Vec::new();
+        let exit = self
+            .switcher_event_loop_inner(terminal, &mut deferred)
+            .await;
+        self.event_loop.requeue(deferred);
+        exit
+    }
+
+    async fn switcher_event_loop_inner<B: Backend>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+        deferred: &mut Vec<AppEvent>,
     ) -> OverlayExit {
         loop {
             if let Err(e) = terminal.draw(|f| self.render_switcher_overlay(f)) {
@@ -226,9 +249,13 @@ impl App {
                 AppEvent::Input(InputEvent::Key(k)) if k.kind != KeyEventKind::Press => continue,
                 AppEvent::Input(input) => self.handle_input(input).await,
                 // The tree isn't visible under the palette and the pane is frozen
-                // anyway, so background refreshes can wait until we resume; only
-                // the palette's own state matters here.
-                AppEvent::StateUpdate(_) => continue,
+                // anyway, so background results can wait until we resume; only
+                // the palette's own state matters here. Hold them for the main
+                // loop rather than dropping them (see `switcher_event_loop`).
+                update @ AppEvent::StateUpdate(_) => {
+                    deferred.push(update);
+                    continue;
+                }
                 // A tick redraws (top of the loop) and advances the animation
                 // clock — the status glyphs include a spinner, which would
                 // otherwise sit frozen on whatever frame the TUI last drew.

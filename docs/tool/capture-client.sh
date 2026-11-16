@@ -5,7 +5,7 @@
 # against a hermetic server seeded with the demo workspace in fixture.sh.
 #
 # Run from inside the client nix shell, which is where flutter lives:
-#   nix develop .#client -c docs/tool/capture-client.sh
+#   nix develop .#client -c docs/tool/capture-client.sh [edit]
 #
 # Headless by default when xvfb-run is available (the app never steals the
 # desktop); force a real window with CC_NO_XVFB=1.
@@ -17,6 +17,11 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fixture.sh"
 
 CLIENT_DIR="$CC_REPO_ROOT/client"
+case "${1:-all}" in
+  all) CC_SHOT_EDIT_ONLY=false ;;
+  edit) CC_SHOT_EDIT_ONLY=true ;;
+  *) echo "usage: capture-client.sh [edit]" >&2; exit 2 ;;
+esac
 
 for tool in flutter cargo git tmux python3 curl; do
   command -v "$tool" >/dev/null 2>&1 || {
@@ -66,6 +71,7 @@ echo "screenshots: driving the Flutter app…"
 (cd "$CLIENT_DIR" && "${runner[@]}" flutter test integration_test/screenshots_test.dart -d linux \
   --dart-define=CC_E2E_BASE_URL="$CC_BASE_URL" \
   --dart-define=CC_E2E_TOKEN="$CC_TOKEN" \
+  --dart-define=CC_SHOT_EDIT_ONLY="$CC_SHOT_EDIT_ONLY" \
   --dart-define=CC_SHOT_DIR="$SHOT_DIR")
 
 shopt -s nullglob

@@ -34,6 +34,11 @@ pub struct StateStore {
     state: Arc<RwLock<AppState>>,
     /// Modification time of the state file at last read/write (for change detection)
     last_mtime: Arc<RwLock<Option<SystemTime>>>,
+    /// [`AppState::client_visible`] of the cached `state`, kept beside it so
+    /// [`Self::install`] compares against it instead of re-serialising the
+    /// cache under its write lock. `None` = not known yet (computed on demand);
+    /// only ever touched while holding `state`'s write lock.
+    visible: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
     /// Monotonic change counter, bumped after every successful mutation (and on
     /// a reload that picked up an external change). Consumers subscribe via
     /// [`Self::subscribe`] and re-read state on each bump — this is the local
@@ -64,6 +69,7 @@ impl StateStore {
             lock_path,
             state: Arc::new(RwLock::new(app_state)),
             last_mtime: Arc::new(RwLock::new(mtime)),
+            visible: Arc::default(),
             generation: Arc::new(watch::Sender::new(0)),
         })
     }
@@ -76,6 +82,7 @@ impl StateStore {
             lock_path,
             state: Arc::new(RwLock::new(app_state)),
             last_mtime: Arc::new(RwLock::new(None)),
+            visible: Arc::default(),
             generation: Arc::new(watch::Sender::new(0)),
         }
     }
@@ -96,7 +103,10 @@ impl StateStore {
         self.generation.subscribe()
     }
 
-    /// The current change generation. Bumped on every persisted mutation.
+    /// The current change generation. Bumped on every persisted mutation, on a
+    /// reload that picked up an external `state.json` change, and on every
+    /// [`notify_change`](Self::notify_change) — which includes every committed
+    /// config change, since `config.toml` is a separate store.
     pub fn generation(&self) -> u64 {
         *self.generation.borrow()
     }
@@ -106,12 +116,15 @@ impl StateStore {
         self.generation.send_modify(|g| *g += 1);
     }
 
-    /// Wake the change-feed without mutating persisted state. Used by
-    /// service-owned background loops (agent-state polling, project pulls) to
-    /// signal that *observable* state changed — e.g. an agent flipped
-    /// Working↔Idle, or a project-pull outcome updated — even though nothing in
-    /// `state.json` was written. Consumers re-read the relevant snapshot on the
-    /// bump, exactly as they do after a real mutation.
+    /// Wake the change-feed without mutating persisted state. Used to signal
+    /// that *observable* state changed even though nothing in `state.json` was
+    /// written: by service-owned background loops (agent-state polling,
+    /// project pulls) when e.g. an agent flipped Working↔Idle or a
+    /// project-pull outcome updated; by clone jobs as they progress; and by
+    /// the config-change listener `CommanderService::new` registers on its
+    /// `ConfigStore`, so a committed config edit or a hot-reloaded hand edit
+    /// wakes clients. Consumers re-read the relevant snapshot on the bump,
+    /// exactly as they do after a real mutation.
     pub fn notify_change(&self) {
         self.bump_generation();
     }
@@ -183,6 +196,8 @@ impl StateStore {
         // fine to skip.
         if let Ok(mut guard) = self.state.try_write() {
             guard.install_id = Some(effective.clone());
+            // The cached view no longer matches; recompute it on next install.
+            *lock_visible(&self.visible) = None;
         }
         Ok(effective)
         // _lock dropped here → flock released
@@ -192,47 +207,16 @@ impl StateStore {
     ///
     /// Acquires an exclusive file lock, re-reads the current state from disk
     /// (to pick up changes from other instances), applies the closure, writes
-    /// back atomically, and updates the in-memory cache.
+    /// back atomically if anything changed, and updates the in-memory cache.
+    /// The change-feed is woken only when the *client-visible* state changed
+    /// ([`AppState::client_visible`]) — a write that only advances bookkeeping
+    /// such as `pr_checked_at` persists silently.
     pub async fn mutate<F, R>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&mut AppState) -> R + Send + 'static,
         R: Send + 'static,
     {
-        let state_path = self.state_path.clone();
-        let lock_path = self.lock_path.clone();
-
-        // Run the entire lock-read-modify-write cycle on a blocking thread
-        // because flock() is a blocking syscall
-        let (result, new_state, mtime) = tokio::task::spawn_blocking(move || {
-            let lock_file = open_lock_file(&lock_path)?;
-            let _lock = Flock::lock(lock_file, FlockArg::LockExclusive).map_err(|(_, e)| {
-                crate::error::Error::Config(ConfigError::SaveFailed(format!(
-                    "Failed to acquire file lock: {}",
-                    e
-                )))
-            })?;
-
-            let mut disk_state = read_state_from_disk(&state_path)?;
-            let result = f(&mut disk_state);
-            disk_state.version = env!("CARGO_PKG_VERSION").to_string();
-            atomic_write(&state_path, &disk_state)?;
-
-            let mtime = std::fs::metadata(&state_path)
-                .and_then(|m| m.modified())
-                .ok();
-
-            // _lock dropped here → flock released
-            Ok::<_, crate::error::Error>((result, disk_state, mtime))
-        })
-        .await
-        .map_err(|e| ConfigError::SaveFailed(format!("Blocking task panicked: {}", e)))??;
-
-        // Update in-memory cache
-        *self.state.write().await = new_state;
-        *self.last_mtime.write().await = mtime;
-        self.bump_generation();
-
-        Ok(result)
+        self.try_mutate(move |state| Ok(f(state))).await
     }
 
     /// Apply a fallible mutation to the persisted state.
@@ -247,7 +231,9 @@ impl StateStore {
         let state_path = self.state_path.clone();
         let lock_path = self.lock_path.clone();
 
-        let (result, new_state, mtime) =
+        // Run the entire lock-read-modify-write cycle on a blocking thread
+        // because flock() is a blocking syscall
+        let (result, loaded, created) =
             tokio::task::spawn_blocking(move || -> std::result::Result<_, crate::error::Error> {
                 let lock_file = open_lock_file(&lock_path)?;
                 let _lock = Flock::lock(lock_file, FlockArg::LockExclusive).map_err(|(_, e)| {
@@ -260,30 +246,37 @@ impl StateStore {
                 let mut disk_state = read_state_from_disk(&state_path)?;
 
                 // Apply the closure — if it fails, bail without writing
+                let before = serde_json::to_vec(&disk_state).map_err(save_failed)?;
                 let result = f(&mut disk_state)?;
 
                 disk_state.version = env!("CARGO_PKG_VERSION").to_string();
-                atomic_write(&state_path, &disk_state)?;
+                let created = !state_path.exists();
+                if created || before != serde_json::to_vec(&disk_state).map_err(save_failed)? {
+                    atomic_write(&state_path, &disk_state)?;
+                }
 
-                let mtime = std::fs::metadata(&state_path)
-                    .and_then(|m| m.modified())
-                    .ok();
-
-                Ok((result, disk_state, mtime))
+                let loaded = Loaded::new(disk_state, &state_path).map_err(save_failed)?;
+                // _lock dropped here → flock released
+                Ok((result, loaded, created))
             })
             .await
             .map_err(|e| ConfigError::SaveFailed(format!("Blocking task panicked: {}", e)))??;
 
-        *self.state.write().await = new_state;
-        *self.last_mtime.write().await = mtime;
-        self.bump_generation();
+        // Creating the file is itself news to subscribers, even if the state
+        // in it matches the cache.
+        if self.install(loaded).await.map_err(save_failed)? || created {
+            self.bump_generation();
+        }
 
         Ok(result)
     }
 
     /// Check if the on-disk state has changed and reload if so.
     ///
-    /// Returns `true` if the in-memory state was updated.
+    /// Any change on disk replaces the in-memory cache, but the change-feed is
+    /// woken — and `true` returned — only when the client-visible state changed
+    /// ([`AppState::client_visible`]). So another instance's write that only
+    /// advanced `pr_checked_at` is absorbed silently.
     pub async fn reload_if_changed(&self) -> Result<bool> {
         let current_mtime = tokio::fs::metadata(&self.state_path)
             .await
@@ -301,7 +294,7 @@ impl StateStore {
         let state_path = self.state_path.clone();
         let lock_path = self.lock_path.clone();
 
-        let (new_state, mtime) = tokio::task::spawn_blocking(move || {
+        let loaded = tokio::task::spawn_blocking(move || {
             let lock_file = open_lock_file(&lock_path)?;
             let _lock = Flock::lock(lock_file, FlockArg::LockShared).map_err(|(_, e)| {
                 crate::error::Error::Config(ConfigError::LoadFailed(format!(
@@ -311,24 +304,80 @@ impl StateStore {
             })?;
 
             let state = read_state_from_disk(&state_path)?;
-
-            let mtime = std::fs::metadata(&state_path)
-                .and_then(|m| m.modified())
-                .ok();
-
-            Ok::<_, crate::error::Error>((state, mtime))
+            Ok::<_, crate::error::Error>(Loaded::new(state, &state_path).map_err(load_failed)?)
         })
         .await
         .map_err(|e| ConfigError::LoadFailed(format!("Blocking task panicked: {}", e)))??;
 
-        *self.state.write().await = new_state;
-        *self.last_mtime.write().await = mtime;
         // An external change was picked up — wake change-feed subscribers so the
         // TUI re-renders on another instance's mutation, not just our own.
-        self.bump_generation();
-
-        Ok(true)
+        let visible_change = self.install(loaded).await.map_err(load_failed)?;
+        if visible_change {
+            self.bump_generation();
+        }
+        Ok(visible_change)
     }
+
+    /// Replace the in-memory cache with state just read from (or written to)
+    /// disk, returning whether its client-visible view differs from what the
+    /// cache held. The comparison runs under the cache's write lock, against
+    /// the value actually being replaced, so a concurrent install cannot make
+    /// it compare against a stale view and miss a change. The cache's own view
+    /// is the one stored by the previous install, so nothing is serialised
+    /// under the lock except on the first install.
+    async fn install(&self, loaded: Loaded) -> serde_json::Result<bool> {
+        let changed = {
+            let mut cache = self.state.write().await;
+            let mut visible = lock_visible(&self.visible);
+            let changed = match visible.as_ref() {
+                Some(current) => *current != loaded.visible,
+                None => cache.client_visible()? != loaded.visible,
+            };
+            *cache = loaded.state;
+            *visible = Some(loaded.visible);
+            changed
+        };
+        *self.last_mtime.write().await = loaded.mtime;
+        Ok(changed)
+    }
+}
+
+/// State read from disk under the file lock, with what [`StateStore::install`]
+/// needs to swap it into the cache. The client-visible view is computed here,
+/// on the blocking thread, rather than while holding the cache's write lock.
+struct Loaded {
+    state: AppState,
+    visible: serde_json::Value,
+    mtime: Option<SystemTime>,
+}
+
+impl Loaded {
+    fn new(state: AppState, state_path: &Path) -> serde_json::Result<Self> {
+        Ok(Self {
+            visible: state.client_visible()?,
+            mtime: std::fs::metadata(state_path)
+                .and_then(|m| m.modified())
+                .ok(),
+            state,
+        })
+    }
+}
+
+fn lock_visible(
+    visible: &std::sync::Mutex<Option<serde_json::Value>>,
+) -> std::sync::MutexGuard<'_, Option<serde_json::Value>> {
+    // A poisoned view is only a cache: recover it rather than propagate.
+    visible
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn save_failed(e: serde_json::Error) -> ConfigError {
+    ConfigError::SaveFailed(e.to_string())
+}
+
+fn load_failed(e: serde_json::Error) -> ConfigError {
+    ConfigError::LoadFailed(e.to_string())
 }
 
 /// Open (or create) the lock file.
@@ -407,6 +456,7 @@ impl Clone for StateStore {
             lock_path: self.lock_path.clone(),
             state: self.state.clone(),
             last_mtime: self.last_mtime.clone(),
+            visible: self.visible.clone(),
             generation: self.generation.clone(),
         }
     }
@@ -421,6 +471,27 @@ mod tests {
     fn create_test_store(temp_dir: &TempDir) -> StateStore {
         let state_path = temp_dir.path().join("state.json");
         StateStore::with_path(AppState::new(), state_path)
+    }
+
+    #[tokio::test]
+    async fn no_op_mutation_does_not_write_or_notify() {
+        let dir = TempDir::new().unwrap();
+        let store = create_test_store(&dir);
+        store.mutate(|s| s.seen_help = true).await.unwrap();
+        let generation = store.generation();
+        let before = std::fs::metadata(dir.path().join("state.json"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        store.mutate(|s| s.seen_help = true).await.unwrap();
+        assert_eq!(store.generation(), generation);
+        assert_eq!(
+            std::fs::metadata(dir.path().join("state.json"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            before
+        );
     }
 
     #[test]
@@ -623,7 +694,7 @@ mod tests {
         assert_eq!(*rx.borrow_and_update(), 1);
 
         // A second mutation bumps again.
-        store.mutate(|_| {}).await.unwrap();
+        store.mutate(|state| state.seen_help = true).await.unwrap();
         assert_eq!(store.generation(), 2);
     }
 
@@ -647,6 +718,82 @@ mod tests {
         atomic_write(&state_path, &external).unwrap();
         assert!(store.reload_if_changed().await.unwrap());
         assert_eq!(store.generation(), gen_after_seed + 1);
+    }
+
+    /// `pr_checked_at` is persisted but not client-visible. A write that changes
+    /// only it reaches disk (and every instance's cache) without waking the
+    /// change-feed — in the writing instance *or* in another one that picks it
+    /// up through `reload_if_changed` (the state-sync loop's path) or through
+    /// its own next `mutate`.
+    #[tokio::test]
+    async fn stamp_only_writes_persist_without_waking_any_instance() {
+        use crate::session::WorktreeSession;
+
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+        let writer = StateStore::with_path(AppState::new(), state_path.clone());
+        let reader = StateStore::with_path(AppState::new(), state_path.clone());
+
+        let session = WorktreeSession::new(
+            crate::session::ProjectId::new(),
+            "S",
+            "feature",
+            PathBuf::from("/tmp/p/wt"),
+            "claude",
+        );
+        let sid = session.id;
+        writer
+            .mutate(move |s| s.add_session(session))
+            .await
+            .unwrap();
+        assert!(
+            reader.reload_if_changed().await.unwrap(),
+            "a visible change"
+        );
+        let (writer_gen, reader_gen) = (writer.generation(), reader.generation());
+
+        let stamp = chrono::Utc::now();
+        writer
+            .mutate(move |s| s.get_session_mut(&sid).unwrap().pr_checked_at = Some(stamp))
+            .await
+            .unwrap();
+        let on_disk = AppState::load_from(&state_path).unwrap();
+        assert_eq!(
+            on_disk.get_session(&sid).unwrap().pr_checked_at,
+            Some(stamp)
+        );
+        assert_eq!(
+            writer.generation(),
+            writer_gen,
+            "the writer woke its clients"
+        );
+
+        assert!(!reader.reload_if_changed().await.unwrap());
+        assert_eq!(
+            reader.generation(),
+            reader_gen,
+            "the reader woke its clients"
+        );
+        assert_eq!(
+            reader.read().await.get_session(&sid).unwrap().pr_checked_at,
+            Some(stamp),
+            "the reader's cache still picks the stamp up"
+        );
+
+        // An unabsorbed stamp-only external write seen by a later no-op mutate.
+        let later = stamp + chrono::Duration::seconds(1);
+        writer
+            .mutate(move |s| s.get_session_mut(&sid).unwrap().pr_checked_at = Some(later))
+            .await
+            .unwrap();
+        reader.mutate(|_| {}).await.unwrap();
+        assert_eq!(reader.generation(), reader_gen);
+
+        // A visible change still wakes both.
+        writer.mutate(|s| s.seen_help = true).await.unwrap();
+        assert_eq!(writer.generation(), writer_gen + 1);
+        assert!(reader.reload_if_changed().await.unwrap());
+        assert_eq!(reader.generation(), reader_gen + 1);
     }
 
     #[tokio::test]

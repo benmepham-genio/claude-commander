@@ -892,7 +892,11 @@ button.ghost {
 .rv-line:hover {
   background: var(--bg-hover);
 }
-.rv-gutter {
+.rv-line::before {
+  content: attr(data-gutter);
+  /* `*`'s border-box does not reach pseudo-elements; without this the
+     padding widens the gutter past the comments' 84px indent. */
+  box-sizing: border-box;
   flex-shrink: 0;
   width: 84px;
   padding: 0 8px;
@@ -923,6 +927,15 @@ button.ghost {
 }
 .rv-line.context .rv-content::before {
   content: " ";
+}
+.rv-chunk {
+  /* Contain comment margins, so a chunk's measured height is all of its
+     space and can stand in for its rows when it is rebuilt. */
+  display: flow-root;
+  /* Every row is in the DOM for the browser's find; an offscreen chunk skips
+     style, layout and paint until it nears the viewport or find reveals it.
+     Its stand-in height is set per chunk (contain-intrinsic-block-size). */
+  content-visibility: auto;
 }
 .rv-binary {
   padding: 12px;
@@ -987,7 +1000,7 @@ button.ghost {
 }
 
 @media (max-width: 768px) {
-  .rv-gutter {
+  .rv-line::before {
     width: 54px;
     padding: 0 4px;
   }

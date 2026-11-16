@@ -151,36 +151,21 @@ pub async fn is_gh_available() -> bool {
     }
 }
 
-/// Retarget an existing PR's base branch via `gh pr edit <number> --base <branch>`.
+/// Retarget an existing PR's base branch via `gh pr edit <number> --base <branch>`,
+/// reporting *why* it failed.
 ///
-/// Used when a mid-stack session is deleted: PR-stacked children must have their
-/// PR base re-pointed at the deleted session's parent so the retarget survives
-/// the next PR sync. Returns `true` on success; failures (gh missing, auth,
-/// network) are logged and non-fatal — the local metadata retarget already keeps
-/// the UI correct.
-pub async fn retarget_pr_base(repo_path: &Path, pr_number: u32, new_base: &str) -> bool {
-    try_retarget_pr_base(repo_path, pr_number, new_base)
-        .await
-        .is_ok()
-}
-
-/// [`retarget_pr_base`], but reporting *why* it failed.
-///
-/// The delete path only needs the bool: its retarget is incidental to an action
-/// the user already committed to, and the local metadata keeps the UI right. A
-/// user-initiated restack is different — a failed edit means the next PR sync
-/// will silently revert the change, so the reason has to reach the user.
+/// The reason matters to a user-initiated restack: a failed edit means the next
+/// PR sync will silently revert the change, so it has to reach the user.
 pub async fn try_retarget_pr_base(
     repo_path: &Path,
     pr_number: u32,
     new_base: &str,
 ) -> std::result::Result<(), String> {
-    let output = match gh_command()
+    let mut command = gh_command();
+    command
         .args(["pr", "edit", &pr_number.to_string(), "--base", new_base])
-        .current_dir(repo_path)
-        .output()
-        .await
-    {
+        .current_dir(repo_path);
+    let output = match crate::git::hosting::review_output(command, "gh").await {
         Ok(output) => output,
         Err(e) => {
             debug!("gh pr edit #{} spawn failed: {}", pr_number, e);

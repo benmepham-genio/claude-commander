@@ -38,6 +38,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::hosting::CloneSource;
 use crate::session::ProjectId;
 
 /// URL schemes a clone source may use.
@@ -139,25 +140,6 @@ pub struct GithubRepo {
     /// than failing to decode the whole page.
     #[serde(default)]
     pub pushed_at: Option<DateTime<Utc>>,
-}
-
-/// Where a clone should come from.
-///
-/// The two arms are genuinely different *invocations*, not two spellings of one:
-/// [`CloneSource::Github`] runs `gh repo clone` (which resolves the user's
-/// configured protocol and credentials), while [`CloneSource::Url`] runs a plain
-/// `git clone`. Keeping them distinct on the wire means the server never has to
-/// guess which tool the string was meant for.
-///
-/// FLUTTER: mirror this DTO in the Dart model.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum CloneSource {
-    /// An `owner/name` slug — validate with [`validate_repo_slug`].
-    Github { full_name: String },
-    /// Any other clone source — validate with [`validate_clone_url`].
-    Url { url: String },
 }
 
 /// Request body for starting a clone.

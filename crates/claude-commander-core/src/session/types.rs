@@ -122,6 +122,9 @@ pub struct WorktreeSession {
     pub status: SessionStatus,
     /// Program running in the session (e.g., "claude", "aider")
     pub program: String,
+    /// Launch command saved for the next fresh restart. The live pane is unchanged.
+    #[serde(default)]
+    pub pending_program: Option<String>,
     /// When the session was created
     pub created_at: DateTime<Utc>,
     /// When the session was last active
@@ -143,36 +146,47 @@ pub struct WorktreeSession {
     /// Shell tmux session name (for secondary shell sessions)
     #[serde(default)]
     pub shell_tmux_session_name: Option<String>,
-    /// GitHub PR number (if a PR exists for this branch)
+    /// Hosted review number (GitHub PR number or GitLab MR IID), if present.
     #[serde(default)]
     pub pr_number: Option<u32>,
-    /// GitHub PR URL
+    /// Hosted pull-request or merge-request URL.
     #[serde(default)]
     pub pr_url: Option<String>,
-    /// Whether the PR has been merged (kept for backward compat — derived from pr_state)
+    /// Whether the review has been merged (kept for backward compat — derived from pr_state).
     #[serde(default)]
     pub pr_merged: bool,
-    /// PR lifecycle state (open / closed / merged). None = unknown / no PR.
+    /// Review lifecycle state (open / closed / merged). None = unknown / absent.
     #[serde(default)]
     pub pr_state: Option<crate::git::PrState>,
-    /// Whether the PR is a draft
+    /// Whether the pull request or merge request is a draft.
     #[serde(default)]
     pub pr_draft: bool,
-    /// Label names attached to the PR (used for review-needed colouring)
+    /// Label names attached to the hosted review (used for review-needed colouring).
     #[serde(default)]
     pub pr_labels: Vec<String>,
-    /// GitHub `reviewDecision` for the PR (None when no PR or no decision data).
+    /// GitHub `reviewDecision`; `None` for GitLab and when no decision data exists.
     #[serde(default)]
     pub review_decision: Option<crate::git::ReviewDecision>,
-    /// Reviewer logins on the PR — the union of requested reviewers and
-    /// submitted review authors. Empty when there's no PR or no reviewers.
+    /// Reviewer usernames on the hosted review. Empty when absent or unassigned.
     #[serde(default)]
     pub pr_reviewers: Vec<String>,
-    /// Branch the PR targets, as reported by GitHub (e.g. `main` or another
-    /// session's branch). Populated from `gh pr` JSON's `baseRefName`; used
-    /// as the source of truth for PR-stack detection.
+    /// Target branch reported by the selected provider (e.g. `main` or another
+    /// session's branch), used as the source of truth for stack detection.
     #[serde(default)]
     pub pr_base_branch: Option<String>,
+    /// When the code-host check whose result the PR fields above reflect
+    /// *started*. A check stamps this as it applies, and a result from a check
+    /// that started earlier than the stored stamp is dropped (see
+    /// [`Self::accept_pr_check`]) — so a background poll that was already in
+    /// flight when `claude-commander refresh-pr` ran cannot overwrite the
+    /// fresher data the refresh persisted. `None` = never checked (or written
+    /// by a binary that predates the field), which any check may overwrite.
+    ///
+    /// Persisted but not client-visible (no wire DTO carries it), so a write
+    /// that changes only this stamp does not wake the change-feed — see
+    /// `AppState::client_visible`.
+    #[serde(default)]
+    pub pr_checked_at: Option<DateTime<Utc>>,
     /// Fallback parent link for PR-stack grouping, set when the session is
     /// created via the "add stacked session" hotkey and the PR doesn't yet
     /// exist. Once `pr_base_branch` resolves to an in-project session, that
@@ -246,6 +260,7 @@ impl WorktreeSession {
             worktree_path,
             status: SessionStatus::Running,
             program: program.into(),
+            pending_program: None,
             created_at: now,
             last_active_at: now,
             tmux_session_name,
@@ -261,6 +276,7 @@ impl WorktreeSession {
             review_decision: None,
             pr_reviewers: Vec::new(),
             pr_base_branch: None,
+            pr_checked_at: None,
             stack_parent_session_id: None,
             unread: false,
             section_override: None,
@@ -296,6 +312,7 @@ impl WorktreeSession {
             worktree_path: PathBuf::new(),
             status: SessionStatus::Creating,
             program: program.into(),
+            pending_program: None,
             created_at: now,
             last_active_at: now,
             tmux_session_name,
@@ -311,6 +328,7 @@ impl WorktreeSession {
             review_decision: None,
             pr_reviewers: Vec::new(),
             pr_base_branch: None,
+            pr_checked_at: None,
             stack_parent_session_id: None,
             unread: false,
             section_override: None,
@@ -370,6 +388,59 @@ impl WorktreeSession {
     pub fn branch_owned_since(&self) -> DateTime<Utc> {
         self.branch_adopted_at
             .map_or(self.created_at, |adopted| adopted.max(self.created_at))
+    }
+
+    /// Clear every field populated by hosted pull/merge-request polling.
+    /// Provider changes use this as one operation so metadata discovered by one
+    /// CLI can never be interpreted or mutated through another provider.
+    pub(crate) fn clear_review_metadata(&mut self) {
+        self.pr_number = None;
+        self.pr_url = None;
+        self.pr_state = None;
+        self.pr_draft = false;
+        self.pr_labels.clear();
+        self.pr_merged = false;
+        self.review_decision = None;
+        self.pr_reviewers.clear();
+        self.pr_base_branch = None;
+    }
+
+    /// Whether a PR check that started at `checked_at` may write this session's
+    /// review metadata, stamping it when it may. A check that started before
+    /// the one already applied lost a race (it was in flight while a newer one
+    /// finished), so its result is older than what is stored and is dropped.
+    /// A tie applies: both checks started at once, so neither is staler.
+    ///
+    /// The stamp is wall-clock (state.json is shared between processes, so a
+    /// monotonic clock cannot be compared), which means a backwards clock step
+    /// makes checks look stale until the clock passes the stored stamp again.
+    /// `now` is the current time, the stamp's sanity bound: no check can have
+    /// started after it, so a stored stamp beyond `now` was written by a clock
+    /// that ran ahead and is ignored, rather than freezing the session's PR
+    /// data until real time catches up.
+    pub(crate) fn accept_pr_check(
+        &mut self,
+        checked_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if self
+            .pr_checked_at
+            .is_some_and(|stored| stored > checked_at && stored <= now)
+        {
+            return false;
+        }
+        // Advanced on every accepted check, even one whose PR data is
+        // unchanged, so each successful poll rewrites state.json
+        // (`StateStore::mutate` skips the write only when the serialised state
+        // is identical). It does so silently: the field is left out of
+        // `AppState::client_visible`, so a stamp-only write wakes no
+        // change-feed subscriber. The write itself is required: if
+        // an unchanged result left the stamp where it was, a check that
+        // started before this one but lands after it would still compare as
+        // newer than the stored stamp and overwrite this result with older
+        // host data.
+        self.pr_checked_at = Some(checked_at);
+        true
     }
 
     /// True when the session's PR is merged on GitHub. Honours the legacy
@@ -902,6 +973,68 @@ mod tests {
         assert_eq!(session.program, "claude");
         assert!(session.tmux_session_name.starts_with("cc-"));
         assert_eq!(session.status, SessionStatus::Running);
+    }
+
+    /// `pr_checked_at` is new in state.json, which older binaries also write: a
+    /// record without it loads as "never checked" rather than being rejected.
+    #[test]
+    fn session_without_pr_checked_at_deserializes() {
+        let session = WorktreeSession::new(
+            ProjectId::new(),
+            "x",
+            "b",
+            PathBuf::from("/tmp/x"),
+            "claude",
+        );
+        let mut value = serde_json::to_value(&session).unwrap();
+        value.as_object_mut().unwrap().remove("pr_checked_at");
+        let back: WorktreeSession = serde_json::from_value(value).unwrap();
+        assert!(back.pr_checked_at.is_none());
+    }
+
+    #[test]
+    fn accept_pr_check_drops_only_strictly_older_checks() {
+        let mut session = WorktreeSession::new(
+            ProjectId::new(),
+            "x",
+            "b",
+            PathBuf::from("/tmp/x"),
+            "claude",
+        );
+        let t = Utc::now();
+        assert!(
+            session.accept_pr_check(t, t),
+            "an unchecked session accepts"
+        );
+        assert!(session.accept_pr_check(t, t), "a tie applies");
+        assert!(!session.accept_pr_check(t - chrono::Duration::seconds(1), t));
+        assert_eq!(
+            session.pr_checked_at,
+            Some(t),
+            "a dropped check leaves the stamp"
+        );
+        let later = t + chrono::Duration::seconds(1);
+        assert!(session.accept_pr_check(later, later));
+        assert_eq!(session.pr_checked_at, Some(later));
+    }
+
+    /// A stamp later than the current time was written under a clock that ran
+    /// ahead and has since been corrected. Honouring it would freeze the
+    /// session's PR data until real time caught up, so it counts as stale.
+    #[test]
+    fn accept_pr_check_ignores_a_stored_stamp_from_the_future() {
+        let mut session = WorktreeSession::new(
+            ProjectId::new(),
+            "x",
+            "b",
+            PathBuf::from("/tmp/x"),
+            "claude",
+        );
+        let now = Utc::now();
+        let ahead = now + chrono::Duration::hours(3);
+        assert!(session.accept_pr_check(ahead, ahead));
+        assert!(session.accept_pr_check(now, now), "a future stamp is stale");
+        assert_eq!(session.pr_checked_at, Some(now));
     }
 
     #[test]
@@ -1532,6 +1665,7 @@ mod session_info_stack_node_tests {
             branch: branch.to_string(),
             status: SessionStatus::Running,
             program: "claude".to_string(),
+            pending_program: None,
             project_id: ProjectId::new(),
             project_name: "p".to_string(),
             pr_number: None,

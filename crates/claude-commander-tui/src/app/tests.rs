@@ -25,12 +25,12 @@ fn restart_confirm_message_local_promises_resume_remote_stays_neutral() {
     use super::actions::restart_confirm_message;
     // Local sessions: the client's `resume_session` governs the wording, so it
     // can promise `/resume`.
-    assert!(restart_confirm_message(true, true, Some("x")).contains("/resume"));
-    assert!(restart_confirm_message(true, false, Some("x")).contains("/resume"));
+    assert!(restart_confirm_message(true, true, Some("x"), None).contains("/resume"));
+    assert!(restart_confirm_message(true, false, Some("x"), None).contains("/resume"));
     // Remote sessions: resume behaviour lives in the server's config, which the
     // client can't read — so the wording must NOT promise it, and should name
     // the session.
-    let remote = restart_confirm_message(false, true, Some("my-sess"));
+    let remote = restart_confirm_message(false, true, Some("my-sess"), None);
     assert!(
         !remote.contains("/resume"),
         "remote restart must not promise resume semantics: {remote}"
@@ -46,6 +46,24 @@ fn test_delete_confirm_message_falls_back_without_title() {
     let message = delete_confirm_message(None, None);
     assert!(message.contains("this session"));
     assert!(!message.contains('"'));
+}
+
+#[tokio::test]
+async fn restart_confirmation_warns_about_pending_program() {
+    let (mut app, sid) = app_with_remote_session().await;
+    app.ui_state.selected_session_id = Some(SessionRef::new(BackendId(1), sid));
+    app.backend_mut_for_test(BackendId(1))
+        .view
+        .snapshot
+        .sessions[0]
+        .pending_program = Some("codex".into());
+    app.handle_restart_session();
+    let Modal::Confirm { message, .. } = &app.ui_state.modal else {
+        panic!("restart confirmation");
+    };
+    assert!(message.contains("codex"), "{message}");
+    assert!(message.contains("clears the conversation"), "{message}");
+    assert!(!message.contains("/resume"), "{message}");
 }
 
 #[test]
@@ -76,28 +94,28 @@ fn test_centered_rect() {
 }
 
 #[test]
-fn test_should_auto_restart_regular_claude_session() {
-    // A normal Claude session that just ended should be auto-restarted.
-    assert!(should_auto_restart_ended("my-feature", 0));
+fn test_should_reattach_regular_claude_session() {
+    // A normal Claude session that just ended is re-attached.
+    assert!(should_reattach_ended("my-feature", 0));
 }
 
 #[test]
-fn test_should_not_auto_restart_after_repeated_ends() {
+fn test_should_not_reattach_after_repeated_ends() {
     // Crash-loop guard: stop after 3 consecutive ends.
-    assert!(!should_auto_restart_ended("my-feature", 3));
+    assert!(!should_reattach_ended("my-feature", 3));
 }
 
 #[test]
-fn test_should_not_auto_restart_shell_session() {
+fn test_should_not_reattach_shell_session() {
     // Shell sessions (suffix `-sh`) are not Claude sessions.
-    assert!(!should_auto_restart_ended("my-feature-sh", 0));
+    assert!(!should_reattach_ended("my-feature-sh", 0));
 }
 
 #[test]
-fn test_should_not_auto_restart_commander() {
-    // The commander is project-less and absent from `state.sessions`, so a
-    // restart-by-name would fail; it is revived lazily on next open instead.
-    assert!(!should_auto_restart_ended(
+fn test_should_not_reattach_commander() {
+    // The commander is project-less and absent from `state.sessions`; it is
+    // revived lazily on next open instead.
+    assert!(!should_reattach_ended(
         claude_commander_core::commander::COMMANDER_TMUX_NAME,
         0
     ));
@@ -715,6 +733,7 @@ fn test_info_view_renders_stack_chain() {
         pr_number: None,
         pr_url: None,
         pr_merged: false,
+        review_label: "PR",
         enriched_pr: None,
         ai_summary: None,
         summary_key_hint: None,
@@ -768,6 +787,7 @@ fn test_info_view_stack_section_renders_above_pr_section() {
         pr_number: Some(7),
         pr_url: Some("https://example.com/pr/7".into()),
         pr_merged: false,
+        review_label: "PR",
         enriched_pr: None,
         ai_summary: None,
         summary_key_hint: None,
@@ -808,6 +828,7 @@ fn test_info_view_no_stack_section_for_unstacked() {
         pr_number: None,
         pr_url: None,
         pr_merged: false,
+        review_label: "PR",
         enriched_pr: None,
         ai_summary: None,
         summary_key_hint: None,
@@ -834,6 +855,85 @@ use claude_commander_core::config::{AppState, ConfigStore, StateStore};
 
 fn make_test_app() -> App {
     make_test_app_with_path().0
+}
+
+#[tokio::test]
+async fn config_reload_does_not_wait_for_review_poll_on_ui_task() {
+    let mut app = make_test_app();
+    let service = app.service.clone();
+    let state = service.store().read().await;
+    let poll = service.apply_pr_results(Vec::new());
+    tokio::pin!(poll);
+    // Poll once to acquire the provider mutex. The retained state reader
+    // prevents the review update from finishing and releasing that mutex.
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(poll.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+
+    app.ui_state.last_ui_maintenance = Instant::now() - Duration::from_secs(2);
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        app.process_event(AppEvent::Tick),
+    )
+    .await;
+    if result.is_ok() {
+        assert!(app.ui_state.config_reload_in_flight);
+        // More polling opportunities while the provider mutex is busy must
+        // leave a single reload queued, rather than one task per second.
+        for _ in 0..3 {
+            app.check_config_reload();
+        }
+    }
+    drop(state);
+    poll.await.unwrap();
+    assert!(result.is_ok(), "config polling blocked the UI task");
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), app.event_loop.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        event,
+        AppEvent::StateUpdate(StateUpdate::ConfigReloaded { result: Ok(false) })
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), app.event_loop.next(),)
+            .await
+            .is_err(),
+        "busy ticks queued duplicate reloads"
+    );
+    app.process_event(event).await;
+    assert!(!app.ui_state.config_reload_in_flight);
+}
+
+#[tokio::test]
+async fn config_reload_recovers_from_error_and_applies_external_edits() {
+    let (mut app, path) = make_test_app_with_path();
+    let original_prefix = app.config.branch_prefix.clone();
+    for (contents, expected_prefix) in [
+        ("invalid = [", original_prefix.as_str()),
+        ("branch_prefix = 'reloaded/'", "reloaded/"),
+    ] {
+        std::fs::write(&path, contents).unwrap();
+        app.check_config_reload();
+        assert!(app.ui_state.config_reload_in_flight);
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), app.event_loop.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let AppEvent::StateUpdate(StateUpdate::ConfigReloaded { result }) = &event else {
+            panic!("expected config reload completion, got {event:?}");
+        };
+        if contents == "invalid = [" {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(result, &Ok(true));
+        }
+        app.process_event(event).await;
+        assert!(!app.ui_state.config_reload_in_flight);
+        assert_eq!(app.config.branch_prefix, expected_prefix);
+    }
 }
 
 /// Stand-in for the CLI reference the binary injects into `App::new`. The real
@@ -1034,6 +1134,7 @@ fn server_tab_rejects_a_bad_bind_or_port_without_changing_config() {
 fn submitting_the_token_placeholder_leaves_the_token_alone() {
     let mut app = make_test_app();
     app.config.server.token = Some("sekret".into());
+    persist_seeded_config(&app);
     app.apply_settings_edit(SettingsTab::Server, "server_token", "(set)");
     assert_eq!(app.config.server.token.as_deref(), Some("sekret"));
 
@@ -1047,6 +1148,7 @@ fn submitting_the_token_placeholder_leaves_the_token_alone() {
         .map(|r| r.text_value().to_string())
         .expect("token row");
     app.config.server.token = Some("sekret".into());
+    persist_seeded_config(&app);
     app.apply_settings_edit(SettingsTab::Server, "server_token", &unset_placeholder);
     assert_eq!(
         app.config.server.token.as_deref(),
@@ -1056,6 +1158,7 @@ fn submitting_the_token_placeholder_leaves_the_token_alone() {
 
     // An explicit empty value does clear it.
     app.config.server.token = Some("sekret".into());
+    persist_seeded_config(&app);
     app.apply_settings_edit(SettingsTab::Server, "server_token", "");
     assert!(app.config.server.token.is_none());
 
@@ -1286,6 +1389,24 @@ fn test_apply_repo_list_timeout_rejects_implausibly_short_values() {
 }
 
 #[test]
+fn gitlab_hostname_editor_rejects_url_and_credentials_without_persisting_them() {
+    let mut app = make_test_app();
+    assert_eq!(
+        app.parse_gitlab_hostname_setting("https://user:secret@gitlab.example.com/group"),
+        None
+    );
+
+    assert!(app.config.gitlab_hostname.is_none());
+    match &app.ui_state.modal {
+        Modal::Error { message } => {
+            assert!(message.contains("Invalid GitLab hostname"));
+            assert!(!message.contains("secret"));
+        }
+        other => panic!("expected validation error, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_commander_rows_present_with_defaults() {
     let app = make_test_app();
     let rows = app.build_settings_rows(SettingsTab::General);
@@ -1351,6 +1472,59 @@ fn test_hide_empty_sections_toggle_and_apply() {
     // Flip back.
     app.apply_bool_setting("hide_empty_sections", true);
     assert!(app.config.hide_empty_sections);
+}
+
+#[tokio::test]
+async fn toggling_hide_empty_sections_rebuilds_the_list() {
+    let mut app = make_test_app();
+    app_on_sections_tab_with_pinned_session(
+        &mut app,
+        vec![
+            claude_commander_core::session::SectionConfig {
+                name: "Alpha".to_string(),
+                ..Default::default()
+            },
+            claude_commander_core::session::SectionConfig {
+                name: "Empty".to_string(),
+                ..Default::default()
+            },
+        ],
+    )
+    .await;
+    let headers = |app: &App| {
+        app.ui_state
+            .list_items
+            .iter()
+            .filter(|i| matches!(i, SessionListItem::SectionHeader { .. }))
+            .count()
+    };
+    let hidden = headers(&app);
+
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let selected_row = rows
+        .iter()
+        .position(|r| r.field_key == "hide_empty_sections")
+        .unwrap();
+    let state = SettingsState {
+        tab: SettingsTab::General,
+        selected_row,
+        editing: None,
+        rows,
+        sections_state: SectionsState::default(),
+        workspaces_state: WorkspacesState::default(),
+        programs_state: crate::app::ProgramsState::default(),
+        theme_scope: app.default_theme_scope(),
+        search: None,
+    };
+    app.handle_settings_key(key(crossterm::event::KeyCode::Enter), state)
+        .await;
+
+    assert!(!app.config.hide_empty_sections);
+    assert!(
+        headers(&app) > hidden,
+        "empty sections should appear without waiting for another refresh: {:?}",
+        app.ui_state.list_items
+    );
 }
 
 #[test]
@@ -2300,6 +2474,14 @@ fn render_keybindings_search_box_filters_and_shows_prompt() {
     );
 }
 
+/// Persist fixture edits made directly to `app.config` through the service.
+/// Settings edits re-read the service's config before applying (so a web
+/// `PATCH /config` is never reverted), so a seed held only in the TUI's cache
+/// would be discarded by the next settings key.
+fn persist_seeded_config(app: &App) {
+    app.service.update_config(app.config.clone()).unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // Programs settings tab
 // ---------------------------------------------------------------------------
@@ -2425,6 +2607,7 @@ async fn programs_tab_rename_rejects_duplicate_and_empty_labels() {
         program_entry("Claude", "claude"),
         program_entry("Codex", "codex"),
     ];
+    persist_seeded_config(&app);
     app.open_settings_on_programs(claude_commander_core::backend::LOCAL_BACKEND_ID);
 
     // Move to the second entry and rename it to a duplicate of the first.
@@ -2716,6 +2899,7 @@ async fn programs_tab_editing_field_label_rejects_duplicate() {
         program_entry("Claude", "claude"),
         program_entry("Codex", "codex"),
     ];
+    persist_seeded_config(&app);
     app.open_settings_on_programs(claude_commander_core::backend::LOCAL_BACKEND_ID);
 
     // Focus the fields pane on the second entry and edit its label to a dup.
@@ -2738,6 +2922,7 @@ async fn programs_tab_esc_cancels_rename_and_edit_without_change() {
 
     let mut app = make_test_app();
     app.config.programs = vec![program_entry("Claude", "claude")];
+    persist_seeded_config(&app);
     app.open_settings_on_programs(claude_commander_core::backend::LOCAL_BACKEND_ID);
 
     // Rename: type a new label then Esc — nothing changes.
@@ -3152,6 +3337,7 @@ async fn commit_to_missing_backend_does_not_clobber_local_config() {
     let mut app = make_test_app();
     // Local config has its own programs, which must be left untouched.
     app.config.programs = vec![program_entry("Local", "local-cmd")];
+    persist_seeded_config(&app);
     app.open_settings_on_programs(claude_commander_core::backend::LOCAL_BACKEND_ID);
 
     // Simulate a tab that was pointed at a remote server which has since been
@@ -3372,6 +3558,161 @@ async fn mouse_file_click_kicks_off_image_fetch() {
             .contains_key(&("logo.png".to_string(), DiffSide::New)),
         "clicking an image file in the tree should kick off its image fetch"
     );
+}
+
+/// The review view's file list mirrors the main view's session list: a
+/// one-row heading bar over an unbordered list, beside the bordered body. Two
+/// borders meeting at the split made the join busy.
+#[tokio::test]
+async fn review_file_list_has_a_heading_bar_and_no_border() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    let state = DiffReviewState::new(
+        SessionId::new(),
+        "t".to_string(),
+        "base".to_string(),
+        claude_commander_core::git::ParsedDiff {
+            files: vec![modified_image_file("logo.png")],
+        },
+        Vec::new(),
+    );
+    app.ui_state.modal = Modal::ReviewDiff(Box::new(state));
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let buf = terminal.backend().buffer();
+    let row = |y: u16| -> String { (0..100).map(|x| buf[(x, y)].symbol()).collect() };
+
+    // The file pane is the left 20%.
+    let pane_w = 20usize;
+    let heading: String = row(0).chars().take(pane_w).collect();
+    assert!(
+        heading.starts_with(" Files (1)"),
+        "heading bar names the pane: {heading:?}"
+    );
+    // No border glyph anywhere in the file pane's columns.
+    for y in 0..19 {
+        let cells: String = row(y).chars().take(pane_w).collect();
+        assert!(
+            !cells.contains(['│', '─', '┌', '╭', '└', '╰', '┐', '╮', '┘', '╯']),
+            "row {y} of the file pane has a border glyph: {cells:?}"
+        );
+    }
+    // The single file sits directly under the heading, flush left (no border
+    // column), and the mouse rect agrees.
+    assert!(row(1).contains("logo.png"), "row 1: {:?}", row(1));
+    assert_eq!(
+        app.ui_state.review_file_list_rect,
+        Some(Rect {
+            x: 0,
+            y: 1,
+            width: 20,
+            height: 18,
+        })
+    );
+    // The body keeps its border, starting right at the split.
+    assert!(
+        matches!(buf[(20, 0)].symbol(), "┌" | "╭"),
+        "body border top-left at the split: {:?}",
+        buf[(20, 0)].symbol()
+    );
+}
+
+/// A review of `n` image files (`f00.png`, `f01.png`, …), every one binary, so
+/// the body never takes its text-render path.
+fn image_review_app(n: usize) -> App {
+    let mut app = make_test_app();
+    let state = DiffReviewState::new(
+        SessionId::new(),
+        "t".to_string(),
+        "base".to_string(),
+        claude_commander_core::git::ParsedDiff {
+            files: (0..n)
+                .map(|i| modified_image_file(&format!("f{i:02}.png")))
+                .collect(),
+        },
+        Vec::new(),
+    );
+    app.ui_state.modal = Modal::ReviewDiff(Box::new(state));
+    app
+}
+
+fn file_pane_text(buf: &ratatui::buffer::Buffer) -> String {
+    let w = buf.area.width;
+    (0..buf.area.height)
+        .map(|y| (0..w / 5).map(|x| buf[(x, y)].symbol()).collect::<String>() + "\n")
+        .collect()
+}
+
+/// The file list scrolls against its own drawn height. It used to borrow the
+/// body's, which a binary (image) body never records — so on a short terminal
+/// the cursor walked off the bottom of the list without it scrolling.
+#[tokio::test]
+async fn review_file_list_follows_the_cursor_while_an_image_is_shown() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = image_review_app(30);
+    // 15 rows: heading, 13 list rows, footer — well under the default height.
+    let mut terminal = Terminal::new(TestBackend::new(100, 15)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    for _ in 0..20 {
+        app.handle_input(InputEvent::Key(key(crossterm::event::KeyCode::Char('j'))))
+            .await;
+    }
+    terminal.draw(|f| app.render(f)).unwrap();
+    let pane = file_pane_text(terminal.backend().buffer());
+    assert!(
+        pane.contains("f20.png"),
+        "the cursor's file must stay on screen:\n{pane}"
+    );
+    // ...and on the bottom drawn row, not a row short of it.
+    let bottom: String = pane.lines().nth(13).unwrap().to_string();
+    assert!(bottom.contains("f20.png"), "bottom list row: {bottom:?}");
+}
+
+/// The heading bar belongs to the file pane: the wheel over it scrolls the
+/// file list (not the diff), and a click on it focuses the list.
+#[tokio::test]
+async fn review_file_list_heading_takes_the_panes_mouse_events() {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = image_review_app(30);
+    let mut terminal = Terminal::new(TestBackend::new(100, 15)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let mouse = |kind| MouseEvent {
+        kind,
+        column: 3,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    app.handle_input(InputEvent::Mouse(mouse(MouseEventKind::ScrollDown)))
+        .await;
+    terminal.draw(|f| app.render(f)).unwrap();
+    let pane = file_pane_text(terminal.backend().buffer());
+    assert!(
+        !pane.contains("f00.png"),
+        "wheel over the heading scrolls the file list:\n{pane}"
+    );
+
+    // Move focus to the body, then click the heading to bring it back.
+    app.handle_input(InputEvent::Key(key(crossterm::event::KeyCode::Tab)))
+        .await;
+    let focus = |app: &App| match &app.ui_state.modal {
+        Modal::ReviewDiff(s) => s.file_list_focused(),
+        _ => panic!("review closed"),
+    };
+    assert!(!focus(&app), "Tab moves focus to the body");
+    app.handle_input(InputEvent::Mouse(mouse(MouseEventKind::Down(
+        MouseButton::Left,
+    ))))
+    .await;
+    assert!(focus(&app), "clicking the heading focuses the file list");
 }
 
 // --- ProgramPicker (new-session program selection) ---
@@ -3925,6 +4266,80 @@ fn agent_states_box() -> Box<claude_commander_core::api::AgentStatesSnapshot> {
 }
 
 #[tokio::test]
+async fn backend_change_invalidates_review_fetch_when_provider_changes() {
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", empty_snapshot())]);
+    let backend = BackendId(1);
+    let session = SessionId::new();
+    app.ui_state.enriched_pr_unavailable = Some(session);
+    app.ui_state.enriched_pr_fetch_spawned_at = Some(Instant::now());
+    let mut snapshot = empty_snapshot();
+    snapshot.server.code_host.provider =
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab;
+    app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 1,
+        backend_id: backend.0,
+        snapshot: Box::new(snapshot),
+        states: agent_states_box(),
+    })
+    .await;
+    assert_eq!(app.ui_state.enriched_pr_unavailable, None);
+    assert_eq!(app.ui_state.enriched_pr_fetch_spawned_at, None);
+}
+
+#[tokio::test]
+async fn provider_change_preserves_repository_fetch_generation() {
+    let mut snapshot = empty_snapshot();
+    snapshot.server.code_host.provider =
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab;
+    snapshot.server.code_host.hostname = Some("gitlab.example.com".into());
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", snapshot)]);
+    let backend = BackendId(1);
+    app.ui_state.repo_picker.backend = backend;
+    app.ui_state.repo_picker.generation = 41;
+    app.refresh_backend_view(backend).await;
+    assert!(app.ui_state.repo_picker.generation > 41);
+    assert_eq!(
+        app.ui_state.repo_picker.host.provider,
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab
+    );
+    assert_eq!(
+        app.ui_state.repo_picker.host.hostname.as_deref(),
+        Some("gitlab.example.com")
+    );
+}
+
+#[tokio::test]
+async fn provider_change_restarts_an_open_repository_picker() {
+    let mut snapshot = empty_snapshot();
+    snapshot.server.code_host.provider =
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab;
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", snapshot)]);
+    app.ui_state.repo_picker.backend = BackendId(1);
+    app.ui_state.repo_picker.generation = 41;
+    app.ui_state.modal = Modal::QuickSwitch {
+        mode: PaletteMode::RepositoryPicker,
+        query: Input::default(),
+        matches: Vec::new(),
+        selected_idx: 0,
+        scroll: 0,
+        review: None,
+    };
+    app.refresh_backend_view(BackendId(1)).await;
+    let event = tokio::time::timeout(Duration::from_secs(1), app.event_loop.next())
+        .await
+        .expect("provider switch must start a new listing, not leave the picker loading")
+        .unwrap();
+    assert!(matches!(
+        event,
+        AppEvent::StateUpdate(StateUpdate::RepositoriesLoaded {
+            backend_id: 1,
+            generation: 43,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
 async fn older_server_snapshot_annotates_heading_but_placeholder_does_not() {
     // A remote whose server build is behind this client (major.minor) flags a
     // warning on its sidebar heading. Before its first real snapshot lands the
@@ -3943,6 +4358,7 @@ async fn older_server_snapshot_annotates_heading_but_placeholder_does_not() {
 
     // Land the older snapshot (first real snapshot arrives via BackendChanged).
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(old_snap),
         states: agent_states_box(),
@@ -3967,6 +4383,7 @@ async fn stale_server_toast_fires_once_and_never_for_local() {
 
     // First fold of the older snapshot: the one-time toast fires.
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(old_snap.clone()),
         states: agent_states_box(),
@@ -3984,6 +4401,7 @@ async fn stale_server_toast_fires_once_and_never_for_local() {
     // A second fold must NOT re-fire the toast.
     app.ui_state.status_message = None;
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(old_snap),
         states: agent_states_box(),
@@ -4014,6 +4432,7 @@ async fn version_toast_does_not_clobber_a_live_status_message() {
         std::time::Instant::now() + std::time::Duration::from_secs(30),
     ));
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(old_snap),
         states: agent_states_box(),
@@ -4057,6 +4476,7 @@ async fn two_stale_servers_each_get_their_own_toast() {
 
     // Fold buildbox (id 1): its toast fires; ci is still on its placeholder.
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(old_snap.clone()),
         states: agent_states_box(),
@@ -4076,6 +4496,7 @@ async fn two_stale_servers_each_get_their_own_toast() {
     // Free the slot, then fold ci (id 2): it gets its own toast.
     app.ui_state.status_message = None;
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(2).0,
         snapshot: Box::new(old_snap),
         states: agent_states_box(),
@@ -4204,6 +4625,7 @@ async fn pull_blocked_badges_union_remote_backend_snapshot() {
     );
 
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(remote_snap),
         states: Box::new(claude_commander_core::api::AgentStatesSnapshot {
@@ -4240,6 +4662,7 @@ async fn local_connection_degrades_from_tmux_ok_false_and_stays_degraded() {
     };
 
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(0).0,
         snapshot: Box::new(degraded_snap),
         states: states(),
@@ -4255,6 +4678,7 @@ async fn local_connection_degrades_from_tmux_ok_false_and_stays_degraded() {
     );
 
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(0).0,
         snapshot: Box::new(empty_snapshot()),
         states: states(),
@@ -4293,6 +4717,7 @@ async fn remote_connection_stays_watch_owned_across_snapshot_fold() {
     .await;
 
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(remote_snap),
         states: Box::new(claude_commander_core::api::AgentStatesSnapshot {
@@ -6159,7 +6584,13 @@ async fn fold_backend_states(
 ) {
     app.backend_mut_for_test(id).view.agent_states.states = old_states;
     let snapshot = app.view_for(id).snapshot.clone();
+    let revision = app
+        .backend_mut_for_test(id)
+        .refresh_sequence
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision,
         backend_id: id.0,
         snapshot: Box::new(snapshot),
         states: Box::new(claude_commander_core::api::AgentStatesSnapshot {
@@ -6383,12 +6814,21 @@ async fn reset_confirm_takes_the_no_resume_path_and_toasts_reset() {
 fn reset_confirm_message_names_session_and_promises_no_resume() {
     use super::actions::reset_confirm_message;
 
-    let msg = reset_confirm_message(Some("fix-parser"));
+    let msg = reset_confirm_message(Some("fix-parser"), None);
     assert!(msg.contains("\"fix-parser\""), "message: {msg}");
     assert!(msg.contains("no resume"), "message: {msg}");
     assert!(msg.contains("new conversation"), "message: {msg}");
+    assert!(!msg.contains("pending"), "message: {msg}");
     // Falls back to a generic subject rather than an empty quote.
-    assert!(reset_confirm_message(None).contains("this session"));
+    assert!(reset_confirm_message(None, None).contains("this session"));
+}
+
+#[test]
+fn reset_confirmation_warns_about_pending_program() {
+    use super::actions::reset_confirm_message;
+
+    let msg = reset_confirm_message(Some("fix-parser"), Some("codex"));
+    assert!(msg.contains("starts with codex"), "message: {msg}");
 }
 
 #[test]
@@ -6508,7 +6948,7 @@ async fn set_session_base_failure_is_reported_not_swallowed() {
 /// — if it stops appearing there it becomes unreachable with no failing test
 /// anywhere else.
 #[test]
-fn set_session_base_is_reachable_from_the_command_palette() {
+fn edit_session_is_reachable_from_the_command_palette() {
     let kb = claude_commander_core::config::KeyBindings::default();
     let mut ui = AppUiState {
         selected_backend_connected: true,
@@ -6516,15 +6956,15 @@ fn set_session_base_is_reachable_from_the_command_palette() {
     };
 
     // Needs a selected session, like every other session-scoped command.
-    assert!(!ui.is_command_available(BindableAction::SetSessionBase));
+    assert!(!ui.is_command_available(BindableAction::EditSession));
     ui.selected_session_id = Some(SessionRef::new(BackendId(1), SessionId::new()));
-    assert!(ui.is_command_available(BindableAction::SetSessionBase));
+    assert!(ui.is_command_available(BindableAction::EditSession));
 
-    let entries = ui.gather_command_entries(&kb, "set session base");
+    let entries = ui.gather_command_entries(&kb, "edit session");
     assert!(
         entries
             .iter()
-            .any(|e| e.action == BindableAction::SetSessionBase),
+            .any(|e| e.action == BindableAction::EditSession),
         "the palette must list the command, got {:?}",
         entries.iter().map(|e| e.label).collect::<Vec<_>>()
     );
@@ -6534,7 +6974,11 @@ fn set_session_base_is_reachable_from_the_command_palette() {
 /// user has to be told the PR and review diff will be wrong until they do.
 #[test]
 fn set_session_base_confirm_message_warns_that_rebasing_is_manual() {
-    let msg = super::actions::set_session_base_confirm_message("my-task", "other-br");
+    let msg = super::actions::set_session_base_confirm_message(
+        claude_commander_protocol::hosting::CodeHostProvider::Github,
+        "my-task",
+        "other-br",
+    );
     assert!(msg.contains("my-task"));
     assert!(msg.contains("other-br"));
     assert!(
@@ -6726,6 +7170,14 @@ async fn remote_session_created_selects_row_and_reconciles_owning_backend() {
     })
     .await;
 
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while app.ui_state.pending_selection.is_some() {
+            let event = app.event_loop.next().await.unwrap();
+            app.process_event(event).await;
+        }
+    })
+    .await
+    .expect("creation refresh should complete");
     assert_eq!(
         remote_mock(&app, BackendId(1)).reconciled_sessions(),
         vec![new_id],
@@ -6869,6 +7321,7 @@ async fn pending_comment_markers_union_every_backend_view() {
     );
 
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(remote_snap),
         states: Box::new(claude_commander_core::api::AgentStatesSnapshot {
@@ -7378,7 +7831,6 @@ async fn spawn_info_fetch_is_noop_while_enriched_fetch_in_flight() {
     // Arrange the conditions under which the fetch would fire: Info modal open,
     // this session selected, `gh` available, and no cached enriched PR yet.
     app.ui_state.selected_session_id = Some(claude_commander_core::backend::SessionRef::local(sid));
-    app.ui_state.gh_available = true;
     app.ui_state.modal = Modal::Info { scroll: 0 };
     app.ui_state.enriched_pr = None;
 
@@ -7657,7 +8109,7 @@ fn test_is_command_available_session_scoped_hidden_without_session() {
         BindableAction::Select,
         BindableAction::SelectShell,
         BindableAction::DeleteSession,
-        BindableAction::RenameSession,
+        BindableAction::EditSession,
         BindableAction::RestartSession,
         BindableAction::ToggleKeepAlive,
         BindableAction::OpenInEditor,
@@ -7678,7 +8130,7 @@ fn test_is_command_available_session_scoped_shown_with_session() {
         BindableAction::Select,
         BindableAction::SelectShell,
         BindableAction::DeleteSession,
-        BindableAction::RenameSession,
+        BindableAction::EditSession,
         BindableAction::RestartSession,
         BindableAction::ToggleKeepAlive,
         BindableAction::OpenInEditor,
@@ -7755,7 +8207,7 @@ fn test_gather_command_entries_hides_context_unavailable() {
         entries.iter().map(|e| e.action).collect();
     for hidden in [
         BindableAction::DeleteSession,
-        BindableAction::RenameSession,
+        BindableAction::EditSession,
         BindableAction::RestartSession,
         BindableAction::OpenInEditor,
         BindableAction::OpenPullRequest,
@@ -7837,6 +8289,14 @@ async fn apply_section_move_keeps_moved_session_selected() {
     })
     .await;
 
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while app.ui_state.pending_selection.is_some() {
+            let event = app.event_loop.next().await.unwrap();
+            app.process_event(event).await;
+        }
+    })
+    .await
+    .expect("section move refresh should finish");
     let pos = app
         .ui_state
         .board_state
@@ -8524,8 +8984,10 @@ async fn preview_ready_applies_only_to_the_still_selected_session() {
         selected,
     ));
 
+    let token = Instant::now();
+    app.ui_state.preview_update_spawned_at = Some(token);
     app.handle_state_update(StateUpdate::PreviewReady {
-        spawned_at: Instant::now(),
+        spawned_at: token,
         session_id: Some(selected),
         project_id: None,
         preview_content: "live output".to_string(),
@@ -8763,6 +9225,28 @@ async fn a_stale_preview_result_does_not_clear_the_new_selections_guard() {
     assert_eq!(app.ui_state.preview_update_spawned_at, None);
 }
 
+/// The default (github.com) code host every test snapshot starts on.
+fn github_host() -> claude_commander_protocol::hosting::CodeHost {
+    claude_commander_protocol::hosting::CodeHost {
+        provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+        hostname: None,
+    }
+}
+
+fn enriched_ready(
+    spawned_at: Instant,
+    session_id: SessionId,
+    code_host: claude_commander_protocol::hosting::CodeHost,
+    info: Option<claude_commander_core::git::EnrichedPrInfo>,
+) -> StateUpdate {
+    StateUpdate::EnrichedPrReady {
+        spawned_at,
+        session_id,
+        code_host,
+        info,
+    }
+}
+
 #[tokio::test]
 async fn an_empty_enriched_pr_result_is_not_refetched_until_a_pr_refresh() {
     // An Info surface used to be a briefly-open modal; the Info *tab* can stay
@@ -8773,12 +9257,10 @@ async fn an_empty_enriched_pr_result_is_not_refetched_until_a_pr_refresh() {
     let mut app = make_test_app();
     app.ui_state.selected_session_id = Some(SessionRef::local(sid));
 
-    app.handle_state_update(StateUpdate::EnrichedPrReady {
-        spawned_at: Instant::now(),
-        session_id: sid,
-        info: None,
-    })
-    .await;
+    let spawned_at = Instant::now();
+    app.ui_state.enriched_pr_fetch_spawned_at = Some(spawned_at);
+    app.handle_state_update(enriched_ready(spawned_at, sid, github_host(), None))
+        .await;
     assert_eq!(app.ui_state.enriched_pr_unavailable, Some(sid));
 
     // An explicit PR-status refresh is the retry path.
@@ -8851,6 +9333,29 @@ async fn reopening_the_info_modal_retries_a_failed_enriched_fetch() {
 }
 
 #[tokio::test]
+async fn a_slow_enriched_result_still_applies_after_its_token_was_superseded() {
+    // A `gh`/`glab` call slower than the 5s in-flight backstop gets re-spawned,
+    // which overwrites the token. Discarding the original result then meant a
+    // slow fetch never landed. A superseded result for the selected session and
+    // the current provider must still apply.
+    let sid = SessionId::new();
+    let mut app = make_test_app();
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+
+    let guard = Instant::now();
+    app.ui_state.enriched_pr_fetch_spawned_at = Some(guard);
+    app.handle_state_update(enriched_ready(
+        guard - std::time::Duration::from_secs(6),
+        sid,
+        github_host(),
+        None,
+    ))
+    .await;
+    assert_eq!(app.ui_state.enriched_pr_unavailable, Some(sid));
+    assert_eq!(app.ui_state.enriched_pr_fetch_spawned_at, Some(guard));
+}
+
+#[tokio::test]
 async fn a_stale_enriched_result_does_not_clear_the_new_fetchs_guard() {
     // Same generation-token rule as PreviewReady: a superseded enriched result
     // must not release the guard belonging to the fetch now in flight, or the
@@ -8861,11 +9366,12 @@ async fn a_stale_enriched_result_does_not_clear_the_new_fetchs_guard() {
 
     let guard = Instant::now();
     app.ui_state.enriched_pr_fetch_spawned_at = Some(guard);
-    app.handle_state_update(StateUpdate::EnrichedPrReady {
-        spawned_at: guard - std::time::Duration::from_millis(1),
-        session_id: sid,
-        info: None,
-    })
+    app.handle_state_update(enriched_ready(
+        guard - std::time::Duration::from_millis(1),
+        sid,
+        github_host(),
+        None,
+    ))
     .await;
     assert_eq!(
         app.ui_state.enriched_pr_fetch_spawned_at,
@@ -8873,22 +9379,75 @@ async fn a_stale_enriched_result_does_not_clear_the_new_fetchs_guard() {
         "a superseded enriched result must leave the live fetch's guard intact"
     );
 
-    app.handle_state_update(StateUpdate::EnrichedPrReady {
-        spawned_at: guard,
-        session_id: sid,
-        info: None,
-    })
-    .await;
+    app.handle_state_update(enriched_ready(guard, sid, github_host(), None))
+        .await;
     assert_eq!(app.ui_state.enriched_pr_fetch_spawned_at, None);
+}
+
+#[tokio::test]
+async fn an_enriched_result_from_a_previous_provider_is_dropped() {
+    // Enriched review data is provider-bound: a GitHub fetch still in flight
+    // when the provider switches to GitLab must not repopulate the caches.
+    let sid = SessionId::new();
+    let mut app = make_test_app();
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+    app.backend_mut_for_test(LOCAL_BACKEND_ID)
+        .view
+        .snapshot
+        .server
+        .code_host
+        .provider = claude_commander_protocol::hosting::CodeHostProvider::Gitlab;
+
+    let spawned_at = Instant::now();
+    app.ui_state.enriched_pr_fetch_spawned_at = Some(spawned_at);
+    app.handle_state_update(enriched_ready(spawned_at, sid, github_host(), None))
+        .await;
+    assert_eq!(
+        app.ui_state.enriched_pr_unavailable, None,
+        "a result from the previous provider must not update negative caches"
+    );
+    assert_eq!(app.ui_state.enriched_pr_fetch_spawned_at, None);
+}
+
+#[tokio::test]
+async fn an_enriched_result_from_a_previous_gitlab_host_is_dropped() {
+    // Switching GitLab hostname keeps the provider, so the host must be part of
+    // the identity a result is checked against.
+    use claude_commander_protocol::hosting::{CodeHost, CodeHostProvider};
+    let sid = SessionId::new();
+    let mut app = make_test_app();
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+    let code_host = &mut app
+        .backend_mut_for_test(LOCAL_BACKEND_ID)
+        .view
+        .snapshot
+        .server
+        .code_host;
+    code_host.provider = CodeHostProvider::Gitlab;
+    code_host.hostname = Some("new.example.com".into());
+
+    app.handle_state_update(enriched_ready(
+        Instant::now(),
+        sid,
+        CodeHost {
+            provider: CodeHostProvider::Gitlab,
+            hostname: Some("old.example.com".into()),
+        },
+        None,
+    ))
+    .await;
+    assert_eq!(
+        app.ui_state.enriched_pr_unavailable, None,
+        "a result from the previous GitLab host must not update negative caches"
+    );
 }
 
 // ---------------------------------------------------------------------------
 // Clone repository: palette command, repo picker, and clone-job progress
 // ---------------------------------------------------------------------------
 
-use claude_commander_protocol::github::{
-    CloneJob, CloneJobId, CloneSource, CloneStatus, GithubRepo,
-};
+use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneStatus, GithubRepo};
+use claude_commander_protocol::hosting::CloneSource;
 
 /// A `GithubRepo` with just the fields the picker reads; the rest are plausible
 /// constants so a test can build a list without restating the whole DTO.
@@ -8911,10 +9470,10 @@ fn github_repo(full_name: &str) -> GithubRepo {
 
 /// The labels of the repo-picker rows the palette would show for `query`.
 fn repo_picker_labels(app: &App, query: &str) -> Vec<String> {
-    app.gather_github_repo_picker_items(query)
+    app.gather_repository_picker_items(query)
         .into_iter()
         .map(|item| match item {
-            QuickSwitchItem::GithubRepo { label, .. } => label,
+            QuickSwitchItem::HostedRepository { label, .. } => label,
             other => panic!("expected a GithubRepo row, got {other:?}"),
         })
         .collect()
@@ -8952,7 +9511,7 @@ async fn repo_picker_filter_narrows_to_matching_repos() {
         matches!(
             app.ui_state.modal,
             Modal::QuickSwitch {
-                mode: PaletteMode::GithubRepoPicker,
+                mode: PaletteMode::RepositoryPicker,
                 ..
             }
         ),
@@ -8960,9 +9519,9 @@ async fn repo_picker_filter_narrows_to_matching_repos() {
     );
 
     app.ui_state.repo_picker.repos = vec![
-        github_repo("sizeak/claude-commander"),
-        github_repo("sizeak/diffgrid"),
-        github_repo("other/commander-docs"),
+        github_repo("sizeak/claude-commander").into(),
+        github_repo("sizeak/diffgrid").into(),
+        github_repo("other/commander-docs").into(),
     ];
     app.ui_state.repo_picker.fetch = RepoFetch::Ready;
 
@@ -9007,8 +9566,8 @@ async fn repo_picker_marks_repos_already_registered_as_projects() {
 
     app.handle_command(UserCommand::CloneRepository).await;
     app.ui_state.repo_picker.repos = vec![
-        github_repo("sizeak/claude-commander"),
-        github_repo("sizeak/diffgrid"),
+        github_repo("sizeak/claude-commander").into(),
+        github_repo("sizeak/diffgrid").into(),
     ];
     app.ui_state.repo_picker.fetch = RepoFetch::Ready;
 
@@ -9033,7 +9592,7 @@ async fn a_failed_repo_list_is_shown_as_a_state_and_keeps_the_url_path_usable() 
     app.handle_command(UserCommand::CloneRepository).await;
     let generation = app.ui_state.repo_picker.generation;
 
-    app.handle_state_update(StateUpdate::GithubReposLoaded {
+    app.handle_state_update(StateUpdate::RepositoriesLoaded {
         backend_id: claude_commander_core::backend::LOCAL_BACKEND_ID.0,
         generation,
         result: Err("gh: command not found".to_string()),
@@ -9044,7 +9603,7 @@ async fn a_failed_repo_list_is_shown_as_a_state_and_keeps_the_url_path_usable() 
         matches!(
             app.ui_state.modal,
             Modal::QuickSwitch {
-                mode: PaletteMode::GithubRepoPicker,
+                mode: PaletteMode::RepositoryPicker,
                 ..
             }
         ),
@@ -9069,13 +9628,19 @@ async fn a_stale_repo_listing_is_dropped() {
     let mut app = make_test_app();
     app.handle_command(UserCommand::CloneRepository).await;
     let stale = app.ui_state.repo_picker.generation;
-    app.refetch_github_repos();
+    app.refetch_repositories();
     assert_ne!(app.ui_state.repo_picker.generation, stale);
 
-    app.handle_state_update(StateUpdate::GithubReposLoaded {
+    app.handle_state_update(StateUpdate::RepositoriesLoaded {
         backend_id: claude_commander_core::backend::LOCAL_BACKEND_ID.0,
         generation: stale,
-        result: Ok(vec![github_repo("stale/repo")]),
+        result: Ok(claude_commander_protocol::hosting::RepositoryListing {
+            host: claude_commander_protocol::hosting::CodeHost {
+                provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+                hostname: None,
+            },
+            repositories: vec![github_repo("stale/repo").into()],
+        }),
     })
     .await;
     assert!(
@@ -9086,10 +9651,32 @@ async fn a_stale_repo_listing_is_dropped() {
 }
 
 #[tokio::test]
+async fn gitlab_picker_knows_its_provider_before_an_empty_listing_arrives() {
+    let mut app = make_test_app();
+    app.backends[0].view.snapshot.server.code_host =
+        claude_commander_protocol::api::CodeHostStatus {
+            provider: claude_commander_protocol::hosting::CodeHostProvider::Gitlab,
+            hostname: Some("gitlab.example.com".into()),
+            cli_available: true,
+        };
+
+    app.handle_command(UserCommand::CloneRepository).await;
+
+    assert_eq!(
+        app.ui_state.repo_picker.host.provider,
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab
+    );
+    assert_eq!(
+        app.ui_state.repo_picker.host.hostname.as_deref(),
+        Some("gitlab.example.com")
+    );
+}
+
+#[tokio::test]
 async fn enter_on_a_repo_opens_an_editable_destination_name_prefilled_with_the_repo_name() {
     let mut app = make_test_app();
     app.handle_command(UserCommand::CloneRepository).await;
-    app.ui_state.repo_picker.repos = vec![github_repo("sizeak/claude-commander")];
+    app.ui_state.repo_picker.repos = vec![github_repo("sizeak/claude-commander").into()];
     app.ui_state.repo_picker.fetch = RepoFetch::Ready;
     app.refilter_quick_switch();
 
@@ -9116,6 +9703,40 @@ async fn enter_on_a_repo_opens_an_editable_destination_name_prefilled_with_the_r
         }
         other => panic!("expected the destination-name input, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn gitlab_repo_selection_freezes_provider_and_hostname_into_clone_source() {
+    let mut app = make_test_app();
+    app.handle_command(UserCommand::CloneRepository).await;
+    app.ui_state.repo_picker.host = claude_commander_protocol::hosting::CodeHost {
+        provider: claude_commander_protocol::hosting::CodeHostProvider::Gitlab,
+        hostname: Some("gitlab.example.com".into()),
+    };
+    let mut repo: claude_commander_protocol::hosting::HostedRepository =
+        github_repo("group/subgroup/project").into();
+    repo.namespace = "group/subgroup".into();
+    repo.name = "project".into();
+    app.ui_state.repo_picker.repos = vec![repo];
+    app.ui_state.repo_picker.fetch = RepoFetch::Ready;
+    app.refilter_quick_switch();
+
+    app.activate_quick_switch_selection().await;
+
+    let Modal::Input {
+        on_submit: InputAction::CloneDestName { source, .. },
+        ..
+    } = &app.ui_state.modal
+    else {
+        panic!("expected clone destination prompt")
+    };
+    assert_eq!(
+        source,
+        &CloneSource::Gitlab {
+            full_name: "group/subgroup/project".into(),
+            hostname: Some("gitlab.example.com".into()),
+        }
+    );
 }
 
 #[tokio::test]
@@ -9180,7 +9801,7 @@ async fn a_refused_url_is_reported_and_leaves_the_picker_open() {
             matches!(
                 app.ui_state.modal,
                 Modal::QuickSwitch {
-                    mode: PaletteMode::GithubRepoPicker,
+                    mode: PaletteMode::RepositoryPicker,
                     ..
                 }
             ),
@@ -9530,7 +10151,7 @@ fn the_help_modal_documents_the_clone_picker() {
         .join("\n");
     // Listed as a (palette-only) bindable action…
     assert!(
-        text.contains("Clone a GitHub repository"),
+        text.contains("Clone a hosted repository"),
         "help must list the command: {text}"
     );
     // …and the picker's own keys, which are not bindable actions.
@@ -11571,6 +12192,20 @@ mod workspaces {
             None,
         )
         .await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !app
+                .local_view()
+                .snapshot
+                .projects
+                .iter()
+                .any(|p| p.name == "scanned")
+            {
+                let event = app.event_loop.next().await.unwrap();
+                app.process_event(event).await;
+            }
+        })
+        .await
+        .expect("scan completion should refresh the project list");
         let scanned = app
             .local_view()
             .snapshot
@@ -11725,6 +12360,14 @@ mod workspaces {
             .set_modified(later)
             .unwrap();
         app.check_config_reload();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while app.ui_state.config_reload_in_flight {
+                let event = app.event_loop.next().await.unwrap();
+                app.process_event(event).await;
+            }
+        })
+        .await
+        .unwrap();
         assert_eq!(app.theme.status_bar_bg, Theme::lcars().status_bar_bg);
     }
 
@@ -12034,6 +12677,7 @@ mod workspaces {
     /// positions and hexes depend on the terminal running the tests).
     fn pin_truecolor(app: &mut App) {
         app.config.theme.preset = Some("truecolor".into());
+        persist_seeded_config(app);
         app.reload_theme();
     }
 
@@ -12264,6 +12908,7 @@ mod workspaces {
         app.config.theme.border_focused = Some(claude_commander_core::config::theme::ColorValue(
             rgb("#010203"),
         ));
+        persist_seeded_config(&app);
         app.reload_theme();
         feed(&mut app, KeyCode::Enter).await;
         let Some(SettingsEditing::OptionPicker { options, .. }) = &settings(&app).editing else {
@@ -12311,6 +12956,7 @@ mod workspaces {
         app.config
             .workspace_themes
             .insert("Work".into(), preset_entry("lcars"));
+        persist_seeded_config(&app);
         app.reload_theme();
         feed(&mut app, KeyCode::Enter).await;
         assert!(app.config.workspace_themes.is_empty());
@@ -12333,6 +12979,7 @@ mod workspaces {
         app.config
             .workspace_themes
             .insert("Work".into(), preset_entry("lcars"));
+        persist_seeded_config(&app);
         assert!(app.workspace_theme_customised(Some("Work")));
         assert!(!app.workspace_theme_customised(None));
         open_workspaces_tab(&mut app);
@@ -12353,10 +13000,7 @@ mod workspaces {
     /// a remote snapshot dropping it.
     async fn lose_work(app: &mut App) {
         app.service.delete_workspace("Work").await.unwrap();
-        // `pin_truecolor` set the usual theme in memory only; keep it.
-        let usual = app.config.theme.clone();
         app.config = app.service.read_config();
-        app.config.theme = usual;
         app.sync_local_view_from_store_for_test().await;
     }
 
@@ -12679,6 +13323,1154 @@ mod workspaces {
             "help must say workspaces have themes and where to edit them: {text}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_dictation_tick_invalidates_the_frame() {
+    let mut app = make_test_app();
+    app.ui_state.view_mode = ViewMode::Board;
+    app.conversation
+        .dictations
+        .sender()
+        .send(DictationOutcome::NothingHeard)
+        .expect("mailbox open");
+
+    assert!(app.process_event(AppEvent::Tick).await);
+    assert_eq!(toast(&app), "✗ Nothing heard");
+}
+
+#[tokio::test]
+async fn an_idle_tick_does_not_invalidate_the_frame() {
+    let mut app = make_test_app();
+    app.ui_state.view_mode = ViewMode::Board;
+    assert!(!app.process_event(AppEvent::Tick).await);
+}
+
+#[tokio::test]
+async fn superseded_preview_for_the_same_selection_cannot_overwrite_a_newer_resource() {
+    let mut app = make_test_app();
+    let sid = SessionId::new();
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+    app.ui_state.right_pane_view = RightPaneView::Shell;
+    app.ui_state.preview_content = "current pane".into();
+    app.ui_state.shell_content = "current shell".into();
+    let new_token = Instant::now();
+    app.ui_state.preview_update_spawned_at = Some(new_token);
+    app.handle_state_update(StateUpdate::PreviewReady {
+        spawned_at: new_token - Duration::from_millis(1),
+        session_id: Some(sid),
+        project_id: None,
+        preview_content: "obsolete pane".into(),
+        shell_content: "obsolete shell".into(),
+        diff_info: Arc::new(DiffInfo::empty()),
+    })
+    .await;
+    assert_eq!(app.ui_state.preview_content, "current pane");
+    assert_eq!(app.ui_state.shell_content, "current shell");
+    assert_eq!(app.ui_state.preview_update_spawned_at, Some(new_token));
+}
+
+#[tokio::test]
+async fn a_removed_backends_create_completion_is_ignored() {
+    let mut app = make_test_app();
+    app.ui_state.modal = Modal::Error {
+        message: "current modal".into(),
+    };
+    app.handle_state_update(StateUpdate::SessionCreated {
+        session_id: SessionId::new(),
+        backend_id: 999,
+    })
+    .await;
+    assert!(matches!(&app.ui_state.modal, Modal::Error { message } if message == "current modal"));
+    assert!(app.ui_state.pending_selection.is_none());
+}
+
+#[tokio::test]
+async fn attach_return_renders_before_slow_fresh_agent_detection() {
+    let (mut app, sid) = app_with_remote_session().await;
+    let name = app.view_for(BackendId(1)).snapshot.sessions[0]
+        .tmux_session_name
+        .clone();
+    let viewed = HashSet::from([name]);
+    let gate = remote_mock(&app, BackendId(1)).block_fresh_agent_states();
+    app.backend_mut_for_test(BackendId(1))
+        .view
+        .agent_states
+        .states
+        .insert(sid, AgentState::Working);
+    remote_mock(&app, BackendId(1)).set_agent_states(
+        claude_commander_core::api::AgentStatesSnapshot {
+            states: BTreeMap::from([(sid, AgentState::Idle)]),
+            commander_running: false,
+        },
+    );
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        app.refresh_after_attach(BackendId(1), &viewed),
+    )
+    .await
+    .expect("attach return must allow a board frame while fresh detection is blocked");
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    assert_eq!(
+        app.view_for(BackendId(1)).agent_states.states.get(&sid),
+        Some(&AgentState::Working)
+    );
+
+    gate.notify_one();
+    let event = tokio::time::timeout(Duration::from_secs(1), app.event_loop.next())
+        .await
+        .unwrap()
+        .unwrap();
+    app.process_event(event).await;
+    assert_eq!(
+        app.view_for(BackendId(1)).agent_states.states.get(&sid),
+        Some(&AgentState::Idle)
+    );
+    assert!(
+        remote_mock(&app, BackendId(1))
+            .agent_states_calls()
+            .contains(&true)
+    );
+    assert!(
+        remote_mock(&app, BackendId(1))
+            .read_marked_sessions()
+            .contains(&sid)
+    );
+}
+
+#[tokio::test]
+async fn attach_refresh_marks_switcher_visits_and_preserves_other_backends() {
+    let (mut snapshot, first, _) = snapshot_with_one_session();
+    let mut second = snapshot.sessions[0].clone();
+    second.session_id = SessionId::new();
+    second.tmux_session_name = "cc-second".into();
+    let second_id = second.session_id;
+    snapshot.sessions.push(second);
+    let mut untouched = snapshot.sessions[0].clone();
+    untouched.session_id = SessionId::new();
+    untouched.tmux_session_name = "cc-unviewed".into();
+    let untouched_id = untouched.session_id;
+    snapshot.sessions.push(untouched);
+    let first_name = snapshot.sessions[0].tmux_session_name.clone();
+    let (other_snapshot, other_sid, _) = snapshot_with_one_session();
+    let mut app =
+        build_app_with_mock_remotes(vec![("buildbox", snapshot), ("other", other_snapshot)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+    app.refresh_backend_view(BackendId(2)).await;
+    app.backend_mut_for_test(BackendId(1))
+        .view
+        .agent_states
+        .states = BTreeMap::from([
+        (first, AgentState::Working),
+        (second_id, AgentState::Working),
+        (untouched_id, AgentState::Working),
+    ]);
+    app.backend_mut_for_test(BackendId(2))
+        .view
+        .agent_states
+        .states = BTreeMap::from([(other_sid, AgentState::Working)]);
+    app.ui_state
+        .agent_states
+        .insert(other_sid, AgentState::Idle);
+    remote_mock(&app, BackendId(1)).set_agent_states(
+        claude_commander_core::api::AgentStatesSnapshot {
+            states: BTreeMap::from([
+                (first, AgentState::Idle),
+                (second_id, AgentState::Idle),
+                (untouched_id, AgentState::Idle),
+            ]),
+            commander_running: false,
+        },
+    );
+    app.refresh_after_attach(
+        BackendId(1),
+        &HashSet::from([first_name, "cc-second-sh".into(), "commander".into()]),
+    )
+    .await;
+    let event = tokio::time::timeout(Duration::from_secs(1), app.event_loop.next())
+        .await
+        .unwrap()
+        .unwrap();
+    app.process_event(event).await;
+    let marked = remote_mock(&app, BackendId(1)).read_marked_sessions();
+    assert_eq!(marked.len(), 2);
+    assert!(marked.contains(&first) && marked.contains(&second_id));
+    assert!(
+        remote_mock(&app, BackendId(2))
+            .read_marked_sessions()
+            .is_empty()
+    );
+    assert_eq!(
+        app.view_for(BackendId(1)).agent_states.states,
+        BTreeMap::from([
+            (first, AgentState::Idle),
+            (second_id, AgentState::Idle),
+            (untouched_id, AgentState::Working),
+        ])
+    );
+    assert_eq!(
+        app.view_for(BackendId(2))
+            .agent_states
+            .states
+            .get(&other_sid),
+        Some(&AgentState::Working)
+    );
+    assert_eq!(
+        app.ui_state.agent_states.get(&other_sid),
+        Some(&AgentState::Idle)
+    );
+}
+
+#[tokio::test]
+async fn attach_refresh_local_merge_and_stale_events() {
+    let mut app = make_test_app();
+    let (mut snapshot, viewed, _) = snapshot_with_one_session();
+    snapshot.sessions[0].unread = true;
+    app.backend_mut_for_test(LOCAL_BACKEND_ID).view.snapshot = snapshot.clone();
+    let unviewed = SessionId::new();
+    let old = BTreeMap::from([
+        (viewed, AgentState::Working),
+        (unviewed, AgentState::Working),
+    ]);
+    app.ui_state.agent_states = old.clone();
+    app.backend_mut_for_test(LOCAL_BACKEND_ID)
+        .view
+        .agent_states
+        .states = old;
+    app.process_event(AppEvent::StateUpdate(
+        StateUpdate::ViewedAgentStatesUpdated {
+            backend_id: LOCAL_BACKEND_ID.0,
+            revision: 2,
+            states: BTreeMap::from([(viewed, AgentState::Idle)]),
+        },
+    ))
+    .await;
+    assert_eq!(
+        app.ui_state.agent_states,
+        app.view_for(LOCAL_BACKEND_ID).agent_states.states
+    );
+    assert_eq!(
+        app.ui_state.agent_states.get(&unviewed),
+        Some(&AgentState::Working)
+    );
+    // The mark-read snapshot request started before the fresh read finished.
+    // Its workspace fields are still valid, even though its agent states are old.
+    snapshot.sessions[0].unread = false;
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: LOCAL_BACKEND_ID.0,
+        revision: 1,
+        snapshot: Box::new(snapshot),
+        states: agent_states_box(),
+    })
+    .await;
+    assert!(!app.view_for(LOCAL_BACKEND_ID).snapshot.sessions[0].unread);
+    assert_eq!(app.backend(LOCAL_BACKEND_ID).unwrap().view_revision, 1);
+    assert_eq!(
+        app.backend(LOCAL_BACKEND_ID).unwrap().agent_states_revision,
+        2
+    );
+    app.handle_state_update(StateUpdate::ViewedAgentStatesUpdated {
+        backend_id: LOCAL_BACKEND_ID.0,
+        revision: 1,
+        states: BTreeMap::from([(viewed, AgentState::Working)]),
+    })
+    .await;
+    assert_eq!(
+        app.ui_state.agent_states.get(&viewed),
+        Some(&AgentState::Idle)
+    );
+    app.handle_state_update(StateUpdate::ViewedAgentStatesUpdated {
+        backend_id: 999,
+        revision: 3,
+        states: BTreeMap::new(),
+    })
+    .await;
+    assert_eq!(
+        app.ui_state.agent_states.get(&viewed),
+        Some(&AgentState::Idle)
+    );
+}
+
+#[tokio::test]
+async fn attach_refresh_failure_and_no_viewed_sessions_preserve_cache() {
+    let (mut app, sid) = app_with_remote_session().await;
+    let name = app.view_for(BackendId(1)).snapshot.sessions[0]
+        .tmux_session_name
+        .clone();
+    let states = BTreeMap::from([(sid, AgentState::Working)]);
+    app.backend_mut_for_test(BackendId(1))
+        .view
+        .agent_states
+        .states = states.clone();
+    let calls = remote_mock(&app, BackendId(1)).agent_states_calls().len();
+    app.refresh_after_attach(BackendId(1), &HashSet::from(["commander".into()]))
+        .await;
+    assert_eq!(
+        remote_mock(&app, BackendId(1)).agent_states_calls().len(),
+        calls
+    );
+    remote_mock(&app, BackendId(1)).set_failing(true);
+    app.refresh_after_attach(BackendId(1), &HashSet::from([name]))
+        .await;
+    // Await the owned refresh task instead of sleeping to guess completion.
+    app.backend_mut_for_test(BackendId(1))
+        .feed_tasks
+        .pop()
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(app.view_for(BackendId(1)).agent_states.states, states);
+    assert!(app.event_loop.try_next().is_none());
+}
+
+#[tokio::test]
+async fn edit_session_prefills_selected_remote_and_confirms_both_restart_choices() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    for restart in [false, true] {
+        let (mut app, sid) = app_with_remote_session().await;
+        app.ui_state.selected_session_id = Some(SessionRef::new(BackendId(1), sid));
+        let info = app
+            .session(app.ui_state.selected_session_id.unwrap())
+            .unwrap()
+            .clone();
+        app.handle_edit_session();
+        let Modal::EditSession(editor) = &mut app.ui_state.modal else {
+            panic!("editor");
+        };
+        assert_eq!(editor.name.value(), info.title);
+        assert_eq!(editor.program.value(), info.program);
+        assert_eq!(editor.keep_alive, info.keep_alive);
+        editor.load_options(claude_commander_protocol::api::CreateOptions {
+            default_program: "claude".into(),
+            programs: vec![claude_commander_protocol::api::ProgramInfo {
+                label: "Codex".into(),
+                command: "codex".into(),
+            }],
+            sections: vec![],
+        });
+        editor.program = "codex".into();
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.handle_edit_session_key(key(KeyCode::Enter));
+        assert!(matches!(app.ui_state.modal, Modal::EditSessionRestart(_)));
+        assert!(remote_mock(&app, BackendId(1)).session_edits().is_empty());
+        app.handle_edit_session_key(key(KeyCode::Char(if restart { 'y' } else { 'n' })));
+        loop {
+            if let AppEvent::StateUpdate(StateUpdate::SessionMutationApplied {
+                backend_id,
+                session_id,
+            }) = app.event_loop.next().await.unwrap()
+            {
+                assert_eq!(backend_id, 1);
+                assert_eq!(session_id, sid);
+                break;
+            }
+        }
+        let edits = remote_mock(&app, BackendId(1)).session_edits();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].0, sid);
+        assert_eq!(edits[0].1.program.as_deref(), Some("codex"));
+        assert_eq!(edits[0].1.restart, restart);
+    }
+}
+
+#[tokio::test]
+async fn edit_session_program_field_shows_alias_and_cycles_commands() {
+    use claude_commander_protocol::api::{CreateOptions, ProgramInfo};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let (mut app, sid) = app_with_remote_session().await;
+    let session = SessionRef::new(BackendId(1), sid);
+    app.ui_state.selected_session_id = Some(session);
+    let original = app.session(session).unwrap().program.clone();
+    app.handle_edit_session();
+    let Modal::EditSession(editor) = &mut app.ui_state.modal else {
+        panic!("editor");
+    };
+    editor.load_options(CreateOptions {
+        default_program: original.clone(),
+        programs: vec![
+            ProgramInfo {
+                label: "Current agent alias".into(),
+                command: original,
+            },
+            ProgramInfo {
+                label: "Codex alias".into(),
+                command: "codex --sandbox workspace-write".into(),
+            },
+        ],
+        sections: vec![],
+    });
+    editor.focus = 1;
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| app.render(frame)).unwrap();
+    assert!(buffer_text(&terminal).contains("Program: Current agent alias"));
+    app.handle_edit_session_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    terminal.draw(|frame| app.render(frame)).unwrap();
+    let text = buffer_text(&terminal);
+    assert!(text.contains("Program: Codex alias"));
+    assert!(!text.contains("codex --sandbox workspace-write"));
+    let Modal::EditSession(editor) = &app.ui_state.modal else {
+        panic!("editor");
+    };
+    assert_eq!(
+        editor.edit(false).unwrap().program.as_deref(),
+        Some("codex --sandbox workspace-write")
+    );
+}
+
+/// A GitLab hostname edit goes through the service's code-host path, as a
+/// provider change does, so the cached glab probe is reset and PRs refetched
+/// rather than the hostname only being written to config.
+#[tokio::test]
+async fn gitlab_hostname_edit_runs_through_the_code_host_path() {
+    let (mut app, _) = app_with_remote_session().await;
+    open_general_settings_on(&mut app, "gitlab_hostname");
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let keys = std::iter::once(KeyCode::Enter)
+        .chain(std::iter::repeat_n(KeyCode::Backspace, 32))
+        .chain("gitlab.example.com".chars().map(KeyCode::Char))
+        .chain(std::iter::once(KeyCode::Enter));
+    for code in keys {
+        app.process_event(AppEvent::Input(crate::event::InputEvent::Key(
+            KeyEvent::new(code, KeyModifiers::NONE),
+        )))
+        .await;
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = app.event_loop.next().await.unwrap();
+            let done = matches!(
+                &event,
+                AppEvent::StateUpdate(StateUpdate::CodeHostConfigUpdated { result: Ok(()) })
+            );
+            app.process_event(event).await;
+            if done {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the edit should complete through edit_code_host_config");
+    assert_eq!(
+        app.service.read_config().gitlab_hostname.as_deref(),
+        Some("gitlab.example.com")
+    );
+    assert_eq!(
+        app.config.gitlab_hostname.as_deref(),
+        Some("gitlab.example.com")
+    );
+}
+
+#[tokio::test]
+async fn edit_session_retains_unconfigured_live_program_with_a_pending_change() {
+    use claude_commander_protocol::api::{CreateOptions, ProgramInfo};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let (mut app, sid) = app_with_remote_session().await;
+    let session = SessionRef::new(BackendId(1), sid);
+    let mut info = app.session(session).unwrap().clone();
+    info.program = "custom-agent --flag".into();
+    info.pending_program = Some("codex".into());
+    let mut editor = edit_session::SessionEditor::new(session, &info, &[], "main");
+    editor.load_options(CreateOptions {
+        default_program: "codex".into(),
+        programs: vec![ProgramInfo {
+            label: "Codex alias".into(),
+            command: "codex".into(),
+        }],
+        sections: vec![],
+    });
+    assert_eq!(editor.edit(false).unwrap().program.as_deref(), None);
+    editor.focus = 1;
+    app.ui_state.modal = Modal::EditSession(editor);
+    app.handle_edit_session_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    let Modal::EditSession(editor) = &app.ui_state.modal else {
+        panic!("editor");
+    };
+    assert_eq!(
+        editor.edit(false).unwrap().program.as_deref(),
+        Some("custom-agent --flag")
+    );
+}
+
+#[tokio::test]
+async fn edit_session_cancel_and_warning_back_preserve_process() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let (mut app, sid) = app_with_remote_session().await;
+    app.ui_state.selected_session_id = Some(SessionRef::new(BackendId(1), sid));
+    app.handle_edit_session();
+    let Modal::EditSession(editor) = &mut app.ui_state.modal else {
+        panic!("editor");
+    };
+    editor.load_options(claude_commander_protocol::api::CreateOptions {
+        default_program: "claude".into(),
+        programs: vec![claude_commander_protocol::api::ProgramInfo {
+            label: "Codex".into(),
+            command: "codex".into(),
+        }],
+        sections: vec![],
+    });
+    editor.program = "codex".into();
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    app.handle_edit_session_key(key(KeyCode::Enter));
+    app.handle_edit_session_key(key(KeyCode::Esc));
+    let Modal::EditSession(editor) = &app.ui_state.modal else {
+        panic!("editor restored");
+    };
+    assert_eq!(editor.program.value(), "codex");
+    app.handle_edit_session_key(key(KeyCode::Esc));
+    assert!(matches!(app.ui_state.modal, Modal::None));
+    assert!(remote_mock(&app, BackendId(1)).session_edits().is_empty());
+}
+
+#[test]
+fn edit_session_keeps_individual_setting_commands_in_palette() {
+    let state = ui_state_with(Some(SessionId::new()), Some(ProjectId::new()));
+    let entries = state.gather_command_entries(&KeyBindings::default(), "");
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.action == BindableAction::EditSession)
+    );
+    for old in [
+        BindableAction::RenameSession,
+        BindableAction::ChangeProgram,
+        BindableAction::MoveToSection,
+        BindableAction::ToggleKeepAlive,
+        BindableAction::SetSessionBase,
+    ] {
+        assert!(entries.iter().any(|e| e.action == old));
+    }
+}
+
+#[tokio::test]
+async fn deferred_program_keeps_live_agent_behavior_and_prefills_pending_editor() {
+    let (mut app, session) = app_with_session_running("claude").await;
+    app.service
+        .store()
+        .mutate(move |state| {
+            state.get_session_mut(&session.id).unwrap().pending_program = Some("omp".into());
+        })
+        .await
+        .unwrap();
+    app.sync_local_view_from_store_for_test().await;
+    let pane = app.pane_info_for(&AttachTarget::Session {
+        session,
+        kind: AttachKind::Agent,
+    });
+    assert_eq!(pane.agent, claude_commander_core::agent::AgentKind::Claude);
+    assert_eq!(
+        pane.agent.submit_key_delay(),
+        Some(Duration::from_millis(250))
+    );
+    app.ui_state.selected_session_id = Some(session);
+    app.handle_edit_session();
+    let Modal::EditSession(editor) = &app.ui_state.modal else {
+        panic!("editor");
+    };
+    assert_eq!(editor.program.value(), "omp");
+}
+
+#[tokio::test]
+async fn session_edit_options_arriving_during_warning_survive_going_back() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let (mut app, sid) = app_with_remote_session().await;
+    let session = SessionRef::new(BackendId(1), sid);
+    app.ui_state.selected_session_id = Some(session);
+    app.handle_edit_session();
+    let Modal::EditSession(editor) = &mut app.ui_state.modal else {
+        panic!("editor");
+    };
+    editor.load_options(claude_commander_protocol::api::CreateOptions {
+        default_program: "claude".into(),
+        programs: vec![claude_commander_protocol::api::ProgramInfo {
+            label: "Codex".into(),
+            command: "codex".into(),
+        }],
+        sections: vec![],
+    });
+    editor.program = "codex".into();
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    app.handle_edit_session_key(key(KeyCode::Enter));
+    app.handle_state_update(StateUpdate::SessionEditOptionsLoaded {
+        session,
+        result: Ok(claude_commander_protocol::api::CreateOptions {
+            default_program: "claude".into(),
+            programs: vec![claude_commander_protocol::api::ProgramInfo {
+                label: "Oh My Pi".into(),
+                command: "omp".into(),
+            }],
+            sections: vec!["Review".into()],
+        }),
+    })
+    .await;
+    app.handle_edit_session_key(key(KeyCode::Esc));
+    let Modal::EditSession(editor) = &app.ui_state.modal else {
+        panic!("editor restored");
+    };
+    assert!(editor.programs.iter().any(|p| p.command == "omp"));
+    assert!(editor.sections.contains(&Some("Review".into())));
+}
+
+/// A session that ends under an attach is most often one another viewer just
+/// restarted, so the agent is already running again. The loop must go round
+/// and attach to it, not restart it a second time: that killed the agent the
+/// other viewer had just started and lost its conversation. A session that
+/// is really gone is revived by the attach itself (`ensure_attachable`).
+#[tokio::test]
+async fn an_ended_attach_reattaches_without_restarting_the_agent() {
+    let (app, sid) = app_with_remote_session().await;
+    let target = AttachTarget::Session {
+        session: SessionRef::new(BackendId(1), sid),
+        kind: AttachKind::Agent,
+    };
+    let mut ends = 0;
+
+    assert!(app.on_attach_session_ended(&target, &mut ends).await);
+
+    let mock = remote_mock(&app, BackendId(1));
+    assert!(mock.reset_sessions().is_empty(), "no fresh restart");
+    assert!(mock.restarted_sessions().is_empty(), "no resume restart");
+    assert_eq!(ends, 1);
+}
+
+/// A session deleted elsewhere also ends the attach. Re-attaching would fail
+/// with an error modal for an ordinary deletion (or race the deletion and
+/// recreate its tmux session), so the loop returns to the list instead.
+#[tokio::test]
+async fn an_attach_whose_session_was_deleted_returns_to_the_list() {
+    let (app, sid) = app_with_remote_session().await;
+    remote_mock(&app, BackendId(1)).set_snapshot(claude_commander_core::api::snapshot_from_state(
+        &AppState::default(),
+    ));
+    let target = AttachTarget::Session {
+        session: SessionRef::new(BackendId(1), sid),
+        kind: AttachKind::Agent,
+    };
+    let mut ends = 0;
+
+    assert!(!app.on_attach_session_ended(&target, &mut ends).await);
+}
+
+/// The crash-loop guard still applies: a session that keeps ending as soon
+/// as it is attached sends the operator back to the list.
+#[tokio::test]
+async fn an_attach_that_keeps_ending_returns_to_the_list() {
+    let (app, sid) = app_with_remote_session().await;
+    let target = AttachTarget::Session {
+        session: SessionRef::new(BackendId(1), sid),
+        kind: AttachKind::Agent,
+    };
+    let mut ends = 3;
+
+    assert!(!app.on_attach_session_ended(&target, &mut ends).await);
+}
+
+#[tokio::test]
+async fn provider_picker_runs_in_background_and_refreshes_its_display() {
+    let (mut app, _) = app_with_remote_session().await;
+    open_general_settings_on(&mut app, "code_host_provider");
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    for code in [KeyCode::Enter, KeyCode::Down, KeyCode::Enter] {
+        app.process_event(AppEvent::Input(crate::event::InputEvent::Key(
+            KeyEvent::new(code, KeyModifiers::NONE),
+        )))
+        .await;
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = app.event_loop.next().await.unwrap();
+            let done = matches!(
+                &event,
+                AppEvent::StateUpdate(StateUpdate::CodeHostConfigUpdated { .. })
+            );
+            app.process_event(event).await;
+            if done {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        app.config.code_host_provider,
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab
+    );
+    let Modal::Settings(state) = &app.ui_state.modal else {
+        panic!("settings should stay open");
+    };
+    let row = state
+        .rows
+        .iter()
+        .find(|r| r.field_key == "code_host_provider")
+        .unwrap();
+    assert!(matches!(&row.kind, SettingsRowKind::Text(value) if value == "GitLab"));
+    app.ui_state.modal = Modal::Error {
+        message: "keep this dialog".into(),
+    };
+    app.handle_state_update(StateUpdate::CodeHostConfigUpdated {
+        result: Err("failed".into()),
+    })
+    .await;
+    assert!(
+        matches!(&app.ui_state.modal, Modal::Error { message } if message == "keep this dialog")
+    );
+}
+
+/// Under `--serve` a web/Flutter `PATCH /config` can switch the provider on the
+/// service this TUI shares, without the hot-reload ever re-reading it (the
+/// shared store's own write updates the tracked mtime). A later TUI settings
+/// edit, sent from the now-stale cached config, must still land — not be
+/// rejected for its stale provider and silently dropped.
+#[tokio::test]
+async fn settings_edit_after_external_provider_switch_is_not_lost() {
+    use claude_commander_protocol::hosting::CodeHostProvider;
+    let mut app = make_test_app();
+    app.service
+        .edit_code_host_config(|config| {
+            config.code_host_provider = CodeHostProvider::Gitlab;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(app.config.code_host_provider, CodeHostProvider::Github);
+    let rounded = !app.config.rounded_borders;
+    open_general_settings_on(&mut app, "rounded_borders");
+    feed_programs_key(&mut app, crossterm::event::KeyCode::Char(' ')).await;
+    let persisted = app.service.read_config();
+    assert_eq!(persisted.rounded_borders, rounded, "the edit was dropped");
+    assert_eq!(persisted.code_host_provider, CodeHostProvider::Gitlab);
+    assert_eq!(app.config.code_host_provider, CodeHostProvider::Gitlab);
+}
+
+/// A web/Flutter `PATCH /config` that changes the provider *and* other fields
+/// must survive a later TUI toggle of an unrelated setting. Saving the TUI's
+/// whole cached config — even with the service's provider patched in — wrote
+/// back the stale `gitlab_hostname`, silently reverting the web edit (and,
+/// bypassing `edit_code_host_config`, without any probe reset or PR refresh).
+#[tokio::test]
+async fn tui_toggle_after_web_code_host_edit_keeps_the_web_values() {
+    use claude_commander_protocol::hosting::CodeHostProvider;
+    let mut app = make_test_app();
+    app.service
+        .edit_code_host_config(|config| {
+            config.code_host_provider = CodeHostProvider::Gitlab;
+            config.gitlab_hostname = Some("gitlab.example.com".into());
+            config.branch_prefix = "web/".into();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let rounded = !app.config.rounded_borders;
+    open_general_settings_on(&mut app, "rounded_borders");
+    feed_programs_key(&mut app, crossterm::event::KeyCode::Char(' ')).await;
+    let persisted = app.service.read_config();
+    assert_eq!(persisted.rounded_borders, rounded, "the edit was dropped");
+    assert_eq!(persisted.code_host_provider, CodeHostProvider::Gitlab);
+    assert_eq!(
+        persisted.gitlab_hostname.as_deref(),
+        Some("gitlab.example.com")
+    );
+    assert_eq!(persisted.branch_prefix, "web/");
+    assert_eq!(app.config.gitlab_hostname, persisted.gitlab_hostname);
+}
+
+/// Open the General settings tab with the `field_key` row selected.
+fn open_general_settings_on(app: &mut App, field_key: &str) {
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let selected_row = rows
+        .iter()
+        .position(|r| r.field_key == field_key)
+        .expect("row exists");
+    app.ui_state.modal = Modal::Settings(SettingsState {
+        tab: SettingsTab::General,
+        selected_row,
+        editing: None,
+        rows,
+        sections_state: SectionsState::default(),
+        workspaces_state: WorkspacesState::default(),
+        programs_state: ProgramsState::default(),
+        theme_scope: crate::app::ThemeScope::Usual,
+        search: None,
+    });
+}
+
+/// The hot-reload runs in a spawned task, so the service holds a newly added
+/// remote server before the TUI handles `ConfigReloaded`. A settings key
+/// handled in that gap syncs the cache from the service; the reload must
+/// still connect the server rather than diffing the synced cache against
+/// itself and skipping the reconcile.
+#[tokio::test]
+async fn settings_key_before_config_reloaded_still_connects_a_new_server() {
+    let mut app = make_test_app();
+    assert_eq!(app.backends.len(), 1);
+    let mut reloaded = app.service.read_config();
+    reloaded
+        .remote_servers
+        .push(server_cfg("buildbox", "http://b:7878"));
+    app.service.update_config(reloaded).unwrap();
+
+    open_general_settings_on(&mut app, "rounded_borders");
+    feed_programs_key(&mut app, crossterm::event::KeyCode::Down).await;
+    app.apply_config_reload(Ok(true));
+
+    let names: Vec<String> = app
+        .backends
+        .iter()
+        .map(|h| h.backend.descriptor().name)
+        .collect();
+    assert_eq!(names, vec!["local", "buildbox"]);
+}
+
+/// A code-host edit completing between a hot-reload and its `ConfigReloaded`
+/// event must not hide a server the reload added, as a settings key must not.
+#[tokio::test]
+async fn code_host_update_before_config_reloaded_still_connects_a_new_server() {
+    let mut app = make_test_app();
+    assert_eq!(app.backends.len(), 1);
+    let mut reloaded = app.service.read_config();
+    reloaded
+        .remote_servers
+        .push(server_cfg("buildbox", "http://b:7878"));
+    app.service.update_config(reloaded).unwrap();
+
+    app.handle_state_update(StateUpdate::CodeHostConfigUpdated { result: Ok(()) })
+        .await;
+    app.apply_config_reload(Ok(true));
+
+    let names: Vec<String> = app
+        .backends
+        .iter()
+        .map(|h| h.backend.descriptor().name)
+        .collect();
+    assert_eq!(names, vec!["local", "buildbox"]);
+}
+
+/// A toggle flips the service's current value, not the one the open modal
+/// rendered before another writer (a web `PATCH /config`) changed it.
+#[tokio::test]
+async fn settings_toggle_after_external_change_flips_the_fresh_value() {
+    let mut app = make_test_app();
+    open_general_settings_on(&mut app, "rounded_borders");
+    let external = !app.config.rounded_borders;
+    let mut patched = app.service.read_config();
+    patched.rounded_borders = external;
+    app.service.update_config(patched).unwrap();
+
+    feed_programs_key(&mut app, crossterm::event::KeyCode::Char(' ')).await;
+
+    assert_eq!(app.service.read_config().rounded_borders, !external);
+}
+
+/// A settings save the service rejects is surfaced to the user and the cached
+/// config resynchronised, never only logged.
+#[tokio::test]
+async fn rejected_settings_save_is_surfaced_and_config_reloaded() {
+    let (mut app, config_path) = make_test_app_with_path();
+    // A directory where the config file belongs makes the write fail.
+    let _ = std::fs::remove_file(&config_path);
+    std::fs::create_dir_all(&config_path).unwrap();
+    let rounded = app.config.rounded_borders;
+    app.apply_bool_setting("rounded_borders", !rounded);
+    // The unsaved edit is discarded, matching the service, which kept none of it.
+    assert_eq!(app.config.rounded_borders, rounded);
+    assert_eq!(app.service.read_config().rounded_borders, rounded);
+    let (message, _) = app
+        .ui_state
+        .status_message
+        .as_ref()
+        .expect("a failed save must be visible");
+    assert!(message.contains("Failed to save settings"), "{message}");
+}
+
+#[tokio::test]
+async fn late_background_error_preserves_a_new_modal() {
+    let (mut app, _) = app_with_remote_session().await;
+    app.ui_state.modal = Modal::Error {
+        message: "newer dialog".into(),
+    };
+    app.handle_state_update(StateUpdate::ActionFinished {
+        backend_id: 1,
+        message: Err("background error".into()),
+    })
+    .await;
+    assert!(matches!(&app.ui_state.modal, Modal::Error { message } if message == "newer dialog"));
+    assert_eq!(
+        app.ui_state.status_message.as_ref().unwrap().0,
+        "background error"
+    );
+}
+
+#[tokio::test]
+async fn failed_pending_selection_is_discarded_without_lfs() {
+    let (mut app, _) = app_with_remote_session().await;
+    let id = SessionId::new();
+    app.ui_state.pending_selection = app.pending_session(SessionRef::new(BackendId(1), id));
+    let view = app.view_for(BackendId(1));
+    let snapshot = Box::new(view.snapshot.clone());
+    let states = Box::new(view.agent_states.clone());
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: 1,
+        revision: u64::MAX,
+        snapshot,
+        states,
+    })
+    .await;
+    assert!(app.ui_state.pending_selection.is_none());
+    assert!(app.ui_state.lfs_pull_in_flight.is_empty());
+}
+
+#[tokio::test]
+async fn conversation_stream_and_external_recording_request_redraw() {
+    let (mut app, _) = app_with_remote_session().await;
+    app.conversation
+        .recording
+        .store(true, std::sync::atomic::Ordering::Release);
+    assert!(app.process_event(AppEvent::Tick).await);
+    app.conversation
+        .recording
+        .store(false, std::sync::atomic::Ordering::Release);
+    assert!(app.process_event(AppEvent::Tick).await);
+}
+
+/// A background result that lands while the in-session switcher is up must
+/// reach the main loop afterwards, not be dropped: `LfsPullFinished` is the only
+/// thing that clears `lfs_pull_in_flight`, so losing it leaves the "LFS" marker
+/// stuck for the rest of the run.
+#[tokio::test]
+async fn background_results_during_the_switcher_are_applied_afterwards() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    let sid = SessionId::new();
+    app.ui_state.lfs_pull_in_flight.insert(sid);
+    app.open_quick_switch_with_mode(PaletteMode::Unified).await;
+
+    let tx = app.event_loop.sender();
+    tx.send(AppEvent::StateUpdate(StateUpdate::LfsPullFinished {
+        session_id: sid,
+    }))
+    .await
+    .unwrap();
+    tx.send(AppEvent::Input(InputEvent::Key(KeyEvent::new(
+        KeyCode::Esc,
+        KeyModifiers::NONE,
+    ))))
+    .await
+    .unwrap();
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+    let exit = tokio::time::timeout(
+        Duration::from_secs(5),
+        app.switcher_event_loop(&mut terminal),
+    )
+    .await
+    .expect("Esc closes the overlay");
+    assert!(matches!(
+        exit,
+        super::switcher::OverlayExit::Cancelled { .. }
+    ));
+    assert!(
+        app.ui_state.lfs_pull_in_flight.contains(&sid),
+        "the overlay must not apply results under the palette"
+    );
+
+    // Back in the main loop: drain what is queued, as `run` does.
+    while let Some(event) = app.event_loop.try_next() {
+        app.process_event(event).await;
+    }
+    assert!(
+        app.ui_state.lfs_pull_in_flight.is_empty(),
+        "LfsPullFinished delivered during the switcher was lost"
+    );
+}
+
+#[tokio::test]
+async fn selecting_a_mutated_session_does_not_start_lfs() {
+    let mut app = make_test_app();
+    let (mut snapshot, sid, _) = snapshot_with_one_session();
+    let dir = tempfile::TempDir::new().unwrap();
+    snapshot.sessions[0].worktree_path = dir.path().to_string_lossy().into_owned();
+    app.config.skip_lfs_smudge = true;
+    app.ui_state.pending_selection = app.pending_session(SessionRef::local(sid));
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: LOCAL_BACKEND_ID.0,
+        revision: 1,
+        snapshot: Box::new(snapshot),
+        states: agent_states_box(),
+    })
+    .await;
+    assert!(app.ui_state.lfs_pull_in_flight.is_empty());
+}
+
+#[tokio::test]
+async fn create_lfs_intent_survives_an_older_snapshot() {
+    let mut app = make_test_app();
+    let (mut snapshot, sid, _) = snapshot_with_one_session();
+    let dir = tempfile::TempDir::new().unwrap();
+    snapshot.sessions[0].worktree_path = dir.path().to_string_lossy().into_owned();
+    app.config.skip_lfs_smudge = true;
+    // Revision 1 was fetched before the create; the post-create refresh is 2.
+    let pending = PendingSession {
+        session: SessionRef::local(sid),
+        settles_at: 2,
+    };
+    app.ui_state.pending_created = vec![pending];
+    let mut old = snapshot.clone();
+    old.sessions.clear();
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: LOCAL_BACKEND_ID.0,
+        revision: 1,
+        snapshot: Box::new(old),
+        states: agent_states_box(),
+    })
+    .await;
+    assert_eq!(app.ui_state.pending_created, vec![pending]);
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: LOCAL_BACKEND_ID.0,
+        revision: 2,
+        snapshot: Box::new(snapshot),
+        states: agent_states_box(),
+    })
+    .await;
+    assert!(app.ui_state.pending_created.is_empty());
+    assert!(app.ui_state.lfs_pull_in_flight.contains(&sid));
+}
+
+#[tokio::test]
+async fn reopening_repository_picker_rejects_previous_provider_results() {
+    let mut app = make_test_app();
+    app.handle_command(UserCommand::CloneRepository).await;
+    let old_generation = app.ui_state.repo_picker.generation;
+    app.ui_state.modal = Modal::None;
+    app.backend_mut_for_test(LOCAL_BACKEND_ID)
+        .view
+        .snapshot
+        .server
+        .code_host
+        .provider = claude_commander_protocol::hosting::CodeHostProvider::Gitlab;
+    app.handle_command(UserCommand::CloneRepository).await;
+    assert_ne!(app.ui_state.repo_picker.generation, old_generation);
+    app.handle_state_update(StateUpdate::RepositoriesLoaded {
+        backend_id: LOCAL_BACKEND_ID.0,
+        generation: old_generation,
+        result: Ok(claude_commander_protocol::hosting::RepositoryListing {
+            host: claude_commander_protocol::hosting::CodeHost {
+                provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+                hostname: None,
+            },
+            repositories: vec![github_repo("stale/repo").into()],
+        }),
+    })
+    .await;
+    assert_eq!(
+        app.ui_state.repo_picker.host.provider,
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab
+    );
+    assert!(app.ui_state.repo_picker.repos.is_empty());
+    assert!(matches!(app.ui_state.repo_picker.fetch, RepoFetch::Loading));
+}
+
+#[tokio::test]
+async fn created_session_selection_survives_a_snapshot_fetched_before_the_create() {
+    // A change-feed fetch that took its revision BEFORE the create committed but
+    // lands AFTER `SessionCreated` passes the revision fence while carrying a
+    // snapshot without the new session. That must not discard the pending
+    // selection: the post-create refresh is what should select the new row.
+    let (mut app, _) = app_with_remote_session().await;
+    let stale_revision = app
+        .backend_mut_for_test(BackendId(1))
+        .refresh_sequence
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
+    let stale = app.view_for(BackendId(1)).snapshot.clone();
+    let new_id = remote_mock(&app, BackendId(1))
+        .create_session(claude_commander_core::api::CreateSessionOpts {
+            project_path: std::path::PathBuf::from("/tmp/rp"),
+            title: "new".to_string(),
+            program: None,
+            initial_prompt: None,
+            model: None,
+            effort: None,
+            mode: None,
+            base_branch: None,
+            section: None,
+            stack_parent: None,
+        })
+        .await
+        .unwrap();
+    app.handle_state_update(StateUpdate::SessionCreated {
+        session_id: new_id,
+        backend_id: BackendId(1).0,
+    })
+    .await;
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: 1,
+        revision: stale_revision,
+        snapshot: Box::new(stale),
+        states: agent_states_box(),
+    })
+    .await;
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while app.ui_state.pending_selection.is_some() {
+            let event = app.event_loop.next().await.unwrap();
+            app.process_event(event).await;
+        }
+    })
+    .await
+    .expect("creation refresh should complete");
+    assert_eq!(
+        app.ui_state.selected_session_id.map(|r| r.id),
+        Some(new_id),
+        "the post-create refresh must select the new session"
+    );
+}
+
+#[tokio::test]
+async fn two_creates_before_the_first_refresh_both_hydrate_lfs() {
+    // Two `SessionCreated` events landing before either session's refresh must
+    // each keep their LFS intent; one snapshot containing both hydrates both.
+    let mut app = make_test_app();
+    app.config.skip_lfs_smudge = true;
+    let (mut snapshot, first, _) = snapshot_with_one_session();
+    let mut second_session = snapshot.sessions[0].clone();
+    let second = SessionId::new();
+    second_session.session_id = second;
+    snapshot.sessions.push(second_session);
+    let dirs = [
+        tempfile::TempDir::new().unwrap(),
+        tempfile::TempDir::new().unwrap(),
+    ];
+    for (session, dir) in snapshot.sessions.iter_mut().zip(&dirs) {
+        session.worktree_path = dir.path().to_string_lossy().into_owned();
+    }
+    for id in [first, second] {
+        app.handle_state_update(StateUpdate::SessionCreated {
+            session_id: id,
+            backend_id: LOCAL_BACKEND_ID.0,
+        })
+        .await;
+    }
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: LOCAL_BACKEND_ID.0,
+        revision: u64::MAX,
+        snapshot: Box::new(snapshot),
+        states: agent_states_box(),
+    })
+    .await;
+    assert!(app.ui_state.lfs_pull_in_flight.contains(&first));
+    assert!(app.ui_state.lfs_pull_in_flight.contains(&second));
+    assert!(app.ui_state.pending_created.is_empty());
+}
+
+#[tokio::test]
+async fn refreshing_an_unknown_backend_is_a_no_op() {
+    // A refresh can race the removal of its server; an unknown id must not panic.
+    let mut app = make_test_app();
+    app.refresh_backend_view(BackendId(999)).await;
 }
 
 /// Startup discovery writes through the service, behind `App`'s cached config.

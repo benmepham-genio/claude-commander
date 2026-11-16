@@ -31,6 +31,8 @@ pub struct InfoSessionData<'a> {
     pub pr_number: Option<u32>,
     pub pr_url: Option<String>,
     pub pr_merged: bool,
+    /// Short provider-specific review noun ("PR" or "MR").
+    pub review_label: &'static str,
     pub enriched_pr: Option<&'a EnrichedPrInfo>,
     pub ai_summary: Option<&'a AiSummary>,
     /// Display string for the generate-summary hotkey (e.g. "g"). None = AI disabled.
@@ -254,7 +256,7 @@ impl<'a> InfoView<'a> {
         if let Some(pr) = data.enriched_pr {
             lines.push(Line::from(""));
             lines.push(Line::from(vec![
-                Span::styled(format!(" PR #{}: ", pr.number), label),
+                Span::styled(format!(" {} #{}: ", data.review_label, pr.number), label),
                 Span::styled(
                     pr.title.clone(),
                     Style::default()
@@ -323,7 +325,7 @@ impl<'a> InfoView<'a> {
         } else if let Some(pr_num) = data.pr_number {
             lines.push(Line::from(""));
             lines.push(Line::from(vec![
-                Span::styled(format!(" PR #{pr_num}"), label),
+                Span::styled(format!(" {} #{pr_num}", data.review_label), label),
                 if data.pr_merged {
                     Span::styled(" (merged)", self.secondary_style())
                 } else {
@@ -503,6 +505,7 @@ mod tests {
             pr_number: None,
             pr_url: None,
             pr_merged: false,
+            review_label: "PR",
             enriched_pr: None,
             ai_summary: None,
             summary_key_hint: Some("g".into()),
@@ -541,6 +544,7 @@ mod tests {
             pr_number: Some(42),
             pr_url: Some("https://github.com/org/repo/pull/42".into()),
             pr_merged: false,
+            review_label: "PR",
             enriched_pr: Some(&pr),
             ai_summary: Some(&AiSummary::Ready {
                 text: "This adds authentication.".to_string(),
@@ -569,6 +573,7 @@ mod tests {
             pr_number: None,
             pr_url: None,
             pr_merged: false,
+            review_label: "PR",
             enriched_pr: None,
             ai_summary: Some(&AiSummary::Loading),
             summary_key_hint: Some("g".into()),
@@ -600,6 +605,7 @@ mod tests {
             pr_number: None,
             pr_url: None,
             pr_merged: false,
+            review_label: "PR",
             enriched_pr: None,
             ai_summary: Some(&summary),
             summary_key_hint: Some("g".into()),
@@ -661,6 +667,7 @@ mod tests {
             pr_number: Some(99),
             pr_url: Some("https://github.com/org/repo/pull/99".into()),
             pr_merged: true,
+            review_label: "PR",
             enriched_pr: None,
             ai_summary: None,
             summary_key_hint: Some("g".into()),

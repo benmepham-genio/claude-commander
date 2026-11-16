@@ -1,9 +1,7 @@
 //! Non-interactive, timeout-bounded repository clone.
 //!
-//! Two invocations, not one: a [`CloneSource::Github`] slug goes through
-//! `gh repo clone` (which resolves the user's configured protocol and carries
-//! their GitHub credentials, so private repos work), and anything else through
-//! a plain `git clone`.
+//! Hosted GitHub and GitLab sources use their respective authenticated CLIs;
+//! an explicit URL uses plain `git clone`.
 //!
 //! The whole module exists to make one failure mode impossible. This clone runs
 //! **unattended**, on a machine that may have no terminal at all, and the job
@@ -42,7 +40,10 @@ use std::path::Path;
 use std::time::Duration;
 
 use claude_commander_protocol::github::{
-    CloneSource, redact_credentials, validate_clone_url, validate_repo_slug,
+    redact_credentials, validate_clone_url, validate_repo_slug,
+};
+use claude_commander_protocol::hosting::{
+    CloneSource, CodeHostProvider, validate_gitlab_hostname, validate_hosted_repo_slug,
 };
 use tokio::process::Command;
 
@@ -71,9 +72,29 @@ pub async fn run_clone(source: &CloneSource, dest: &Path, timeout: Duration) -> 
         CloneSource::Github { full_name } => {
             validate_repo_slug(full_name).map_err(clone_source_rejected)?;
             if !is_gh_available().await {
-                return Err(GitError::GhUnavailable.into());
+                return Err(GitError::CodeHostCliUnavailable {
+                    provider: CodeHostProvider::Github,
+                }
+                .into());
             }
             "gh repo clone"
+        }
+        CloneSource::Gitlab {
+            full_name,
+            hostname,
+        } => {
+            validate_hosted_repo_slug(CodeHostProvider::Gitlab, full_name)
+                .map_err(clone_source_rejected)?;
+            if let Some(hostname) = hostname {
+                validate_gitlab_hostname(hostname).map_err(clone_source_rejected)?;
+            }
+            if !crate::git::hosting::gitlab::is_available().await {
+                return Err(GitError::CodeHostCliUnavailable {
+                    provider: CodeHostProvider::Gitlab,
+                }
+                .into());
+            }
+            "glab repo clone"
         }
         CloneSource::Url { url } => {
             validate_clone_url(url).map_err(clone_source_rejected)?;
@@ -138,8 +159,9 @@ pub(crate) fn clone_source_rejected(rejection: impl std::fmt::Display) -> GitErr
 
 /// Build the clone invocation for `source`, with the non-interactive env applied.
 ///
-/// The `--` before the source is load-bearing on **both** arms, and means the
-/// same thing on each: end of options.
+/// Git and GitHub use `--` as an option terminator before the source. GitLab
+/// deliberately does not: glab 1.113.0 documents `--` as introducing trailing
+/// `git clone` flags after the repository and destination positionals.
 ///
 /// * `git clone -- <source> <dest>` — standard git option terminator.
 /// * `gh repo clone -- <slug> <dest>` — gh's help renders this as
@@ -149,12 +171,24 @@ pub(crate) fn clone_source_rejected(rejection: impl std::fmt::Display) -> GitErr
 ///   `gh repo clone -- -version /tmp/x` reports `Could not resolve to a
 ///   Repository with the name 'sizeak/-version'`, while dropping the `--` gives
 ///   `unknown shorthand flag: 'v' in -version`. Pinned by
-///   `both_arms_terminate_options_before_the_source` for the argv shape.
+///   `provider_clone_commands_keep_their_exact_argument_shapes` for the argv shape.
 fn clone_command(source: &CloneSource, dest: &Path) -> Command {
     match source {
         CloneSource::Github { full_name } => {
             let mut cmd = gh_command();
             cmd.args(["repo", "clone", "--"]).arg(full_name).arg(dest);
+            cmd
+        }
+        CloneSource::Gitlab {
+            full_name,
+            hostname,
+        } => {
+            let mut cmd = crate::git::spawn::detached("glab");
+            cmd.args(["repo", "clone"]).arg(full_name).arg(dest);
+            cmd.env("GLAB_NO_PROMPT", "1");
+            if let Some(hostname) = hostname {
+                cmd.env("GITLAB_HOST", hostname);
+            }
             cmd
         }
         CloneSource::Url { url } => {
@@ -217,7 +251,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
-    use claude_commander_protocol::github::CloneSource;
+    use claude_commander_protocol::hosting::CloneSource;
     use nix::sys::signal::kill;
     use nix::unistd::Pid;
     use tempfile::TempDir;
@@ -425,7 +459,7 @@ mod tests {
 
     /// The `--` is load-bearing on both arms and lives right before the source.
     #[test]
-    fn both_arms_terminate_options_before_the_source() {
+    fn provider_clone_commands_keep_their_exact_argument_shapes() {
         let dest = Path::new("/projects/repo");
 
         let gh = clone_command(
@@ -437,6 +471,49 @@ mod tests {
         let args: Vec<_> = gh.as_std().get_args().collect();
         assert_eq!(gh.as_std().get_program(), "gh");
         assert_eq!(args, ["repo", "clone", "--", "o/r", "/projects/repo"]);
+
+        let glab = clone_command(
+            &CloneSource::Gitlab {
+                full_name: "group/sub/repo".to_string(),
+                hostname: Some("gitlab.example.com".to_string()),
+            },
+            dest,
+        );
+        let args: Vec<_> = glab.as_std().get_args().collect();
+        assert_eq!(glab.as_std().get_program(), "glab");
+        assert_eq!(args, ["repo", "clone", "group/sub/repo", "/projects/repo"]);
+        assert_eq!(
+            glab.as_std()
+                .get_envs()
+                .find(|(key, _)| *key == "GITLAB_HOST")
+                .unwrap()
+                .1,
+            Some(std::ffi::OsStr::new("gitlab.example.com"))
+        );
+        for (key, expected) in [
+            ("GLAB_NO_PROMPT", "1"),
+            ("GIT_TERMINAL_PROMPT", "0"),
+            ("GIT_ASKPASS", ""),
+        ] {
+            assert_eq!(
+                glab.as_std()
+                    .get_envs()
+                    .find(|(name, _)| *name == key)
+                    .unwrap()
+                    .1,
+                Some(std::ffi::OsStr::new(expected))
+            );
+        }
+        assert!(
+            glab.as_std()
+                .get_envs()
+                .find(|(name, _)| *name == "GIT_SSH_COMMAND")
+                .unwrap()
+                .1
+                .unwrap()
+                .to_string_lossy()
+                .contains("BatchMode=yes")
+        );
 
         let git = clone_command(
             &CloneSource::Url {
@@ -470,6 +547,10 @@ mod tests {
             },
             CloneSource::Github {
                 full_name: "-flag/name".to_string(),
+            },
+            CloneSource::Gitlab {
+                full_name: "group/-flag".to_string(),
+                hostname: None,
             },
         ] {
             let err = run_clone(&source, &dest, Duration::from_secs(60))

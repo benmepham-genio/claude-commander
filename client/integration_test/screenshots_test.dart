@@ -21,6 +21,7 @@ import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:claude_commander_client/main.dart';
+import 'package:claude_commander_client/pages/edit_session_dialog.dart';
 import 'package:claude_commander_client/pages/phone_shell.dart';
 import 'package:claude_commander_client/server_config.dart';
 import 'package:claude_commander_client/services/commander_api.dart';
@@ -37,6 +38,7 @@ import 'package:xterm/xterm.dart';
 const _baseUrl = String.fromEnvironment('CC_E2E_BASE_URL');
 const _token = String.fromEnvironment('CC_E2E_TOKEN');
 const _shotDir = String.fromEnvironment('CC_SHOT_DIR');
+const _editOnly = bool.fromEnvironment('CC_SHOT_EDIT_ONLY');
 
 /// The session the screenshots focus on. Seeded by the fixture with the demo
 /// agent in its "working" state, so the terminal has live-looking output.
@@ -215,10 +217,35 @@ void main() {
           find.text('waiting').evaluate().isNotEmpty,
       reason: 'live agent states arrived',
     );
-    await shoot(tester, 'client-sessions');
+    if (!_editOnly) await shoot(tester, 'client-sessions');
 
     // ---- phone: the agent terminal ----
     await tapRow(tester, _focusSession);
+
+    // ---- phone: edit settings and the fresh-restart warning ----
+    await tester.tap(find.byTooltip('Manage session'));
+    await waitFor(tester, find.text('Edit session'));
+    await tester.tap(find.text('Edit session'));
+    await waitFor(tester, find.byType(EditSessionDialog));
+    await shoot(tester, 'client-edit-session');
+    final program = find.widgetWithText(
+      DropdownButtonFormField<String>,
+      'Program',
+    );
+    await tester.tap(program);
+    await settle(tester);
+    await tester.tap(find.text('Codex').last);
+    await settle(tester);
+    await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+    await waitFor(tester, find.text('Restart session?'));
+    await shoot(tester, 'client-edit-session-warning');
+    await tester.tap(find.widgetWithText(TextButton, 'Back'));
+    await settle(tester);
+    await waitFor(tester, find.widgetWithText(TextButton, 'Cancel'));
+    await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+    await settle(tester);
+    expect(find.byType(EditSessionDialog), findsNothing);
+    if (_editOnly) return;
     // The detail page's hero button and its pane snapshot's "Live" button both
     // open the agent terminal; either will do, so match the icon rather than a
     // label. The hero comes first in paint order.

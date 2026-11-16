@@ -137,10 +137,14 @@ pub async fn branches(
 pub async fn preview(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(q): Query<super::sessions::PreviewQuery>,
 ) -> Result<Json<PreviewData>, ApiError> {
     let id = parse_project_id(&id)?;
     Ok(Json(
-        state.service.preview(PreviewTarget::Project(id)).await?,
+        state
+            .service
+            .preview_part(PreviewTarget::Project(id), q.part)
+            .await?,
     ))
 }
 

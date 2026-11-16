@@ -8,7 +8,15 @@ import type { SessionStatus } from "./SessionStatus";
 /**
  * A session as returned by the list/find/detail endpoints.
  */
-export type SessionInfo = { id: string, session_id: SessionId, title: string, branch: string, status: SessionStatus, program: string, project_id: ProjectId, project_name: string, pr_number: number | null, pr_url: string | null, pr_state: PrState, pr_draft: boolean, pr_labels: Array<string>, review_decision: ReviewDecision | null, pr_reviewers: Array<string>, created_at: string, 
+export type SessionInfo = { id: string, session_id: SessionId, title: string, branch: string, status: SessionStatus, 
+/**
+ * Program used by the current agent pane.
+ */
+program: string, 
+/**
+ * Program saved for the next fresh restart, if different from the live one.
+ */
+pending_program: string | null, project_id: ProjectId, project_name: string, pr_number: number | null, pr_url: string | null, pr_state: PrState, pr_draft: boolean, pr_labels: Array<string>, review_decision: ReviewDecision | null, pr_reviewers: Array<string>, created_at: string, 
 /**
  * Whether the session has unread output (agent finished, user hasn't
  * attached since).

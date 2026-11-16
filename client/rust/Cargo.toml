@@ -27,7 +27,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 [dependencies]
 # `chrono`/`uuid` features enable frb's built-in codecs for the DateTime/Uuid
 # fields carried by the mirrored protocol DTOs.
-flutter_rust_bridge = { version = "=2.11.1", features = ["chrono", "uuid"] }
+flutter_rust_bridge = { version = "=2.13.0", features = ["chrono", "uuid"] }
 # Shared wire contract with the server — the client core deserializes server
 # responses into these exact types, so drift fails loudly in Rust. The mirrors
 # in `api::mirrors` re-export these for flutter_rust_bridge.

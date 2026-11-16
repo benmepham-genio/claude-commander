@@ -79,6 +79,17 @@ pub(super) fn server_chip_label(status: Option<&EmbeddedServerStatus>) -> Option
     }
 }
 
+/// Split a list pane into its one-row heading bar and the rows below — the
+/// shape shared by the main view's session list and the review view's file
+/// list (neither is boxed; the heading bar names the pane instead).
+pub(super) fn split_heading_bar(area: Rect) -> (Rect, Rect) {
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(area);
+    (parts[0], parts[1])
+}
+
 impl App {
     /// Return the border type based on config: rounded or plain (square).
     pub(super) fn border_type(&self) -> BorderType {
@@ -158,8 +169,9 @@ impl App {
         // underneath and the diff doesn't blink away to the board and back.
         if self.open_review().is_some() {
             self.ui_state.review_body_rect = Some(super::review::review_body_inner_rect(size));
-            self.ui_state.review_file_list_rect =
-                Some(super::review::review_file_list_inner_rect(size));
+            let (file_pane, file_list) = super::review::review_file_list_rects(size);
+            self.ui_state.review_file_pane_rect = Some(file_pane);
+            self.ui_state.review_file_list_rect = Some(file_list);
             let review_buttons = match self.open_review() {
                 Some(state) => self.render_review_modal(frame, size, state),
                 None => Vec::new(),
@@ -286,11 +298,7 @@ impl App {
     /// naming the active view, then the indented session tree. No right pane —
     /// session detail is the `i` Info modal.
     pub(super) fn render_session_list(&mut self, frame: &mut Frame, area: Rect) {
-        // Split into a 1-line heading bar and the body below
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(0)])
-            .split(area);
+        let (heading_area, body) = split_heading_bar(area);
 
         let heading_style = self.theme.status_bar();
         let heading = Paragraph::new(Line::styled(
@@ -298,9 +306,8 @@ impl App {
             heading_style,
         ))
         .style(heading_style);
-        frame.render_widget(heading, chunks[0]);
+        frame.render_widget(heading, heading_area);
 
-        let body = chunks[1];
         let recents_len = self
             .ui_state
             .recents_len
@@ -542,12 +549,13 @@ impl App {
         };
         state.set_content(content, inner_height);
         let scroll = state.scroll_offset;
+        let parsed = state.paragraph(dim_opacity);
 
         frame.render_widget(
             Preview::new(content)
+                .with_paragraph(parsed)
                 .block(block)
-                .scroll(scroll)
-                .dim_opacity(dim_opacity),
+                .scroll(scroll),
             area,
         );
     }
@@ -599,6 +607,18 @@ impl App {
             .enriched_pr
             .as_ref()
             .and_then(|(sid, pr)| if *sid == session_id { Some(pr) } else { None });
+        let review_label = if self
+            .view_for(sref.backend)
+            .snapshot
+            .server
+            .effective_code_host()
+            .provider
+            == claude_commander_protocol::hosting::CodeHostProvider::Gitlab
+        {
+            "MR"
+        } else {
+            "PR"
+        };
 
         let ai_summary = if self.config.ai_summary_enabled {
             self.ui_state.ai_summaries.get(&session_id)
@@ -617,6 +637,7 @@ impl App {
             pr_number,
             pr_url,
             pr_merged,
+            review_label,
             enriched_pr,
             ai_summary,
             summary_key_hint,

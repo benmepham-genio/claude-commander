@@ -218,7 +218,7 @@ class _TerminalBodyState extends State<TerminalBody>
   // Throughput meter: bytes this second, refreshed on a 1s tick.
   int _totalBytes = 0;
   int _windowBytes = 0;
-  int _bytesPerSec = 0;
+  final ValueNotifier<String> _throughput = ValueNotifier('0 B/s · 0 KB');
   Timer? _meter;
 
   @override
@@ -232,10 +232,9 @@ class _TerminalBodyState extends State<TerminalBody>
 
     _meter = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
-      setState(() {
-        _bytesPerSec = _windowBytes;
-        _windowBytes = 0;
-      });
+      _throughput.value =
+          '${_fmtRate(_windowBytes)} · ${_totalBytes ~/ 1024} KB';
+      _windowBytes = 0;
     });
   }
 
@@ -731,6 +730,7 @@ class _TerminalBodyState extends State<TerminalBody>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _meter?.cancel();
+    _throughput.dispose();
     unawaited(widget.api.terminalDetach(attachId: _attachId));
     // Guarded clear: if the wide pane already swapped in another attach (agent↔
     // shell), its initState registered the new id before this dispose runs, so
@@ -913,9 +913,10 @@ class _TerminalBodyState extends State<TerminalBody>
           // session name, and the throughput is the one thing here that is
           // curiosity rather than state or action.
           if (!compact)
-            Text(
-              '${_fmtRate(_bytesPerSec)} · ${_totalBytes ~/ 1024} KB',
-              style: t.meta(size: 10, color: t.textFaint),
+            ValueListenableBuilder<String>(
+              valueListenable: _throughput,
+              builder: (context, value, _) =>
+                  Text(value, style: t.meta(size: 10, color: t.textFaint)),
             ),
           // Agent attaches only: the server injects the image path into the
           // agent pane, so on a shell attach this would type somewhere the user

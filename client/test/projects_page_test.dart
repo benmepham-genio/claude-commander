@@ -73,7 +73,7 @@ void main() {
     await tester.tap(find.byType(FloatingActionButton));
     await tester.pumpAndSettle();
 
-    expect(find.text('Clone from GitHub'), findsOneWidget);
+    expect(find.text('Clone repository'), findsOneWidget);
     expect(find.text('Add existing path'), findsOneWidget);
     expect(find.text('Scan directory'), findsOneWidget);
   });
@@ -126,10 +126,10 @@ void main() {
     api.githubReposResponse = [githubRepo(owner: 'acme', name: 'widget')];
     await pump(tester);
 
-    await chooseAddSource(tester, 'Clone from GitHub');
+    await chooseAddSource(tester, 'Clone repository');
 
     expect(find.byType(CloneRepoPage), findsOneWidget);
-    expect(api.countOf('githubRepos'), 1);
+    expect(api.countOf('repositories'), 1);
   });
 
   testWidgets('removing a project confirms then calls removeProject', (

@@ -298,6 +298,43 @@ mod tests {
     // --- store ---
 
     #[tokio::test]
+    async fn concurrent_replacements_leave_a_complete_value_and_no_temporary_files() {
+        let dir = TempDir::new().unwrap();
+        let store = std::sync::Arc::new(ReviewedStore::new(dir.path().join("store")));
+        let sid = SessionId::new();
+        let mut saves = tokio::task::JoinSet::new();
+        let mut submitted = Vec::new();
+        for i in 0..32 {
+            let payload = {
+                let diff = diff_for(&format!("file-{i}.rs"), " ctx\n-old\n+new\n");
+                vec![mark_for(&diff.files[0])]
+            };
+            submitted.push(payload.clone());
+            let store = store.clone();
+            saves.spawn(async move {
+                store
+                    .update(sid, move |marks| {
+                        *marks = payload;
+                        ((), true)
+                    })
+                    .await
+            });
+        }
+        while let Some(result) = saves.join_next().await {
+            result.unwrap().unwrap();
+        }
+        let final_value = store.load(sid).await.unwrap();
+        assert!(
+            submitted.contains(&final_value),
+            "a complete submitted value must survive"
+        );
+        let files: Vec<_> = std::fs::read_dir(dir.path().join("store"))
+            .unwrap()
+            .collect();
+        assert_eq!(files.len(), 2, "only the final JSON and lock should remain");
+    }
+
+    #[tokio::test]
     async fn load_missing_returns_empty() {
         let tmp = TempDir::new().unwrap();
         let store = ReviewedStore::new(tmp.path().join("reviewed"));

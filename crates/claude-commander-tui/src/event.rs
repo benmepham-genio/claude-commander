@@ -5,6 +5,7 @@
 //! - Application state updates
 //! - Render ticks
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -74,6 +75,15 @@ impl RestartKind {
 /// State updates from background tasks
 #[derive(Debug, Clone)]
 pub enum StateUpdate {
+    SessionEditOptionsLoaded {
+        session: claude_commander_core::backend::SessionRef,
+        result: Result<claude_commander_protocol::api::CreateOptions, String>,
+    },
+    CodeHostConfigUpdated {
+        result: std::result::Result<(), String>,
+    },
+    /// Periodic config reload completed without holding up input/rendering.
+    ConfigReloaded { result: Result<bool, String> },
     /// Session content updated
     ContentUpdated {
         session_id: SessionId,
@@ -97,6 +107,10 @@ pub enum StateUpdate {
     SessionRemoved { session_id: SessionId },
     /// Error occurred
     Error { message: String },
+    ActionFinished {
+        backend_id: usize,
+        message: Result<String, String>,
+    },
     /// Session creation completed successfully
     SessionCreated {
         session_id: SessionId,
@@ -125,6 +139,9 @@ pub enum StateUpdate {
         /// [`StateUpdate::PreviewReady::spawned_at`].
         spawned_at: Instant,
         session_id: SessionId,
+        /// Code host (provider and hostname) the fetch ran against; a result
+        /// from a host that is no longer current is dropped rather than cached.
+        code_host: claude_commander_protocol::hosting::CodeHost,
         info: Option<EnrichedPrInfo>,
     },
     /// AI-generated branch summary ready
@@ -139,9 +156,16 @@ pub enum StateUpdate {
     /// [`BackendView`](claude_commander_core::backend::BackendView). `backend_id` indexes the
     /// TUI's `Vec<BackendHandle>`.
     BackendChanged {
+        revision: u64,
         backend_id: usize,
         snapshot: Box<claude_commander_core::api::Snapshot>,
         states: Box<claude_commander_core::api::AgentStatesSnapshot>,
+    },
+    /// Fresh detection after detach, limited to sessions actually viewed.
+    ViewedAgentStatesUpdated {
+        backend_id: usize,
+        revision: u64,
+        states: std::collections::BTreeMap<SessionId, claude_commander_core::session::AgentState>,
     },
     /// A backend's connection health changed (a remote server's poller moved
     /// between Connecting/Connected/Degraded). Folded into that backend's
@@ -278,11 +302,11 @@ pub enum StateUpdate {
         backend_id: usize,
         result: std::result::Result<(), String>,
     },
-    /// The GitHub repo listing for the open clone picker finished (or failed).
-    /// Spawned off the event loop because `gh api --paginate` has no server-side
+    /// The hosted-repository listing for the open clone picker finished (or failed).
+    /// Spawned off the event loop because a paginated provider API can take
     /// timeout and a large account takes many seconds — blocking here would
     /// freeze the UI for the whole listing.
-    GithubReposLoaded {
+    RepositoriesLoaded {
         /// Backend the listing was requested from; indexes `Vec<BackendHandle>`.
         backend_id: usize,
         /// The picker generation this fetch was spawned under. A late arrival
@@ -291,7 +315,7 @@ pub enum StateUpdate {
         generation: u64,
         /// `Err` carries a *state*, not a dead end: a host without `gh`, or an
         /// unauthenticated one, still leaves the picker's URL path usable.
-        result: std::result::Result<Vec<claude_commander_protocol::github::GithubRepo>, String>,
+        result: std::result::Result<claude_commander_protocol::hosting::RepositoryListing, String>,
     },
     /// A poll of an in-flight clone job came back. Emitted roughly once a second
     /// by the poll task until the job reaches a terminal status; there is no
@@ -309,7 +333,7 @@ pub enum StateUpdate {
         /// `apply_clone_job_update` do), or prefer the job's already-redacted
         /// `source_label`. Nothing Debug-prints a `StateUpdate` today, and that
         /// is load-bearing here.
-        source: claude_commander_protocol::github::CloneSource,
+        source: claude_commander_protocol::hosting::CloneSource,
         /// `Ok(Some(job))` is a poll result (terminal or not); `Ok(None)` means
         /// the job was pruned or never issued (absence, not failure); `Err`
         /// carries a transport/backend error and stops the poll.
@@ -413,7 +437,7 @@ pub enum UserCommand {
     /// Create new project
     NewProject,
     /// Clone a repository into the projects directory and register it as a
-    /// project: opens the GitHub repo picker (palette-only)
+    /// project: opens the hosted-repository picker (palette-only)
     CloneRepository,
     /// Checkout an existing branch into a new worktree session
     CheckoutBranch,
@@ -421,7 +445,9 @@ pub enum UserCommand {
     DeleteSession,
     /// Delete every session whose PR has merged on GitHub (palette-only)
     DeleteMergedPrSessions,
-    /// Rename the currently selected session (UI title only)
+    /// Edit the selected session settings.
+    EditSession,
+    /// Rename the currently selected session (UI title only).
     RenameSession,
     /// Restart current session (kill tmux and recreate)
     RestartSession,
@@ -576,6 +602,7 @@ impl UserCommand {
             | UserCommand::NewProject
             | UserCommand::ScanDirectory
             | UserCommand::OpenReviewDiff
+            | UserCommand::EditSession
             | UserCommand::RenameSession
             | UserCommand::RemoveProject
             | UserCommand::CascadeResume
@@ -679,6 +706,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::CheckoutBranch => Self::CheckoutBranch,
             BindableAction::DeleteSession => Self::DeleteSession,
             BindableAction::DeleteMergedPrSessions => Self::DeleteMergedPrSessions,
+            BindableAction::EditSession => Self::EditSession,
             BindableAction::RenameSession => Self::RenameSession,
             BindableAction::RestartSession => Self::RestartSession,
             BindableAction::ResetSession => Self::ResetSession,
@@ -873,6 +901,11 @@ pub struct EventLoop {
     tx: mpsc::Sender<AppEvent>,
     /// Receiver for events
     rx: mpsc::Receiver<AppEvent>,
+    /// Events waiting ahead of `rx`, served by [`Self::next`] and
+    /// [`Self::try_next`] before it: those [`Self::restart_input`] pulled off
+    /// `rx` but did not discard, behind any a nested loop handed back through
+    /// [`Self::requeue`].
+    held: VecDeque<AppEvent>,
     /// The terminal reader while one exists: running, or asked to stop but not
     /// yet gone. `None` while an attach (or the editor) owns the terminal.
     input_reader: Option<InputReader>,
@@ -890,6 +923,7 @@ impl EventLoop {
         Self {
             tx,
             rx,
+            held: VecDeque::new(),
             input_reader: None,
             stop_grace: INPUT_STOP_GRACE,
             tick_rate: None,
@@ -1006,21 +1040,52 @@ impl EventLoop {
 
     /// Restart the terminal reader after an attach (or the editor) returns.
     pub fn restart_input(&mut self) {
-        // Drain any stale events from the channel
-        while self.rx.try_recv().is_ok() {}
-
+        self.drop_stale_input();
         self.start_input_reader();
         debug!("Input reader restarted");
     }
 
+    /// Discard the input and ticks queued while something else owned the
+    /// terminal, keeping everything else in order.
+    ///
+    /// Only input is stale after an attach: a background task's result
+    /// (`ActionFinished`, `ProjectAdded`, `ReviewedMarksPolled`, …) is the one
+    /// report of work that finished meanwhile, and some of them also clear an
+    /// in-flight flag that nothing else resets.
+    fn drop_stale_input(&mut self) {
+        while let Ok(event) = self.rx.try_recv() {
+            if !matches!(event, AppEvent::Input(_) | AppEvent::Tick) {
+                self.held.push_back(event);
+            }
+        }
+    }
+
+    /// Put `events` back at the front of the queue, in order, ahead of
+    /// anything already held or still on the channel.
+    ///
+    /// For a nested loop that reads this queue but cannot act on some of what
+    /// it reads — the in-session switcher, which must not apply a background
+    /// result under an open palette — so those events reach the main loop
+    /// instead of being lost. Like [`Self::drop_stale_input`], it exists because
+    /// a task's result is the one report of its work, and some results clear an
+    /// in-flight flag that nothing else resets.
+    pub fn requeue(&mut self, events: impl IntoIterator<Item = AppEvent>) {
+        let mut events: VecDeque<AppEvent> = events.into_iter().collect();
+        events.append(&mut self.held);
+        self.held = events;
+    }
+
     /// Receive the next event
     pub async fn next(&mut self) -> Option<AppEvent> {
-        self.rx.recv().await
+        match self.held.pop_front() {
+            Some(event) => Some(event),
+            None => self.rx.recv().await,
+        }
     }
 
     /// Try to receive an event without blocking
     pub fn try_next(&mut self) -> Option<AppEvent> {
-        self.rx.try_recv().ok()
+        self.held.pop_front().or_else(|| self.rx.try_recv().ok())
     }
 
     /// Post a state update
@@ -1328,6 +1393,24 @@ mod tests {
     }
 
     #[test]
+    fn shift_e_edits_session_and_bare_e_remains_text_input() {
+        let bindings = kb();
+        for modifiers in [KeyModifiers::SHIFT, KeyModifiers::NONE] {
+            assert!(matches!(
+                UserCommand::from_key(KeyEvent::new(KeyCode::Char('E'), modifiers), &bindings),
+                Some(UserCommand::EditSession)
+            ));
+        }
+        assert!(matches!(
+            UserCommand::from_key(
+                KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+                &bindings,
+            ),
+            Some(UserCommand::TextInput('e'))
+        ));
+    }
+
+    #[test]
     fn test_session_management_keys() {
         let b = kb();
         let cases: Vec<(KeyCode, KeyModifiers, UserCommand)> = vec![
@@ -1627,6 +1710,71 @@ mod input_reader_tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use std::sync::{Condvar, Mutex};
+
+    #[tokio::test]
+    async fn restarting_input_drops_stale_input_but_keeps_background_results() {
+        let mut events = EventLoop::new();
+        let tx = events.sender();
+        tx.send(AppEvent::Input(InputEvent::Resize(80, 24)))
+            .await
+            .unwrap();
+        tx.send(AppEvent::StateUpdate(StateUpdate::ActionFinished {
+            backend_id: 0,
+            message: Err("scan failed".into()),
+        }))
+        .await
+        .unwrap();
+        tx.send(AppEvent::Tick).await.unwrap();
+        tx.send(AppEvent::Quit).await.unwrap();
+
+        events.drop_stale_input();
+        tx.send(AppEvent::Tick).await.unwrap();
+
+        assert!(matches!(
+            events.try_next(),
+            Some(AppEvent::StateUpdate(StateUpdate::ActionFinished { .. }))
+        ));
+        assert!(matches!(events.next().await, Some(AppEvent::Quit)));
+        assert!(
+            matches!(events.try_next(), Some(AppEvent::Tick)),
+            "arrived after the drain"
+        );
+        assert!(events.try_next().is_none());
+    }
+
+    #[tokio::test]
+    async fn requeued_events_come_back_first_and_in_order() {
+        let mut events = EventLoop::new();
+        let tx = events.sender();
+        tx.send(AppEvent::Tick).await.unwrap();
+        events.drop_stale_input(); // nothing to hold: the Tick is stale
+        tx.send(AppEvent::Quit).await.unwrap();
+        events.drop_stale_input(); // holds the Quit
+        events.requeue([
+            AppEvent::StateUpdate(StateUpdate::LfsPullFinished {
+                session_id: SessionId::new(),
+            }),
+            AppEvent::StateUpdate(StateUpdate::Error {
+                message: "second".into(),
+            }),
+        ]);
+        tx.send(AppEvent::Tick).await.unwrap();
+
+        assert!(matches!(
+            events.try_next(),
+            Some(AppEvent::StateUpdate(StateUpdate::LfsPullFinished { .. }))
+        ));
+        assert!(matches!(
+            events.try_next(),
+            Some(AppEvent::StateUpdate(StateUpdate::Error { .. }))
+        ));
+        assert!(
+            matches!(events.try_next(), Some(AppEvent::Quit)),
+            "already-held events keep their place behind the requeued ones"
+        );
+        assert!(matches!(events.next().await, Some(AppEvent::Tick)));
+        assert!(events.try_next().is_none());
+    }
 
     use tokio::sync::Notify;
 

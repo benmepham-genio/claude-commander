@@ -54,3 +54,6 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # Ids returned by the create endpoints.
 uuid = { version = "1.23", features = ["v4", "serde"] }
+
+[dev-dependencies]
+axum = "0.8"

@@ -91,7 +91,14 @@ export type CloseDecision =
    * `session_ended`): say so; retrying can't help. A restart re-attaches
    * explicitly.
    */
-  | { kind: "gone"; message: string };
+  | { kind: "gone"; message: string }
+  /**
+   * The pane was detached while its session lives on (`detached` with
+   * `client_detached`): another viewer opened it, or Ctrl-b d. Stop, and wait
+   * for a click — every attach detaches the others, so reattaching on our own,
+   * now or on a probe, would only displace that viewer in turn.
+   */
+  | { kind: "detached" };
 
 export const RECONNECT_BASE_MS = 1000;
 export const RECONNECT_MAX_MS = 15_000;
@@ -128,11 +135,14 @@ export class AttachLifecycle {
         return null;
       case "detached":
         // Sent by the server's pump as it tears an attach down
-        // (crates/claude-commander-server/src/ws/attach.rs, `pump`):
-        // `session_ended` when the PTY hit EOF, i.e. the tmux session or its
-        // attach client is gone. Reconnecting would only fail again.
+        // (crates/claude-commander-server/src/ws/attach.rs, `pump`). Once its
+        // attach client has gone it reads why from the client's exit line:
+        // `session_ended` if the session was destroyed, `client_detached` if
+        // it lives on but the pane was taken over.
         if (msg.reason === "session_ended") {
           this.final = { kind: "gone", message: "session ended" };
+        } else if (msg.reason === "client_detached") {
+          this.final = { kind: "detached" };
         }
         return `\r\n\x1b[90m[detached: ${msg.reason ?? ""}]\x1b[0m\r\n`;
       case "error": {
@@ -158,12 +168,13 @@ export class AttachLifecycle {
 }
 
 /** Why the current attach stopped for good, if it did. */
-export type Halt = "auth" | "gone" | null;
+export type Halt = "auth" | "gone" | "detached" | null;
 
 /**
  * What clicking session `clicked` does, given the current selection and how
  * its attach stands. Re-clicking the selected session is how a user retries an
- * attach that ended ("session ended" after the TUI restarted it, a Ctrl-b d);
+ * attach that ended ("session ended" after the TUI restarted it) or takes back
+ * one that was detached (another viewer opened it, a Ctrl-b d);
  * while it is live, or waiting on the connect screen, it does nothing.
  */
 export function selectAction(
@@ -172,7 +183,7 @@ export function selectAction(
   halt: Halt,
 ): "attach" | "reattach" | "none" {
   if (selected !== clicked) return "attach";
-  return halt === "gone" ? "reattach" : "none";
+  return halt === "gone" || halt === "detached" ? "reattach" : "none";
 }
 
 export const GONE_PROBE_BASE_MS = 3000;
@@ -183,13 +194,14 @@ export const GONE_PROBE_MAX_MS = 60_000;
  * again, fed the selected session's status from each poll.
  *
  * The session's pane can come back without this tab doing anything: the TUI,
- * the CLI or another tab restarts it, or the pane was merely detached (Ctrl-b
- * d) and never went. So:
+ * the CLI or another tab restarts it. (A pane that was only detached ends
+ * "detached", not "gone", and is never probed: re-attaching would displace
+ * whoever took it.) So:
  * - seen not running and then running again (killed, then restarted):
  *   re-attach at once;
- * - running throughout (a restart faster than a poll, a detach): the snapshot
- *   can't tell, so probe — re-attach after a delay that doubles, to a cap,
- *   with each probe that ends "gone" again;
+ * - running throughout (a restart faster than a poll): the snapshot can't
+ *   tell, so probe — re-attach after a delay that doubles, to a cap, with
+ *   each probe that ends "gone" again;
  * - missing from the snapshot (deleted): never.
  */
 export class GoneRecovery {

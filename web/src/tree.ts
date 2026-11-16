@@ -162,18 +162,45 @@ function projectGroup(
   return group;
 }
 
+const projectNodes = new WeakMap<HTMLElement, Map<string, { key: string; node: HTMLElement }>>();
+
 export function renderTree(container: HTMLElement, model: TreeModel, on: TreeHandlers): void {
-  clear(container);
   if (model.projects.length === 0) {
+    clear(container);
+    projectNodes.delete(container);
     container.append(
       h("div", {
         className: "tree-empty",
         text: "No projects yet. Use ＋ add to register a repo.",
       }),
     );
+    return;
   }
+  const previous = projectNodes.get(container) ?? new Map();
+  const next = new Map<string, { key: string; node: HTMLElement }>();
   const byProject = groupByProject(model.sessions);
-  for (const p of model.projects) {
-    container.append(projectGroup(p, byProject.get(p.id) ?? [], model, on));
+  const nodes = model.projects.map((project) => {
+    const sessions = byProject.get(project.id) ?? [];
+    const key = JSON.stringify([
+      project,
+      sessions,
+      model.collapsed.has(project.id),
+      sessions.map((session) => [model.agentStates[session.id], model.selectedId === session.id]),
+    ]);
+    const cached = previous.get(project.id);
+    const entry =
+      cached?.key === key ? cached : { key, node: projectGroup(project, sessions, model, on) };
+    next.set(project.id, entry);
+    return entry.node;
+  });
+  // Reuse unchanged project subtrees, preserving their hover/focus state.
+  for (const [index, node] of nodes.entries()) {
+    const at = container.children.item(index);
+    if (at !== node) container.insertBefore(node, at);
   }
+  const retained = new Set(nodes);
+  for (const child of [...container.children]) {
+    if (!retained.has(child as HTMLElement)) child.remove();
+  }
+  projectNodes.set(container, next);
 }

@@ -755,6 +755,89 @@ async fn http_paste_image_writes_file_and_injects_path() {
     drop(worktrees_dir);
 }
 
+/// Two viewers of one session — a laptop's remote TUI and the host's — is how
+/// the agent kept getting fresh-restarted. The second attach's `-d` detaches
+/// the first's tmux client; the pump saw its PTY close and reported
+/// `session_ended`, which a TUI answers by fresh-restarting the agent, killing
+/// it under the viewer who just opened it. The session is alive, so the first
+/// viewer must be told it was detached, never that the session ended.
+#[tokio::test]
+async fn ws_attach_displaced_by_a_second_viewer_is_not_session_ended() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let data_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+    let state = test_state(&data_dir, &worktrees_dir);
+    let service = state.service.clone();
+    let addr = spawn_server(state).await;
+
+    service.add_project(repo_path.clone(), None).await.unwrap();
+    let session_id = service
+        .create_session(claude_commander_core::api::CreateSessionOpts {
+            project_path: repo_path.clone(),
+            title: "two-viewers".to_string(),
+            program: Some("bash".to_string()),
+            initial_prompt: None,
+            effort: None,
+            mode: None,
+            model: None,
+            base_branch: None,
+            section: None,
+            stack_parent: None,
+        })
+        .await
+        .unwrap();
+
+    let mut first = open_attach(addr, &session_id.to_string()).await;
+    assert!(wait_for_binary_output(&mut first, Duration::from_secs(5)).await);
+    let mut second = open_attach(addr, &session_id.to_string()).await;
+
+    let frame = next_text_frame(&mut first)
+        .await
+        .expect("the displaced viewer should be told why its attach ended");
+    let parsed: serde_json::Value = serde_json::from_str(&frame).unwrap();
+    assert_eq!(parsed["type"], "detached", "got: {frame}");
+    assert_eq!(
+        parsed["reason"], "client_detached",
+        "a displaced viewer's session is still alive: {frame}"
+    );
+
+    second
+        .send(Message::Text(r#"{"type":"detach"}"#.to_string().into()))
+        .await
+        .unwrap();
+    drain_until_close(&mut second, Duration::from_secs(5)).await;
+    service.kill_session(&session_id).await.unwrap();
+
+    drop(repo_temp_dir);
+    drop(data_dir);
+    drop(worktrees_dir);
+}
+
+/// Open `/ws/attach`, complete the handshake for `session_id`, and wait for the
+/// `ready` frame.
+async fn open_attach(
+    addr: std::net::SocketAddr,
+    session_id: &str,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/attach"))
+        .await
+        .unwrap();
+    for frame in [
+        r#"{"type":"auth","token":"unused"}"#.to_string(),
+        serde_json::json!({"type":"attach","session_id": session_id}).to_string(),
+    ] {
+        ws.send(Message::Text(frame.into())).await.unwrap();
+    }
+    let ready = next_text_frame(&mut ws).await.expect("ready frame");
+    assert!(ready.contains(r#""ready""#), "expected ready, got: {ready}");
+    ws
+}
+
 /// Receive frames until the next TEXT frame, returning its payload. `None` on
 /// close/error/timeout.
 async fn next_text_frame(

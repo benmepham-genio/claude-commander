@@ -400,6 +400,10 @@ pub struct DiffReviewState {
     /// — the fixed `BODY_VIEWPORT = 20` this replaces made cursor-follow wrong
     /// on every terminal that was not about 22 rows tall.
     body: Cell<(usize, usize)>,
+    /// File-list viewport height from the most recent render — the list's own
+    /// drawn rows, recorded on every frame. (It used to be derived from
+    /// `body`, which a binary body never records.)
+    tree_viewport: Cell<usize>,
     /// Lazily-fetched working-tree lines per display path, the source revealed
     /// context is read from. Cleared on `refresh_diff`.
     file_lines: FileLines,
@@ -472,6 +476,7 @@ impl DiffReviewState {
             // Reasonable defaults until the first render reports the real pane
             // size (keypress math before any render then self-heals).
             body: Cell::new((DEFAULT_BODY_WIDTH, DEFAULT_BODY_HEIGHT)),
+            tree_viewport: Cell::new(DEFAULT_BODY_HEIGHT),
             file_lines: FileLines::default(),
         }
     }
@@ -771,7 +776,7 @@ impl DiffReviewState {
         } else {
             self.tree_cursor.saturating_sub(1)
         };
-        self.follow_tree_cursor(rows.len());
+        self.follow_tree_cursor();
         if let Some(TreeRow::File { index, .. }) = rows.get(self.tree_cursor) {
             self.set_body_file(*index);
         }
@@ -801,14 +806,13 @@ impl DiffReviewState {
     fn clamp_tree_cursor(&mut self) {
         let len = self.visible_rows().len();
         self.tree_cursor = self.tree_cursor.min(len.saturating_sub(1));
-        self.follow_tree_cursor(len);
+        self.follow_tree_cursor();
     }
 
-    /// Keep the tree cursor within the file pane's viewport, which shares its
-    /// height with the diff body beside it.
-    fn follow_tree_cursor(&mut self, _len: usize) {
+    /// Keep the tree cursor within the file pane's viewport.
+    fn follow_tree_cursor(&mut self) {
         let row = self.tree_cursor as u16;
-        let height = self.body_height().max(1) as u16;
+        let height = self.tree_height().max(1) as u16;
         if row < self.tree_scroll {
             self.tree_scroll = row;
         } else if row >= self.tree_scroll + height {
@@ -824,7 +828,7 @@ impl DiffReviewState {
             .position(|r| matches!(r, TreeRow::File { index, .. } if *index == self.selected_file))
         {
             self.tree_cursor = pos;
-            self.follow_tree_cursor(rows.len());
+            self.follow_tree_cursor();
         }
     }
 
@@ -1171,11 +1175,25 @@ impl DiffReviewState {
         rows.saturating_sub(self.body_height().max(1)) as u16
     }
 
-    /// [`Self::max_body_scroll`] for the file pane, which shares the body's
-    /// height.
+    /// [`Self::max_body_scroll`] for the file pane.
     fn max_tree_scroll(&self) -> u16 {
         let rows = self.visible_rows().len();
-        rows.saturating_sub(self.body_height().max(1)) as u16
+        rows.saturating_sub(self.tree_height().max(1)) as u16
+    }
+
+    /// The file list's viewport height, as last drawn.
+    fn tree_height(&self) -> usize {
+        self.tree_viewport.get()
+    }
+
+    /// Whether the file list (rather than the diff body) has focus.
+    pub fn file_list_focused(&self) -> bool {
+        self.focus == ReviewFocus::FileList
+    }
+
+    /// Give the file list focus (a click on its heading bar).
+    pub fn focus_file_list(&mut self) {
+        self.focus = ReviewFocus::FileList;
     }
 
     /// Scroll the diff body by a page (lazygit-style PgUp/PgDn). Independent of
@@ -2472,16 +2490,14 @@ impl App {
     fn render_review_file_list(&self, frame: &mut Frame, area: Rect, state: &DiffReviewState) {
         let focused = state.focus == ReviewFocus::FileList;
         let pal = self.theme.review_palette();
-        let border = if focused {
-            pal.border_focused
-        } else {
-            pal.border_unfocused
-        };
+        let (heading, list) = super::render::split_heading_bar(area);
+        // Record the list's drawn height for keypress-time scroll maths.
+        state.tree_viewport.set(list.height as usize);
 
         let rows = state.visible_rows();
-        // Inner content width (pane minus the two border columns), so a reviewed
-        // row's background band can be padded to fill the full pane.
-        let inner_width = area.width.saturating_sub(2) as usize;
+        // The pane's full width, so a reviewed row's background band can be
+        // padded to fill it.
+        let inner_width = list.width as usize;
         let mut lines: Vec<Line> = Vec::with_capacity(rows.len());
         for (i, row) in rows.iter().enumerate() {
             // The cursor row is highlighted whether or not this pane has focus —
@@ -2550,20 +2566,26 @@ impl App {
             lines.push(line);
         }
 
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(self.border_type())
-            .border_style(Style::default().fg(border))
-            .title(match state.reviewed.len() {
-                0 => format!(" Files ({}) ", state.diff.files.len()),
-                n => format!(" Files ({n}/{} reviewed) ", state.diff.files.len()),
-            });
+        // A one-row heading bar instead of a title border, like the main
+        // view's session list: only the body beside it is boxed, so the split
+        // carries one border line rather than two. With no border to recolour,
+        // focus shows as an accented heading (and the cursor row's highlight).
+        let base = self.theme.status_bar();
+        let title_style = if focused {
+            base.fg(self.theme.status_bar_accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            base
+        };
+        let title = match state.reviewed.len() {
+            0 => format!(" Files ({})", state.diff.files.len()),
+            n => format!(" Files ({n}/{} reviewed)", state.diff.files.len()),
+        };
         frame.render_widget(
-            Paragraph::new(lines)
-                .block(block)
-                .scroll((state.tree_scroll, 0)),
-            area,
+            Paragraph::new(Line::styled(title, title_style)).style(base),
+            heading,
         );
+        frame.render_widget(Paragraph::new(lines).scroll((state.tree_scroll, 0)), list);
     }
 
     fn render_review_body(&self, frame: &mut Frame, area: Rect, state: &DiffReviewState) {
@@ -2785,12 +2807,13 @@ fn review_inner_rects(area: Rect) -> (Rect, Rect) {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(20), Constraint::Min(0)])
         .split(rows[0]);
-    // Inset by each pane block's border.
+    // The file list sits under its heading bar; the body is inset by its
+    // block's border.
     let inset = Margin {
         vertical: 1,
         horizontal: 1,
     };
-    (cols[0].inner(inset), cols[1].inner(inset))
+    (cols[0], cols[1].inner(inset))
 }
 
 /// Inner rect of the diff body pane (see [`review_inner_rects`]).
@@ -2798,9 +2821,12 @@ pub(super) fn review_body_inner_rect(area: Rect) -> Rect {
     review_inner_rects(area).1
 }
 
-/// Inner rect of the file-list pane (see [`review_inner_rects`]).
-pub(super) fn review_file_list_inner_rect(area: Rect) -> Rect {
-    review_inner_rects(area).0
+/// The file-list pane's `(whole pane, list rows)` rects: the pane includes
+/// its heading bar, which takes the pane's wheel and focus clicks; the list
+/// rows are what a click maps onto a file (see [`review_inner_rects`]).
+pub(super) fn review_file_list_rects(area: Rect) -> (Rect, Rect) {
+    let pane = review_inner_rects(area).0;
+    (pane, super::render::split_heading_bar(pane).1)
 }
 
 /// Build a file tree from the diff's files (keyed on each file's display path),
@@ -5568,8 +5594,9 @@ diff --git a/x.rs b/x.rs
     #[test]
     fn wheel_tree_scrolls_file_list_within_bounds() {
         let mut s = state_with_two_files();
-        // Two root files → 2 visible rows, and a 1-row pane → max tree_scroll 1.
-        s.body.set((80, 1));
+        // Two root files → 2 visible rows, and a 1-row file list → max
+        // tree_scroll 1.
+        s.tree_viewport.set(1);
         assert_eq!(s.tree_scroll, 0);
         for _ in 0..10 {
             s.wheel_tree(true);
@@ -5583,7 +5610,7 @@ diff --git a/x.rs b/x.rs
         assert_eq!(s.tree_scroll, 0);
 
         // A pane tall enough for every file never scrolls the list.
-        s.body.set((80, 20));
+        s.tree_viewport.set(20);
         s.wheel_tree(true);
         assert_eq!(s.tree_scroll, 0);
     }

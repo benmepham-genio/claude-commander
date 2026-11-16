@@ -73,6 +73,7 @@ pub struct ContentCapture {
     cache: Arc<RwLock<HashMap<String, CapturedContent>>>,
     /// Cache TTL
     ttl: Duration,
+    flights: Arc<crate::singleflight::Flights<String>>,
 }
 
 impl ContentCapture {
@@ -87,12 +88,20 @@ impl ContentCapture {
             executor,
             cache: Arc::new(RwLock::new(HashMap::new())),
             ttl,
+            flights: Arc::new(crate::singleflight::Flights::default()),
         }
     }
 
     /// Get content for a tmux session, using cache if fresh
     #[instrument(skip(self))]
     pub async fn get_content(&self, tmux_session_name: &str) -> Result<CapturedContent> {
+        if let Some(cached) = self.cache.read().await.get(tmux_session_name)
+            && !cached.is_stale(self.ttl)
+        {
+            return Ok(cached.clone());
+        }
+        let flight = self.flights.for_key(tmux_session_name.to_string());
+        let _guard = flight.lock().await;
         // Fast path: check cache with read lock
         {
             let cache = self.cache.read().await;
@@ -151,6 +160,7 @@ impl Clone for ContentCapture {
             executor: self.executor.clone(),
             cache: self.cache.clone(),
             ttl: self.ttl,
+            flights: self.flights.clone(),
         }
     }
 }

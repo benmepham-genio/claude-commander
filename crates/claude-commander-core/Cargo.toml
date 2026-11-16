@@ -31,6 +31,7 @@ claude-commander-viewmodel = { path = "../claude-commander-viewmodel" }
 # Async runtime
 tokio = { workspace = true }
 futures = "0.3"
+notify = "8.2"
 
 # No clap: defining a CLI is a binary's job, so the clap tree and the CLI
 # reference generated from it live in `claude-commander` (and the server's own

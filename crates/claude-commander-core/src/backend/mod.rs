@@ -56,6 +56,7 @@ use crate::comment::ApplyOutcome;
 use crate::session::{ProjectId, SessionId};
 use claude_commander_protocol::api::ReviewedFileMark;
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
+use claude_commander_protocol::hosting::RepositoryListing;
 use claude_commander_protocol::workspace::SetWorkspacesRequest;
 
 pub use error::{BResult, BackendError};
@@ -255,6 +256,7 @@ pub fn empty_snapshot() -> Snapshot {
         operations: Vec::new(),
         server: ServerStatus {
             gh_available: false,
+            code_host: Default::default(),
             tmux_ok: false,
             // The client's own version. The version-mismatch warning
             // (`server_version_mismatch`) depends on this: seeding the
@@ -328,6 +330,12 @@ pub fn server_version_mismatch(server: &str, client: &str) -> Option<VersionMism
 /// rather than leaking a task that would poll a server forever (the task holds
 /// its own `Arc` to the backend, so dropping the handle alone wouldn't stop it).
 pub struct BackendHandle {
+    /// Refresh request order, shared by change feeds and explicit refreshes.
+    pub refresh_sequence: Arc<std::sync::atomic::AtomicU64>,
+    /// Latest refresh folded into the cached view.
+    pub view_revision: u64,
+    /// Latest agent-state refresh; state-only reads must not discard snapshots.
+    pub agent_states_revision: u64,
     pub id: BackendId,
     pub backend: Arc<dyn CommanderBackend>,
     pub view: BackendView,
@@ -343,6 +351,9 @@ impl BackendHandle {
             id,
             backend,
             view: BackendView::connecting(),
+            refresh_sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            view_revision: 0,
+            agent_states_revision: 0,
             feed_tasks: Vec::new(),
         }
     }
@@ -366,12 +377,18 @@ pub enum AttachKind {
 }
 
 /// Why an [`AttachConnection`] ended, so a driving loop can decide whether to
-/// auto-restart, return to the tree, etc.
+/// re-attach, return to the tree, etc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachEnd {
-    /// The pane's process/session ended (PTY EOF or the child exited non-clean).
+    /// The tmux session was destroyed. A frontend answers this by attaching
+    /// again, which recreates the session, whereas a [`Self::Detached`] client
+    /// stays away so as not to displace the viewer that took over. So report it
+    /// only on positive evidence (the tmux client's own exit line), never from
+    /// a PTY EOF or exit status alone, which a client displaced by another
+    /// viewer's `attach-session -d` produces too. See `tmux::ClientTail`.
     SessionEnded,
-    /// A clean detach — the attach child was killed but the session lives on.
+    /// The attach client went (an explicit detach, tmux's detach key, another
+    /// viewer displacing it) but the session lives on.
     Detached,
     /// The transport failed.
     Error(String),
@@ -581,6 +598,13 @@ pub trait CommanderBackend: Send + Sync {
 
     /// Preview payload for a session or project (agent pane, diff, shell pane).
     async fn preview(&self, target: PreviewTarget) -> BResult<PreviewData>;
+    async fn preview_part(
+        &self,
+        target: PreviewTarget,
+        _part: claude_commander_protocol::preview::PreviewPart,
+    ) -> BResult<PreviewData> {
+        self.preview(target).await
+    }
 
     /// The full branch diff (committed vs origin/main plus uncommitted changes)
     /// used for the AI summary.
@@ -605,19 +629,16 @@ pub trait CommanderBackend: Send + Sync {
     async fn create_session(&self, opts: CreateSessionOpts) -> BResult<SessionId>;
     async fn kill_session(&self, id: SessionId) -> BResult<()>;
     async fn restart_session(&self, id: SessionId) -> BResult<()>;
-    /// Restart a session with a *fresh* agent conversation (no `--resume`),
-    /// discarding whatever the agent would otherwise have resumed. Two callers:
-    /// the attach loop, when the agent process exits mid-attach, and the
-    /// operator's Reset command.
-    ///
-    /// Deliberately **required**, not defaulted. It was defaulted to
-    /// `restart_session` while only [`LocalBackend`] implemented it, which meant
-    /// a remote session's "fresh" restart silently *resumed* — the one thing the
-    /// caller asked it not to do. Every backend now answers for itself, so a
-    /// backend that cannot restart fresh has to say so rather than quietly
-    /// doing the opposite.
+    /// Explicitly reset a session, starting a fresh conversation and applying
+    /// any pending program.
     async fn restart_session_fresh(&self, id: SessionId) -> BResult<()>;
     async fn delete_session(&self, id: SessionId) -> BResult<()>;
+    async fn edit_session(
+        &self,
+        id: SessionId,
+        edit: claude_commander_protocol::api::EditSession,
+    ) -> BResult<claude_commander_protocol::api::EditSessionOutcome>;
+
     async fn rename_session(&self, id: SessionId, title: String) -> BResult<()>;
     /// Change a session's launch program (the agent harness that runs) and
     /// relaunch its pane fresh so the new program takes effect. Runs on the
@@ -742,10 +763,16 @@ pub trait CommanderBackend: Send + Sync {
     // A clone runs where the *sessions* run (a project registered on the server
     // host has to be checked out on the server host), so the local backend clones
     // locally and a remote backend asks its server to clone — same feature, and
-    // nothing for a frontend to gate on. `list_github_repos` can still *fail* as
+    // nothing for a frontend to gate on. `list_repositories` can still *fail* as
     // `Unavailable` when the host has no `gh`; that is a runtime state a picker
     // renders, not a static capability.
 
+    /// Repositories available from the provider selected on this backend's
+    /// host. The provider-bearing envelope keeps an empty result unambiguous.
+    async fn list_repositories(&self) -> BResult<RepositoryListing>;
+
+    /// Legacy GitHub-only listing retained for old clients and the compatibility
+    /// HTTP endpoint.
     /// Every GitHub repo the backend's host can clone, for the repo picker.
     /// Resolved by `gh` on that host, so its authenticated account decides the
     /// list — a remote backend shows the *server's* repos, not the operator's.
@@ -851,7 +878,8 @@ fn _assert_object_safe(b: Arc<dyn CommanderBackend>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use claude_commander_protocol::github::{CloneSource, CloneStatus};
+    use claude_commander_protocol::github::CloneStatus;
+    use claude_commander_protocol::hosting::CloneSource;
 
     #[test]
     fn backend_id_local_is_zero() {

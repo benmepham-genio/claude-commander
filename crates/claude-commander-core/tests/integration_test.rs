@@ -8,6 +8,9 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
+#[path = "cases/edit_session.rs"]
+mod edit_session_cases;
+
 use claude_commander_core::SessionStatus;
 use claude_commander_core::commander::{self, COMMANDER_TMUX_NAME};
 use claude_commander_core::config::{AppState, Config, ConfigStore, StateStore};
@@ -449,18 +452,11 @@ async fn test_session_manager_restart() {
     let worktrees_dir = TempDir::new().unwrap();
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
-        // This test bypasses `create_isolated_config_store`, so pin the tmux
-        // socket dir directly to keep it off the developer's real server.
-        tmux_tmpdir: Some(isolated_tmux_tmpdir(&state_temp_dir)),
-        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
-        // repo-clone paths write into. This test bypasses
-        // `create_isolated_config_store`, so pin it directly.
-        projects_dir: Some(state_temp_dir.path().join("projects")),
         ..Config::default()
     };
 
     let store = create_isolated_store(&state_temp_dir);
-    let config_store = Arc::new(ConfigStore::new(config).unwrap());
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
     let manager = SessionManager::new(config_store, store.clone(), "");
 
     // Add project and create session (prepare + finalize)
@@ -1616,6 +1612,11 @@ async fn test_hibernate_session_keeps_worktree_and_wakes_with_resume() {
 
     let store = create_isolated_store(&state_temp_dir);
     let config_store = create_isolated_config_store(&state_temp_dir, config);
+    assert_eq!(
+        config_store.read().tmux_tmpdir,
+        Some(state_temp_dir.path().join("tmux")),
+        "hibernation must use a private tmux server, including on wake"
+    );
     let manager = SessionManager::new(config_store, store.clone(), "");
 
     let project_id = manager.add_project(repo_path, None).await.unwrap();
@@ -1712,6 +1713,11 @@ async fn test_manual_kill_marks_session_for_resume_on_wake() {
 
     let store = create_isolated_store(&state_temp_dir);
     let config_store = create_isolated_config_store(&state_temp_dir, config);
+    assert_eq!(
+        config_store.read().tmux_tmpdir,
+        Some(state_temp_dir.path().join("tmux")),
+        "manual kill must use a private tmux server, including on wake"
+    );
     let manager = SessionManager::new(config_store, store.clone(), "");
 
     let project_id = manager.add_project(repo_path, None).await.unwrap();
@@ -1893,6 +1899,11 @@ async fn test_fresh_restart_clears_hibernation_marker() {
 
     let store = create_isolated_store(&state_temp_dir);
     let config_store = create_isolated_config_store(&state_temp_dir, config);
+    assert_eq!(
+        config_store.read().tmux_tmpdir,
+        Some(state_temp_dir.path().join("tmux")),
+        "fresh restart must use a private tmux server"
+    );
     let manager = SessionManager::new(config_store, store.clone(), "");
 
     let project_id = manager.add_project(repo_path, None).await.unwrap();
@@ -1919,9 +1930,9 @@ async fn test_fresh_restart_clears_hibernation_marker() {
             .clone()
     };
 
-    // Hibernate, then wake via the fresh-restart path (used when the pane
-    // process exits). This path must also clear the hibernation marker so the
-    // "live pane ⇒ not hibernated" invariant holds on every wake route.
+    // Hibernate, then wake via the fresh-restart path (the operator's Reset).
+    // This path must also clear the hibernation marker so the "live pane ⇒ not
+    // hibernated" invariant holds on every wake route.
     manager.hibernate_session(&session_id).await.unwrap();
     assert!(
         store
@@ -1933,10 +1944,7 @@ async fn test_fresh_restart_clears_hibernation_marker() {
         "should be marked hibernated before wake"
     );
 
-    manager
-        .restart_session_fresh_by_tmux_name(&tmux_name)
-        .await
-        .unwrap();
+    manager.restart_session_fresh(&session_id).await.unwrap();
     {
         let state = store.read().await;
         let s = state.get_session(&session_id).unwrap();
@@ -1949,25 +1957,6 @@ async fn test_fresh_restart_clears_hibernation_marker() {
     assert!(
         manager.tmux.session_exists(&tmux_name).await.unwrap(),
         "tmux session should be recreated by fresh restart"
-    );
-
-    // The id-keyed entry point is the one the operator's Reset command reaches
-    // (the TUI holds a `SessionId`, not a tmux name). Drive it too, so the
-    // name-resolution wrapper is covered rather than assumed.
-    manager.restart_session_fresh(&session_id).await.unwrap();
-    {
-        let state = store.read().await;
-        let s = state.get_session(&session_id).unwrap();
-        assert_eq!(
-            s.status,
-            SessionStatus::Running,
-            "reset by id should leave the session Running"
-        );
-        assert!(!s.hibernated);
-    }
-    assert!(
-        manager.tmux.session_exists(&tmux_name).await.unwrap(),
-        "reset by id should resolve the tmux name and recreate the pane"
     );
 
     // Cleanup
@@ -2387,6 +2376,201 @@ async fn headless_attach_detaches_a_lingering_wide_client() {
     let (_nr, _nw, _nre, mut narrow_child) = narrow.split();
     wide_child.kill().await;
     narrow_child.kill().await;
+    tmux_iso(sock, &["kill-server"]).await;
+}
+
+/// Start an isolated session whose program never exits, plus a second keep-alive
+/// session so killing the first never takes the server down with it.
+async fn start_attach_end_fixture(sock: &std::path::Path, session: &str) {
+    for name in [session, "cc-keepalive"] {
+        tmux_iso(
+            sock,
+            &[
+                "new-session",
+                "-d",
+                "-s",
+                name,
+                "sh",
+                "-c",
+                "while true; do sleep 1; done",
+            ],
+        )
+        .await;
+    }
+}
+
+/// Wait (bounded) until an attach's client is really attached, which is when
+/// tmux has painted it. Acting on the session sooner races the client: a kill
+/// that lands first leaves it "can't find session", with no exit line.
+async fn wait_for_first_paint(streams: &mut claude_commander_core::backend::AttachStreams) {
+    use tokio::io::AsyncReadExt;
+    let mut buf = [0u8; 256];
+    let n = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        streams.reader.read(&mut buf),
+    )
+    .await
+    .expect("the attach should paint")
+    .expect("read the attach");
+    assert!(n > 0, "the attach closed before painting");
+}
+
+/// Wait (bounded) for an attach to report how it ended, draining its output
+/// meanwhile as a frontend's pump does — the client's exit line is how the end
+/// is judged, so an undrained attach could only ever read as a detach.
+async fn attach_end(
+    streams: claude_commander_core::backend::AttachStreams,
+) -> claude_commander_core::backend::AttachEnd {
+    use tokio::io::AsyncReadExt;
+    let mut reader = streams.reader;
+    let mut terminator = streams.terminator;
+    let drain = tokio::spawn(async move {
+        let mut buf = [0u8; 4096];
+        while matches!(reader.read(&mut buf).await, Ok(n) if n > 0) {}
+    });
+    let end = tokio::time::timeout(std::time::Duration::from_secs(5), terminator.wait())
+        .await
+        .expect("the attach should have ended");
+    drain.abort();
+    end
+}
+
+/// The two-viewer bug: opening a session on a second machine runs
+/// `attach-session -d`, which detaches the first viewer's tmux client. That
+/// client exits 0 exactly as it would if the session had been killed, so the
+/// end must be judged by the client's exit line, which says it was detached.
+/// Reporting `SessionEnded` here made the first viewer's TUI restart the agent
+/// the second viewer was using.
+#[tokio::test]
+async fn an_attach_detached_by_another_client_ends_detached() {
+    use claude_commander_core::backend::AttachEnd;
+    use claude_commander_core::tmux::HeadlessAttach;
+
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let sock = tmp.path();
+    let session = "cc-two-viewers";
+    start_attach_end_fixture(sock, session).await;
+
+    let mut first = HeadlessAttach::spawn(session, 80, 24, Some(sock))
+        .expect("spawn first attach")
+        .into_streams();
+    // Or the second could attach first and displace *it* instead.
+    wait_for_first_paint(&mut first).await;
+    // The second viewer's `-d` detaches the first.
+    let second = HeadlessAttach::spawn(session, 80, 24, Some(sock)).expect("spawn second attach");
+
+    assert_eq!(attach_end(first).await, AttachEnd::Detached);
+
+    let (_r, _w, _re, mut child) = second.split();
+    child.kill().await;
+    tmux_iso(sock, &["kill-server"]).await;
+}
+
+/// The counterpart: when the session itself is destroyed, the attach must still
+/// report `SessionEnded`, which the TUI answers by attaching again.
+#[tokio::test]
+async fn an_attach_whose_session_is_killed_ends_session_ended() {
+    use claude_commander_core::backend::AttachEnd;
+    use claude_commander_core::tmux::HeadlessAttach;
+
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let sock = tmp.path();
+    let session = "cc-killed";
+    start_attach_end_fixture(sock, session).await;
+
+    let mut attach = HeadlessAttach::spawn(session, 80, 24, Some(sock))
+        .expect("spawn attach")
+        .into_streams();
+    wait_for_first_paint(&mut attach).await;
+    tmux_iso(sock, &["kill-session", "-t", session]).await;
+
+    assert_eq!(attach_end(attach).await, AttachEnd::SessionEnded);
+
+    tmux_iso(sock, &["kill-server"]).await;
+}
+
+/// Another viewer restarting the session kills it and recreates it under the
+/// same name. The attach's session was still destroyed, so it has ended — even
+/// though a session by that name exists again by the time anyone looks.
+#[tokio::test]
+async fn an_attach_whose_session_is_recreated_ends_session_ended() {
+    use claude_commander_core::backend::AttachEnd;
+    use claude_commander_core::tmux::HeadlessAttach;
+
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let sock = tmp.path();
+    let session = "cc-recreated";
+    start_attach_end_fixture(sock, session).await;
+
+    let mut attach = HeadlessAttach::spawn(session, 80, 24, Some(sock))
+        .expect("spawn attach")
+        .into_streams();
+    wait_for_first_paint(&mut attach).await;
+    tmux_iso(
+        sock,
+        &[
+            "kill-session",
+            "-t",
+            session,
+            ";",
+            "new-session",
+            "-d",
+            "-s",
+            session,
+            "sleep",
+            "60",
+        ],
+    )
+    .await;
+
+    assert_eq!(attach_end(attach).await, AttachEnd::SessionEnded);
+
+    tmux_iso(sock, &["kill-server"]).await;
+}
+
+/// The in-session switcher moves a local client between sessions with
+/// `switch-client`. The end must be judged against the session the client was
+/// last on: here the session it switched to dies while the one it attached to
+/// lives, which must read as `SessionEnded`.
+#[tokio::test]
+async fn an_attach_end_is_judged_against_the_session_the_client_switched_to() {
+    use claude_commander_core::backend::AttachEnd;
+    use claude_commander_core::tmux::HeadlessAttach;
+
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let sock = tmp.path();
+    start_attach_end_fixture(sock, "cc-origin").await;
+    start_attach_end_fixture(sock, "cc-switched").await;
+
+    let mut attach = HeadlessAttach::spawn("cc-origin", 80, 24, Some(sock))
+        .expect("spawn attach")
+        .into_streams();
+    wait_for_first_paint(&mut attach).await;
+    let tty = attach
+        .local_client_tty
+        .clone()
+        .expect("a local attach knows its client tty");
+    tmux_iso(sock, &["switch-client", "-c", &tty, "-t", "cc-switched"]).await;
+    tmux_iso(sock, &["kill-session", "-t", "cc-switched"]).await;
+
+    assert_eq!(attach_end(attach).await, AttachEnd::SessionEnded);
+
     tmux_iso(sock, &["kill-server"]).await;
 }
 

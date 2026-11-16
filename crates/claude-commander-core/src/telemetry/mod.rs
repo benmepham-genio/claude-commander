@@ -29,6 +29,10 @@ use tokio::time::{Duration, MissedTickBehavior, interval};
 use tracing::{debug, warn};
 
 pub use event::{ConfigSnapshot, EnvFingerprint};
+/// Lets other modules' tests (e.g. `CommanderService`'s) assert which feature
+/// events a domain method records.
+#[cfg(test)]
+pub(crate) use sink::MemorySink;
 pub use sink::{EventPayload, EventSink, HttpSink};
 
 use crate::config::TelemetryConfig;

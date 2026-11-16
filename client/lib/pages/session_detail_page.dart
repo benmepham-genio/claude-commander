@@ -9,11 +9,12 @@ import '../theme/tokens.dart';
 import '../util/error_text.dart';
 import '../widgets/session_chips.dart';
 import 'review_page.dart';
+import 'edit_session_dialog.dart';
 import 'terminal_page.dart';
 
 /// The low-frequency management actions, tucked into the detail header's
 /// overflow (⋮) menu rather than spending a button each.
-enum _ManageAction { rename, section, keepAlive }
+enum _ManageAction { edit }
 
 /// Detail view for a single session, layout-agnostic (no Scaffold, no route).
 /// Live status and agent state come straight from the [CommanderStore] (refreshed
@@ -269,14 +270,20 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
     action: () => _store!.killSession(_id),
   );
 
-  void _restart() => _runAction(
-    title: 'Restart session?',
-    message: 'Restarts the program in this session.',
-    confirmLabel: 'Restart',
-    confirmColor: CommanderTokens.of(context).working,
-    successMessage: 'Session restarted',
-    action: () => _store!.restartSession(_id),
-  );
+  void _restart() {
+    final pending = _info.pendingProgram;
+    _runAction(
+      title: 'Restart session?',
+      message: pending == null
+          ? 'Restarts the program in this session.'
+          : 'Restarts the session with "$pending". The conversation is '
+                'cleared.',
+      confirmLabel: 'Restart',
+      confirmColor: CommanderTokens.of(context).working,
+      successMessage: 'Session restarted',
+      action: () => _store!.restartSession(_id),
+    );
+  }
 
   void _delete() => _runAction(
     title: 'Delete session?',
@@ -341,13 +348,19 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
   );
 
   /// Run a mutation (no confirm dialog) with a busy guard + success/failure
-  /// snackbar, then re-sync detail. Shared by rename/section/keep-alive.
-  Future<void> _mutate(Future<void> Function() action, String ok) async {
+  /// snackbar, then re-sync detail. Shared by session edits and lifecycle actions.
+  Future<void> _mutate(
+    Future<void> Function() action,
+    String ok, {
+    String? Function()? successMessage,
+  }) async {
     setState(() => _busy = true);
     try {
       await action();
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(ok)));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(successMessage?.call() ?? ok)));
       setState(() => _busy = false);
       await _fetchDetail();
     } catch (e) {
@@ -359,42 +372,30 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
     }
   }
 
-  Future<void> _rename(SessionInfo info) async {
-    final name = await showDialog<String>(
+  Future<void> _edit(SessionInfo info) async {
+    final store = _store!;
+    final edit = await showDialog<SessionEdit>(
       context: context,
-      builder: (_) => _TextPromptDialog(
-        title: 'Rename session',
-        label: 'Title',
-        confirmLabel: 'Rename',
-        initialValue: info.title,
+      builder: (_) => EditSessionDialog(
+        session: info,
+        peers: store.sessions,
+        mainBranch: store.projects
+            .where((p) => p.id == info.projectId)
+            .firstOrNull
+            ?.mainBranch,
+        options: store.api.createOptions(handle: store.handle!),
       ),
     );
-    if (name == null || name.isEmpty) return;
-    await _mutate(() => _store!.renameSession(_id, name), 'Renamed');
-  }
-
-  Future<void> _section(SessionInfo info) async {
-    // Returns the trimmed section on Save, or null on Cancel; an empty string
-    // clears the section override.
-    final result = await showDialog<String>(
-      context: context,
-      builder: (_) => _TextPromptDialog(
-        title: 'Set section',
-        label: 'Section',
-        hint: 'leave empty to clear',
-        confirmLabel: 'Save',
-        initialValue: info.sectionOverride ?? info.currentSection ?? '',
-      ),
-    );
-    if (result == null) return; // cancelled
+    if (edit == null || !mounted) return;
+    String? warning;
     await _mutate(
-      () => _store!.setSection(_id, result.isEmpty ? null : result),
-      'Section updated',
+      () async {
+        warning = await store.editSession(_id, patchJson: edit.patchJson);
+      },
+      'Session updated',
+      successMessage: () => warning,
     );
   }
-
-  Future<void> _toggleKeepAlive() =>
-      _mutate(() => _store!.toggleKeepAlive(_id), 'Keep-alive toggled');
 
   /// The freshest session info: the store's live copy, then the fetched detail,
   /// then the list's snapshot the body was opened with.
@@ -561,22 +562,12 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
       icon: const Icon(Icons.more_vert),
       onSelected: (action) {
         switch (action) {
-          case _ManageAction.rename:
-            _rename(info);
-          case _ManageAction.section:
-            _section(info);
-          case _ManageAction.keepAlive:
-            _toggleKeepAlive();
+          case _ManageAction.edit:
+            _edit(info);
         }
       },
       itemBuilder: (_) => [
-        _menuItem(_ManageAction.rename, Icons.edit, 'Rename'),
-        _menuItem(_ManageAction.section, Icons.folder_outlined, 'Set section'),
-        _menuItem(
-          _ManageAction.keepAlive,
-          info.keepAlive ? Icons.check_box : Icons.check_box_outline_blank,
-          'Keep alive',
-        ),
+        _menuItem(_ManageAction.edit, Icons.edit, 'Edit session'),
       ],
     );
   }
@@ -906,64 +897,4 @@ String describeOperation(OperationStatusDto status) {
   };
   final detail = status.outcome.detail.trim();
   return detail.isEmpty ? '$what $verb' : '$what $verb: $detail';
-}
-
-/// A small text-prompt dialog that owns its [TextEditingController] and disposes
-/// it when its own route is removed — so the controller is never used after
-/// disposal during the dialog's exit transition. Pops with the trimmed text on
-/// confirm, or null on cancel.
-class _TextPromptDialog extends StatefulWidget {
-  final String title;
-  final String label;
-  final String confirmLabel;
-  final String? hint;
-  final String initialValue;
-
-  const _TextPromptDialog({
-    required this.title,
-    required this.label,
-    required this.confirmLabel,
-    this.hint,
-    this.initialValue = '',
-  });
-
-  @override
-  State<_TextPromptDialog> createState() => _TextPromptDialogState();
-}
-
-class _TextPromptDialogState extends State<_TextPromptDialog> {
-  late final TextEditingController _controller = TextEditingController(
-    text: widget.initialValue,
-  );
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  void _submit() => Navigator.of(context).pop(_controller.text.trim());
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: Text(widget.title),
-      content: TextField(
-        controller: _controller,
-        autofocus: true,
-        decoration: InputDecoration(
-          labelText: widget.label,
-          hintText: widget.hint,
-        ),
-        onSubmitted: (_) => _submit(),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(onPressed: _submit, child: Text(widget.confirmLabel)),
-      ],
-    );
-  }
 }

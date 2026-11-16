@@ -42,7 +42,7 @@ void main() {
       expect(find.text('acme/widget'), findsOneWidget);
       expect(find.text('acme/gadget'), findsOneWidget);
       expect(find.text('other/sprocket'), findsOneWidget);
-      final fetchesBefore = api.countOf('githubRepos');
+      final fetchesBefore = api.countOf('repositories');
 
       await tester.enterText(
         find.byKey(const Key('repo-search-field')),
@@ -54,7 +54,7 @@ void main() {
       expect(find.text('acme/gadget'), findsNothing);
       expect(find.text('other/sprocket'), findsOneWidget);
       // The filter is local: typing must not hit the network per keystroke.
-      expect(api.countOf('githubRepos'), fetchesBefore);
+      expect(api.countOf('repositories'), fetchesBefore);
     });
 
     testWidgets('matching an owner keeps that owner\'s repos', (tester) async {
@@ -76,6 +76,33 @@ void main() {
   });
 
   group('already-added badge', () {
+    testWidgets('a GitLab ssh origin matches an https nested project', (
+      tester,
+    ) async {
+      api.projectsResponse = [
+        projectInfo(
+          name: 'widget',
+          originUrl: 'git@gitlab.example.com:group/sub/widget.git',
+        ),
+      ];
+      api.repositoriesResponse = RepositoryListing(
+        host: const CodeHost(
+          provider: CodeHostProvider.gitlab,
+          hostname: 'gitlab.example.com',
+        ),
+        repositories: [
+          hostedRepo(
+            namespace: 'group/sub',
+            name: 'widget',
+            hostname: 'gitlab.example.com',
+          ),
+        ],
+      );
+      await pump(tester);
+
+      expect(find.text('Added'), findsOneWidget);
+    });
+
     testWidgets('an ssh origin matches an https clone url', (tester) async {
       // The project was cloned by `gh` with git_protocol=ssh, so its origin is
       // the scp spelling; the API reports https. Raw string equality misses
@@ -202,6 +229,113 @@ void main() {
       expect(find.byKey(const Key('owner-heading-acme')), findsOneWidget);
       expect(find.byKey(const Key('owner-heading-zeta')), findsOneWidget);
     });
+
+    testWidgets('keeps nested GitLab namespaces and visibility badges', (
+      tester,
+    ) async {
+      api.repositoriesResponse = RepositoryListing(
+        host: const CodeHost(
+          provider: CodeHostProvider.gitlab,
+          hostname: 'gitlab.example.com',
+        ),
+        repositories: [
+          hostedRepo(
+            namespace: 'group/sub',
+            name: 'internal',
+            visibility: RepositoryVisibility.internal,
+            hostname: 'gitlab.example.com',
+          ),
+          hostedRepo(
+            namespace: 'group/sub',
+            name: 'private',
+            visibility: RepositoryVisibility.private,
+            archived: true,
+            hostname: 'gitlab.example.com',
+          ),
+        ],
+      );
+      await pump(tester);
+
+      expect(find.byKey(const Key('owner-heading-group/sub')), findsOneWidget);
+      expect(find.text('group/sub/internal'), findsOneWidget);
+      expect(find.text('internal'), findsOneWidget);
+      expect(find.text('private · archived'), findsOneWidget);
+    });
+  });
+
+  group('GitLab provider', () {
+    testWidgets('empty listing still communicates provider and hostname', (
+      tester,
+    ) async {
+      api.repositoriesResponse = const RepositoryListing(
+        host: CodeHost(
+          provider: CodeHostProvider.gitlab,
+          hostname: 'gitlab.example.com',
+        ),
+        repositories: [],
+      );
+      await pump(tester);
+
+      expect(find.text('No GitLab projects'), findsOneWidget);
+      final field = tester.widget<TextField>(
+        find.byKey(const Key('clone-url-field')),
+      );
+      expect(
+        field.decoration?.hintText,
+        'https://gitlab.example.com/group/project.git',
+      );
+    });
+
+    testWidgets('listing failure gives glab guidance from server status', (
+      tester,
+    ) async {
+      api.codeHostStatusResponse = const CodeHostStatus(
+        provider: CodeHostProvider.gitlab,
+        hostname: 'gitlab.example.com',
+        cliAvailable: false,
+      );
+      api.githubReposError = StateError('GitLab CLI is unavailable');
+      await pump(tester);
+
+      expect(find.textContaining('`glab` installed'), findsOneWidget);
+    });
+
+    testWidgets('clone freezes the listing hostname into its source', (
+      tester,
+    ) async {
+      api.repositoriesResponse = RepositoryListing(
+        host: const CodeHost(
+          provider: CodeHostProvider.gitlab,
+          hostname: 'gitlab.example.com',
+        ),
+        repositories: [
+          hostedRepo(
+            namespace: 'group/sub',
+            name: 'widget',
+            hostname: 'gitlab.example.com',
+          ),
+        ],
+      );
+      api.cloneJobResponse = cloneJob(
+        status: const CloneStatusDto(
+          kind: CloneStatusKind.failed,
+          message: 'stopped',
+          isGitRepo: false,
+        ),
+      );
+      await pump(tester);
+
+      await tester.tap(find.byKey(const Key('repo-row-group/sub/widget')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('clone-confirm-button')));
+      await tester.pumpAndSettle();
+
+      final request =
+          api.lastCall('startClone')!.args['request'] as CloneRequestDto;
+      expect(request.source.kind, CloneSourceKind.gitlab);
+      expect(request.source.value, 'group/sub/widget');
+      expect(request.source.hostname, 'gitlab.example.com');
+    });
   });
 
   group('gh unavailable', () {
@@ -228,14 +362,14 @@ void main() {
     testWidgets('pull-to-refresh retries the fetch', (tester) async {
       api.githubReposError = StateError('gh is not installed on the server');
       await pump(tester);
-      expect(api.countOf('githubRepos'), 1);
+      expect(api.countOf('repositories'), 1);
 
       api.githubReposError = null;
       api.githubReposResponse = [githubRepo(owner: 'acme', name: 'widget')];
       await tester.tap(find.byKey(const Key('repo-list-retry')));
       await tester.pumpAndSettle();
 
-      expect(api.countOf('githubRepos'), 2);
+      expect(api.countOf('repositories'), 2);
       expect(find.text('acme/widget'), findsOneWidget);
     });
   });

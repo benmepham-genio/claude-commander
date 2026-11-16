@@ -45,6 +45,7 @@
             <button type="button" id="shell-btn" disabled title="Toggle shell pane (Ctrl+\)">Shell</button>
             <button type="button" id="review-btn" disabled title="Review diff & comments">Review</button>
             <button type="button" id="info-btn" disabled title="Toggle info panel">Info</button>
+            <button type="button" id="edit-session-btn" disabled>Edit session</button>
             <button type="button" id="restart-btn" disabled title="Restart session">Restart</button>
             <button type="button" id="kill-btn" disabled title="Kill session">Kill</button>
             <button type="button" id="delete-btn" disabled title="Delete session" class="danger">Delete</button>
@@ -105,6 +106,36 @@
           <div class="modal-actions">
             <button type="button" class="ghost" data-close="new-modal">Cancel</button>
             <button type="submit" class="primary">Create</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div id="edit-modal" class="modal-overlay hidden">
+      <div class="modal">
+        <h2 id="edit-heading">Edit session</h2>
+        <form id="edit-form">
+          <div id="edit-fields">
+            <label>Session name <input id="edit-title" type="text" required /></label>
+            <label>Program <select id="edit-program" required></select></label>
+            <label>Section <select id="edit-section"></select></label>
+            <label>Stack base <select id="edit-base"></select></label>
+            <p class="hint">Stack base changes metadata and the PR target. Git history is unchanged.</p>
+            <label class="checkbox"><input id="edit-keep-alive" type="checkbox" />Keep alive (prevent automatic hibernation)</label>
+            <p class="hint" id="edit-options-error"></p>
+            <div class="modal-actions">
+              <button type="button" class="ghost" data-close="edit-modal">Cancel</button>
+              <button type="submit">Save</button>
+            </div>
+          </div>
+          <div id="edit-warning" class="hidden">
+            <p>Changing the program requires a fresh restart. Restarting stops the current agent and clears its conversation.</p>
+            <p>Save for later to keep the current agent running. The new program starts fresh on the next restart.</p>
+            <div class="modal-actions">
+              <button type="button" class="ghost" id="edit-back">Back</button>
+              <button type="button" id="edit-later">No, save for next restart</button>
+              <button type="button" class="danger" id="edit-now">Yes, restart and clear</button>
+            </div>
           </div>
         </form>
       </div>

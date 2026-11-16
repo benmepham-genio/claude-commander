@@ -190,8 +190,16 @@ impl AttachKind {
 pub enum DetachReason {
     /// The client sent a `detach` control frame.
     ClientRequest,
-    /// The tmux session ended (the program inside it exited).
+    /// The tmux session is gone (killed, deleted, or killed and recreated by a
+    /// restart). Taken from the attach client's own exit line, never inferred
+    /// from the client merely exiting.
     SessionEnded,
+    /// The attach's tmux client was detached while the session lives on:
+    /// another viewer opened the session (each attach detaches the others, so
+    /// the window fits whoever attached last) or the user pressed tmux's detach
+    /// key. A client should stop here rather than reconnect — reattaching
+    /// would displace the other viewer in turn.
+    ClientDetached,
     /// The transport dropped (socket closed, heartbeat timed out).
     Transport,
 }
@@ -428,6 +436,7 @@ mod tests {
         for (reason, tag) in [
             (DetachReason::ClientRequest, "client_request"),
             (DetachReason::SessionEnded, "session_ended"),
+            (DetachReason::ClientDetached, "client_detached"),
             (DetachReason::Transport, "transport"),
         ] {
             let msg = ServerControl::Detached { reason };

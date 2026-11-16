@@ -20,6 +20,7 @@ use claude_commander_protocol::api::{CreatedId, MarkUnread, PatchSession};
 use serde::Deserialize;
 
 use crate::error::{ApiError, error_response};
+use crate::extract::SafeJson;
 use crate::state::AppState;
 
 use super::{parse_session_id, run_local};
@@ -162,6 +163,8 @@ pub async fn delete(
 pub struct PreviewQuery {
     /// Capture this many pane lines directly instead of the cached snapshot.
     pub lines: Option<usize>,
+    #[serde(default)]
+    pub part: claude_commander_protocol::preview::PreviewPart,
 }
 
 /// `GET /sessions/{id}/preview?lines=` → session `preview`.
@@ -174,7 +177,7 @@ pub async fn preview(
     Ok(Json(
         state
             .service
-            .preview(PreviewTarget::Session { id, lines: q.lines })
+            .preview_part(PreviewTarget::Session { id, lines: q.lines }, q.part)
             .await?,
     ))
 }
@@ -188,14 +191,21 @@ pub async fn branch_diff(
     Ok(state.service.branch_diff(&id).await?)
 }
 
-/// `PATCH /sessions/{id}` → `rename_session` / `set_section` / `change_program` → 204.
+/// `PATCH /sessions/{id}` saves edits (200 with optional base-retarget outcome),
+/// or performs a legacy single-setting operation (204).
 pub async fn patch(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(body): Json<PatchSession>,
-) -> Result<StatusCode, ApiError> {
+    SafeJson(body): SafeJson<PatchSession>,
+) -> Result<Response, ApiError> {
     let id = parse_session_id(&id)?;
     match body {
+        PatchSession::Edit(edit) => {
+            let outcome =
+                run_local(move || async move { state.service.edit_session(&id, edit).await })
+                    .await?;
+            return Ok(Json(outcome).into_response());
+        }
         PatchSession::Rename(r) => state.service.rename_session(&id, r.title).await?,
         PatchSession::SetSection(s) => state.service.set_section(&id, s.section).await?,
         // Relaunches the pane (tmux) → not `Send`; run on the local pool.
@@ -204,7 +214,7 @@ pub async fn patch(
                 .await?;
         }
     }
-    Ok(StatusCode::NO_CONTENT)
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// `POST /sessions/{id}/read` → `mark_read` → 204.
@@ -339,6 +349,60 @@ mod tests {
             AppState::new(service, crate::auth::AuthConfig::Disabled),
             sid,
         )
+    }
+
+    #[tokio::test]
+    async fn edit_patch_saves_pending_program_and_returns_base_outcome() {
+        use axum::body::Body;
+        use axum::http::Request;
+        let dir = TempDir::new().unwrap();
+        let (state, sid) = seeded_state(&dir);
+        let before = state
+            .service
+            .store()
+            .read()
+            .await
+            .get_session(&sid)
+            .unwrap()
+            .program
+            .clone();
+        let body = serde_json::json!({ "op": "edit", "title": "edited", "program": "codex",
+            "section": null, "keep_alive": true, "restart": false });
+        let req = Request::patch(format!("/sessions/{}", sid.as_uuid()))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let (status, body) = crate::handlers::test_support::send(router(state.clone()), req).await;
+        assert_eq!(status, 200);
+        let outcome: claude_commander_protocol::api::EditSessionOutcome =
+            serde_json::from_slice(&body).unwrap();
+        assert!(outcome.base.is_none());
+        assert!(outcome.warnings.is_empty());
+        assert!(!outcome.restarted);
+        let stored = state.service.store().read().await;
+        let session = stored.get_session(&sid).unwrap();
+        assert_eq!(session.title, "edited");
+        assert_eq!(session.program, before);
+        assert_eq!(session.pending_program.as_deref(), Some("codex"));
+        assert!(session.keep_alive);
+    }
+
+    #[tokio::test]
+    async fn edit_patch_does_not_echo_malformed_program_credentials() {
+        use axum::body::Body;
+        use axum::http::Request;
+        let dir = TempDir::new().unwrap();
+        let (state, sid) = seeded_state(&dir);
+        let secret = "test-credential-must-not-be-echoed";
+        let body = serde_json::json!({ "op": "edit", "title": "edited", "program": {"token": secret},
+            "section": null, "keep_alive": false });
+        let req = Request::patch(format!("/sessions/{}", sid.as_uuid()))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let (status, body) = crate::handlers::test_support::send(router(state), req).await;
+        assert_eq!(status, 400);
+        assert!(!String::from_utf8(body).unwrap().contains(secret));
     }
 
     #[tokio::test]

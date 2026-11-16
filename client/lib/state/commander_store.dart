@@ -89,22 +89,46 @@ class CommanderStore extends ChangeNotifier {
   bool _refreshQueued = false;
   bool _disposed = false;
 
+  SnapshotDto? _indexedSnapshot;
+  final Map<ProjectId, String?> _projectWorkspaces = {};
+  final Map<String, SessionInfo> _sessionsById = {};
+  List<ProjectSessions> _groups = const [];
+  final Map<String?, List<SessionInfo>> _workspaceSessions = {};
+
+  void _ensureIndexes() {
+    if (identical(_indexedSnapshot, _snapshot)) return;
+    _indexedSnapshot = _snapshot;
+    _projectWorkspaces.clear();
+    _sessionsById.clear();
+    _workspaceSessions.clear();
+    final grouped = <ProjectId, List<SessionInfo>>{};
+    for (final project in projects) {
+      _projectWorkspaces[project.id] = project.workspace;
+    }
+    for (final session in sessions) {
+      _sessionsById[session.id] = session;
+      grouped.putIfAbsent(session.projectId, () => []).add(session);
+      _workspaceSessions
+          .putIfAbsent(_projectWorkspaces[session.projectId], () => [])
+          .add(session);
+    }
+    _groups = [
+      for (final project in projects)
+        ProjectSessions(
+          project: project,
+          sessions: grouped[project.id] ?? const [],
+        ),
+    ];
+  }
+
   // --- convenience getters the pages render from ---------------------------
 
   List<SessionInfo> get sessions => _snapshot?.sessions ?? const [];
 
   /// Sessions grouped under their project, in the snapshot's project order.
   List<ProjectSessions> get sessionsByProject {
-    final ws = _snapshot;
-    if (ws == null) return const [];
-    final byProject = <ProjectId, List<SessionInfo>>{};
-    for (final s in ws.sessions) {
-      byProject.putIfAbsent(s.projectId, () => []).add(s);
-    }
-    return [
-      for (final p in ws.projects)
-        ProjectSessions(project: p, sessions: byProject[p.id] ?? const []),
-    ];
+    _ensureIndexes();
+    return _groups;
   }
 
   List<OperationStatusDto> get operations => _snapshot?.operations ?? const [];
@@ -130,10 +154,8 @@ class CommanderStore extends ChangeNotifier {
   /// a project this snapshot does not know, which reads as Main like it does in
   /// `viewmodel::workspace::project_workspace`.
   String? workspaceOfProject(ProjectId projectId) {
-    for (final p in projects) {
-      if (p.id == projectId) return p.workspace;
-    }
-    return null;
+    _ensureIndexes();
+    return _projectWorkspaces[projectId];
   }
 
   /// The workspace a session belongs to (its project's), or null for Main.
@@ -147,10 +169,10 @@ class CommanderStore extends ChangeNotifier {
   ];
 
   /// The sessions in [workspace] (null = Main), in snapshot order.
-  List<SessionInfo> sessionsIn(String? workspace) => [
-    for (final s in sessions)
-      if (workspaceOfSession(s) == workspace) s,
-  ];
+  List<SessionInfo> sessionsIn(String? workspace) {
+    _ensureIndexes();
+    return _workspaceSessions[workspace] ?? const [];
+  }
 
   /// [sessionsByProject] limited to the projects in [workspace].
   List<ProjectSessions> sessionsByProjectIn(String? workspace) => [
@@ -165,10 +187,8 @@ class CommanderStore extends ChangeNotifier {
   /// The live [SessionInfo] for an id from the latest snapshot, or null if the
   /// session is no longer present (deleted/stopped-and-removed).
   SessionInfo? sessionById(String id) {
-    for (final s in sessions) {
-      if (s.id == id) return s;
-    }
-    return null;
+    _ensureIndexes();
+    return _sessionsById[id];
   }
 
   // --- lifecycle ----------------------------------------------------------
@@ -273,61 +293,84 @@ class CommanderStore extends ChangeNotifier {
   /// never acquired, else just refetch.
   Future<void> retry() => _handle == null ? connect() : _refresh();
 
-  // --- mutations (thin wrappers; the next change-feed tick refreshes state) --
+  // --- mutations (thin wrappers; `_mutate` refetches the snapshot after each)
 
   Future<void> killSession(String id) =>
-      _api.killSession(handle: _requireHandle, id: id);
+      _mutate(() => _api.killSession(handle: _requireHandle, id: id));
 
   Future<void> restartSession(String id) =>
-      _api.restartSession(handle: _requireHandle, id: id);
+      _mutate(() => _api.restartSession(handle: _requireHandle, id: id));
 
   Future<void> deleteSession(String id) =>
-      _api.deleteSession(handle: _requireHandle, id: id);
+      _mutate(() => _api.deleteSession(handle: _requireHandle, id: id));
 
-  Future<void> renameSession(String id, String title) =>
-      _api.renameSession(handle: _requireHandle, id: id, title: title);
+  Future<String?> editSession(String id, {required String patchJson}) =>
+      _mutate(
+        () => _api.editSession(
+          handle: _requireHandle,
+          id: id,
+          patchJson: patchJson,
+        ),
+      );
 
-  Future<void> setSection(String id, String? section) =>
-      _api.setSection(handle: _requireHandle, id: id, section: section);
+  Future<void> renameSession(String id, String title) => _mutate(
+    () => _api.renameSession(handle: _requireHandle, id: id, title: title),
+  );
+
+  Future<void> setSection(String id, String? section) => _mutate(
+    () => _api.setSection(handle: _requireHandle, id: id, section: section),
+  );
 
   Future<void> markRead(String id) =>
-      _api.markRead(handle: _requireHandle, id: id);
+      _mutate(() => _api.markRead(handle: _requireHandle, id: id));
 
   Future<void> markUnread(List<String> ids) =>
-      _api.markUnread(handle: _requireHandle, ids: ids);
+      _mutate(() => _api.markUnread(handle: _requireHandle, ids: ids));
 
   Future<bool> toggleKeepAlive(String id) =>
-      _api.toggleKeepAlive(handle: _requireHandle, id: id);
+      _mutate(() => _api.toggleKeepAlive(handle: _requireHandle, id: id));
 
   /// Cascade-merge this session's stack. Returns the terminal operation status
   /// (succeeded / paused / failed) for the caller to surface.
   Future<OperationStatusDto> cascadeMerge(String id) =>
-      _api.cascadeMerge(handle: _requireHandle, id: id);
+      _mutate(() => _api.cascadeMerge(handle: _requireHandle, id: id));
 
   /// Push this session's stack. Returns the terminal operation status.
   Future<OperationStatusDto> pushStack(String id) =>
-      _api.pushStack(handle: _requireHandle, id: id);
+      _mutate(() => _api.pushStack(handle: _requireHandle, id: id));
 
   /// Resume a paused cascade. Returns the next terminal operation status.
   Future<OperationStatusDto> cascadeResume() =>
-      _api.cascadeResume(handle: _requireHandle);
+      _mutate(() => _api.cascadeResume(handle: _requireHandle));
 
   /// Abandon a paused cascade, leaving the stack where it stopped.
-  Future<void> cascadeAbandon() => _api.cascadeAbandon(handle: _requireHandle);
+  Future<void> cascadeAbandon() =>
+      _mutate(() => _api.cascadeAbandon(handle: _requireHandle));
 
   /// Register a new project by its server-side repo path, tagged with
   /// [workspace] (null = Main); returns its new id.
-  Future<String> addProject(String path, {String? workspace}) =>
-      _api.addProject(handle: _requireHandle, path: path, workspace: workspace);
+  Future<String> addProject(String path, {String? workspace}) => _mutate(
+    () => _api.addProject(
+      handle: _requireHandle,
+      path: path,
+      workspace: workspace,
+    ),
+  );
 
   /// Deregister a project by id (does not touch the repo on disk).
   Future<void> removeProject(String id) =>
-      _api.removeProject(handle: _requireHandle, id: id);
+      _mutate(() => _api.removeProject(handle: _requireHandle, id: id));
 
   /// Scan a server-side directory for git repos and register any it finds,
   /// each new one tagged with [workspace] (null = Main).
-  Future<ScanResultDto> scanDirectory(String path, {String? workspace}) => _api
-      .scanDirectory(handle: _requireHandle, path: path, workspace: workspace);
+  Future<ScanResultDto> scanDirectory(String path, {String? workspace}) =>
+      _mutate(
+        () => _api.scanDirectory(
+          handle: _requireHandle,
+          path: path,
+          workspace: workspace,
+        ),
+      );
 
   /// Register a project by its server-side repo path, or return the id of the
   /// project already registered for it.
@@ -338,29 +381,38 @@ class CommanderStore extends ChangeNotifier {
   /// paths itself, and there is no second copy of the rule to drift.
   ///
   /// [workspace] tags the project only if this call newly registers it.
-  Future<String> ensureProject(String path, {String? workspace}) => _api
-      .ensureProject(handle: _requireHandle, path: path, workspace: workspace);
+  Future<String> ensureProject(String path, {String? workspace}) => _mutate(
+    () => _api.ensureProject(
+      handle: _requireHandle,
+      path: path,
+      workspace: workspace,
+    ),
+  );
 
   /// Replace this server's workspace definitions (see
   /// [CommanderApi.setWorkspaces]). Fleet-wide edits go through
   /// `FleetStore`, which sends the same request to every server.
-  Future<void> setWorkspaces(SetWorkspacesRequestDto request) =>
-      _api.setWorkspaces(handle: _requireHandle, request: request);
+  Future<void> setWorkspaces(SetWorkspacesRequestDto request) => _mutate(
+    () => _api.setWorkspaces(handle: _requireHandle, request: request),
+  );
 
   /// Rename a workspace on this server, rewriting its projects' tags.
-  Future<void> renameWorkspace(String from, String to) =>
-      _api.renameWorkspace(handle: _requireHandle, from: from, to: to);
+  Future<void> renameWorkspace(String from, String to) => _mutate(
+    () => _api.renameWorkspace(handle: _requireHandle, from: from, to: to),
+  );
 
   /// Delete a workspace on this server, moving its projects to Main.
   Future<void> deleteWorkspace(String name) =>
-      _api.deleteWorkspace(handle: _requireHandle, name: name);
+      _mutate(() => _api.deleteWorkspace(handle: _requireHandle, name: name));
 
   /// Move a project to [workspace] (null = Main) on this server.
   Future<void> setProjectWorkspace(String projectId, String? workspace) =>
-      _api.setProjectWorkspace(
-        handle: _requireHandle,
-        projectId: projectId,
-        workspace: workspace,
+      _mutate(
+        () => _api.setProjectWorkspace(
+          handle: _requireHandle,
+          projectId: projectId,
+          workspace: workspace,
+        ),
       );
 
   /// Every repo the server-side `gh` user can clone, for the repo picker.
@@ -368,6 +420,10 @@ class CommanderStore extends ChangeNotifier {
   /// request ceiling — the picker words both inline.
   Future<List<GithubRepo>> githubRepos() =>
       _api.githubRepos(handle: _requireHandle);
+
+  /// Provider-neutral repository listing from the connected server.
+  Future<RepositoryListing> repositories() =>
+      _api.repositories(handle: _requireHandle);
 
   /// Start a clone. The returned job's status is not terminal; poll [cloneJob].
   Future<CloneJobDto> startClone(CloneRequestDto request) =>
@@ -433,7 +489,46 @@ class CommanderStore extends ChangeNotifier {
   String get _requireHandle =>
       _handle ?? (throw StateError('CommanderStore is not connected'));
 
-  void _onChange(BigInt _) => unawaited(_refresh());
+  Future<T> _mutate<T>(Future<T> Function() action) async {
+    final epoch = _connectEpoch;
+    final result = await action();
+    if (!_disposed && epoch == _connectEpoch) await _refresh();
+    return result;
+  }
+
+  final _changes = StreamController<void>.broadcast();
+
+  @visibleForTesting
+  bool get hasPendingChangeWaiters => _changes.hasListener;
+
+  /// Wait for server invalidation or a compatibility/reconciliation deadline.
+  Future<void> waitForChange(Duration fallback) async {
+    if (_disposed) return;
+    final completion = Completer<void>();
+    void finish() {
+      if (!completion.isCompleted) completion.complete();
+    }
+
+    final subscription = _changes.stream.listen(
+      (_) => finish(),
+      onDone: finish,
+    );
+    final timer = Timer(fallback, finish);
+    try {
+      await completion.future;
+    } finally {
+      timer.cancel();
+      // This broadcast controller has no asynchronous cleanup; cancelling
+      // removes the listener immediately without delaying the waiting page.
+      // Pinned by 'timed-out clone waits release subscriptions'.
+      unawaited(subscription.cancel());
+    }
+  }
+
+  void _onChange(BigInt _) {
+    _changes.add(null);
+    unawaited(_refresh());
+  }
 
   void _onConnection(ConnectionStateDto state) {
     _connection = state;
@@ -448,9 +543,15 @@ class CommanderStore extends ChangeNotifier {
       return;
     }
     _refreshing = true;
+    final epoch = _connectEpoch;
     try {
-      final ws = await _api.snapshot(handle: h);
-      final states = await _api.agentStates(handle: h, fresh: false);
+      final results = await Future.wait<Object>([
+        _api.snapshot(handle: h),
+        _api.agentStates(handle: h, fresh: false),
+      ]);
+      if (_disposed || h != _handle || epoch != _connectEpoch) return;
+      final ws = results[0] as SnapshotDto;
+      final states = results[1] as AgentStatesSnapshotDto;
       _snapshot = ws;
       _agentStates
         ..clear()
@@ -460,10 +561,14 @@ class CommanderStore extends ChangeNotifier {
       _commanderRunning = states.commanderRunning;
       _error = null;
     } catch (e) {
-      _error = e;
+      if (!_disposed && h == _handle && epoch == _connectEpoch) {
+        _error = e;
+      }
     } finally {
       _refreshing = false;
-      if (!_disposed) notifyListeners();
+      if (!_disposed && h == _handle && epoch == _connectEpoch) {
+        notifyListeners();
+      }
       if (_refreshQueued && !_disposed) {
         _refreshQueued = false;
         // Fire-and-forget: the coalesced follow-up must not extend THIS call's
@@ -493,6 +598,7 @@ class CommanderStore extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    unawaited(_changes.close());
     // cancel() returns a Future; nothing awaits it during teardown.
     unawaited(_teardownSubs());
     final h = _handle;

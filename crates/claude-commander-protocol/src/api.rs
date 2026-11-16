@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::comment::{Comment, CommentSide};
 use crate::diff::ParsedDiff;
+use crate::hosting::CodeHostProvider;
 use crate::pr::{PrState, ReviewDecision};
 use crate::session::{AgentState, ProjectId, SessionId, SessionStatus};
 use crate::workspace::{StartupWorkspace, WorkspaceDef};
@@ -31,7 +32,11 @@ pub struct SessionInfo {
     pub title: String,
     pub branch: String,
     pub status: SessionStatus,
+    /// Program used by the current agent pane.
     pub program: String,
+    /// Program saved for the next fresh restart, if different from the live one.
+    #[serde(default)]
+    pub pending_program: Option<String>,
     pub project_id: ProjectId,
     pub project_name: String,
     pub pr_number: Option<u32>,
@@ -342,10 +347,54 @@ pub struct OperationStatus {
 pub struct ServerStatus {
     /// Whether the `gh` CLI is installed and runnable.
     pub gh_available: bool,
+    /// Selected provider and its CLI health. Defaults support older servers.
+    #[serde(default)]
+    pub code_host: CodeHostStatus,
     /// Whether tmux is available.
     pub tmux_ok: bool,
     /// Server crate version (`CARGO_PKG_VERSION`).
     pub version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CodeHostStatus {
+    pub provider: CodeHostProvider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    pub cli_available: bool,
+}
+
+impl Default for CodeHostStatus {
+    fn default() -> Self {
+        Self {
+            provider: CodeHostProvider::Github,
+            hostname: None,
+            cli_available: false,
+        }
+    }
+}
+
+impl CodeHostStatus {
+    /// The host this status describes — provider and hostname, without the
+    /// CLI-availability probe — for comparing hosts and tagging host-bound data.
+    pub fn host(&self) -> crate::hosting::CodeHost {
+        crate::hosting::CodeHost {
+            provider: self.provider,
+            hostname: self.hostname.clone(),
+        }
+    }
+}
+
+impl ServerStatus {
+    /// Compatibility view for responses from servers predating `code_host`.
+    pub fn effective_code_host(&self) -> CodeHostStatus {
+        let mut status = self.code_host.clone();
+        if status.provider == CodeHostProvider::Github && !status.cli_available {
+            status.cli_available = self.gh_available;
+        }
+        status
+    }
 }
 
 /// A single snapshot of everything the session tree needs to render: projects,
@@ -558,6 +607,46 @@ pub struct ChangeProgram {
     pub program: String,
 }
 
+/// All editable session settings. Omit `base` to preserve the current stack base.
+/// Program changes can be saved for the next restart, or launched fresh now.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct EditSession {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
+    /// Missing preserves the assignment; null clears the manual override.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "edit_section"
+    )]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub section: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_alive: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<SetSessionBase>,
+    #[serde(default)]
+    pub restart: bool,
+}
+
+fn edit_section<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(d).map(Some)
+}
+
+/// Local settings are saved before best-effort external operations run.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct EditSessionOutcome {
+    pub restarted: bool,
+    pub base: Option<SetSessionBaseOutcome>,
+    pub warnings: Vec<String>,
+}
+
 /// `PATCH /sessions/{id}` body: rename a session, move it to a section
 /// (`section: null` clears the manual override), or change its launch program.
 /// Tagged by `op` so a section clear (`null`) is unambiguous.
@@ -568,6 +657,7 @@ pub enum PatchSession {
     Rename(RenameSession),
     SetSection(SetSection),
     ChangeProgram(ChangeProgram),
+    Edit(EditSession),
 }
 
 /// `POST /sessions/unread` body: the session ids (full UUIDs) to flag unread.
@@ -916,6 +1006,11 @@ mod tests {
             operations: vec![],
             server: ServerStatus {
                 gh_available: true,
+                code_host: CodeHostStatus {
+                    provider: CodeHostProvider::Github,
+                    hostname: None,
+                    cli_available: true,
+                },
                 tmux_ok: true,
                 version: "0.0.0".to_string(),
             },
@@ -954,6 +1049,10 @@ mod tests {
         assert!(snap.project_pull.is_empty());
         assert!(snap.operations.is_empty());
         // An older server has no workspaces: only Main, default label, `last`.
+        assert_eq!(
+            snap.server.effective_code_host().provider,
+            CodeHostProvider::Github
+        );
         assert!(snap.workspaces.is_empty());
         assert!(snap.main_workspace.is_none());
         assert_eq!(snap.startup_workspace, StartupWorkspace::Last);

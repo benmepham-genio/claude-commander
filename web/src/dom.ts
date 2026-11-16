@@ -85,6 +85,9 @@ export const els = {
   get infoBtn() {
     return byId<HTMLButtonElement>("info-btn");
   },
+  get editSession() {
+    return byId<HTMLButtonElement>("edit-session-btn");
+  },
   get restart() {
     return byId<HTMLButtonElement>("restart-btn");
   },

@@ -207,16 +207,24 @@ pub(super) fn delete_confirm_message(
 /// diff will show them. Retargeting onto a *sibling* is the sharp case — the
 /// merge base collapses towards main and the diff swells to include the old
 /// parent's work — so the message says what to do rather than merely hedging.
-pub(super) fn set_session_base_confirm_message(title: &str, new_base: &str) -> String {
+pub(super) fn set_session_base_confirm_message(
+    provider: claude_commander_protocol::hosting::CodeHostProvider,
+    title: &str,
+    new_base: &str,
+) -> String {
+    let (review, host) = match provider {
+        claude_commander_protocol::hosting::CodeHostProvider::Github => ("pull request", "GitHub"),
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab => ("merge request", "GitLab"),
+    };
     format!(
         "Set the base of \"{title}\" to \"{new_base}\"?\n\n\
-         This updates the stack link, and retargets the pull request on GitHub if one exists.\n\n\
+         This updates the stack link, and retargets the {review} on {host} if one exists.\n\n\
          Git history is NOT rewritten: the branch still contains its old base's commits, so the \
-         PR and review diff will show them until you rebase or merge onto \"{new_base}\" yourself."
+         review and review diff will show them until you rebase or merge onto \"{new_base}\" yourself."
     )
 }
 
-/// The Restart-confirmation body. A local session's resume behaviour is
+/// Pending programs always require a fresh start. Otherwise, a local session's resume behaviour is
 /// governed by this client's `resume_session` config, so the message can
 /// promise `/resume` semantics. A remote session's resume behaviour lives in
 /// the server's config, which this client can't read — so it gets neutral
@@ -225,7 +233,14 @@ pub(super) fn restart_confirm_message(
     is_local: bool,
     resume_session: bool,
     title: Option<&str>,
+    pending_program: Option<&str>,
 ) -> String {
+    if let Some(program) = pending_program {
+        let subject = title.map_or_else(|| "this session".into(), |title| format!("\"{title}\""));
+        return format!(
+            "Restart session {subject} with {program}?\nThis stops the current agent and clears the conversation. The pending program starts fresh."
+        );
+    }
     if !is_local {
         let subject = match title {
             Some(title) => format!("\"{title}\""),
@@ -252,16 +267,21 @@ pub(super) fn restart_confirm_message(
 /// DTO), and "any conversation it would otherwise have resumed" is true of a
 /// hibernated session — whose wake-up resume is exactly what makes hibernation
 /// non-destructive — without needing to know.
-pub(super) fn reset_confirm_message(title: Option<&str>) -> String {
+///
+/// A reset applies a pending program just as a restart does, so it says so.
+pub(super) fn reset_confirm_message(title: Option<&str>, pending_program: Option<&str>) -> String {
     let subject = match title {
         Some(title) => format!("\"{title}\""),
         None => "this session".to_string(),
     };
+    let program = pending_program
+        .map(|program| format!("\nIt starts with {program}, the pending program."))
+        .unwrap_or_default();
     format!(
         "Reset session {subject}?\nThis kills its tmux session and starts a fresh one with \
          no resume, so the agent begins a new conversation — any conversation it would \
          otherwise have resumed (including one preserved by hibernation) is discarded.\nThe \
-         worktree, branch and commits are untouched."
+         worktree, branch and commits are untouched.{program}"
     )
 }
 
@@ -793,6 +813,23 @@ impl App {
                     },
                 ))
                 .await;
+        });
+    }
+
+    fn spawn_add_local_project(&self, path: PathBuf, workspace: Option<String>) {
+        let backend = self.local_arc();
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let update = match backend.add_project(path, workspace).await {
+                Ok(project_id) => StateUpdate::ProjectAdded {
+                    backend_id: LOCAL_BACKEND_ID.0,
+                    project_id,
+                },
+                Err(error) => StateUpdate::Error {
+                    message: format!("Failed to add project: {error}"),
+                },
+            };
+            let _ = tx.send(AppEvent::StateUpdate(update)).await;
         });
     }
 
@@ -1473,8 +1510,8 @@ impl App {
         if eff_mode == PaletteMode::RemoteServerPicker {
             return self.gather_remote_server_picker_items(eff_query);
         }
-        if eff_mode == PaletteMode::GithubRepoPicker {
-            return self.gather_github_repo_picker_items(eff_query);
+        if eff_mode == PaletteMode::RepositoryPicker {
+            return self.gather_repository_picker_items(eff_query);
         }
         if eff_mode == PaletteMode::WorkspacePicker {
             return self.gather_workspace_picker_items(eff_query);
@@ -1563,7 +1600,7 @@ impl App {
             PaletteMode::RemoteServerPicker => {
                 Some(self.gather_remote_server_picker_items(eff_query))
             }
-            PaletteMode::GithubRepoPicker => Some(self.gather_github_repo_picker_items(eff_query)),
+            PaletteMode::RepositoryPicker => Some(self.gather_repository_picker_items(eff_query)),
             PaletteMode::WorkspacePicker => Some(self.gather_workspace_picker_items(eff_query)),
             PaletteMode::MoveProjectPicker { project_id } => {
                 Some(self.gather_move_project_items(project_id, eff_query))
@@ -1648,6 +1685,8 @@ impl App {
                 sref.backend == LOCAL_BACKEND_ID,
                 self.config.resume_session,
                 title.as_deref(),
+                self.session(sref)
+                    .and_then(|s| s.pending_program.as_deref()),
             );
             self.ui_state.modal = Modal::Confirm {
                 title: "Restart Session".to_string(),
@@ -1663,10 +1702,14 @@ impl App {
     /// [`Self::handle_restart_session`].
     pub(super) fn handle_reset_session(&mut self) {
         if let Some(sref) = self.ui_state.selected_session_id {
-            let title = self.session(sref).map(|s| s.title.clone());
+            let session = self.session(sref);
+            let message = reset_confirm_message(
+                session.map(|s| s.title.as_str()),
+                session.and_then(|s| s.pending_program.as_deref()),
+            );
             self.ui_state.modal = Modal::Confirm {
                 title: "Reset Session".to_string(),
-                message: reset_confirm_message(title.as_deref()),
+                message,
                 on_confirm: ConfirmAction::ResetSession {
                     session_id: sref.id,
                 },
@@ -1681,28 +1724,27 @@ impl App {
         let Some(session_id) = self.ui_state.selected_session_id else {
             return;
         };
-        match self
-            .backend_arc(session_id.backend)
-            .toggle_keep_alive(session_id.id)
-            .await
-        {
-            Ok(keep_alive) => {
-                let msg = if keep_alive {
-                    "Keep-alive on — session won't auto-hibernate"
-                } else {
-                    "Keep-alive off — idle session may auto-hibernate"
-                };
-                self.ui_state.status_message =
-                    Some((msg.to_string(), Instant::now() + Duration::from_secs(3)));
-                self.refresh_list_items().await;
-            }
-            Err(e) => {
-                self.ui_state.status_message = Some((
-                    format!("Failed to toggle keep-alive: {e}"),
-                    Instant::now() + Duration::from_secs(3),
-                ));
-            }
-        }
+        let backend = self.backend_arc(session_id.backend);
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let message = backend
+                .toggle_keep_alive(session_id.id)
+                .await
+                .map(|keep_alive| {
+                    if keep_alive {
+                        "Keep-alive on — session won't auto-hibernate".to_string()
+                    } else {
+                        "Keep-alive off — idle session may auto-hibernate".to_string()
+                    }
+                })
+                .map_err(|e| format!("Failed to toggle keep-alive: {e}"));
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::ActionFinished {
+                    backend_id: session_id.backend.0,
+                    message,
+                }))
+                .await;
+        });
     }
 
     /// Handle delete session - show confirmation
@@ -2086,8 +2128,9 @@ impl App {
         session_id: SessionId,
         result: std::result::Result<claude_commander_core::api::SetSessionBaseOutcome, String>,
     ) {
-        self.refresh_backend_view(backend_id).await;
-        self.refresh_list_items().await;
+        self.ui_state.pending_selection =
+            self.pending_session(SessionRef::new(backend_id, session_id));
+        self.spawn_backend_view_refresh(backend_id);
         if self.select_session_in_tree(session_id) {
             self.ui_state.preview_update_spawned_at = None;
             self.spawn_preview_update();
@@ -2105,23 +2148,50 @@ impl App {
                     ));
                 }
                 claude_commander_core::api::PrRetarget::Retargeted { pr_number } => {
+                    let provider = self
+                        .view_for(backend_id)
+                        .snapshot
+                        .server
+                        .effective_code_host()
+                        .provider;
+                    let noun = if provider
+                        == claude_commander_protocol::hosting::CodeHostProvider::Gitlab
+                    {
+                        "MR"
+                    } else {
+                        "PR"
+                    };
                     self.ui_state.status_message = Some((
                         format!(
-                            "Base set to {} (PR #{pr_number} retargeted)",
+                            "Base set to {} ({noun} #{pr_number} retargeted)",
                             outcome.new_base_branch
                         ),
                         Instant::now() + Duration::from_secs(5),
                     ));
                 }
                 claude_commander_core::api::PrRetarget::Failed { pr_number, message } => {
+                    let provider = self
+                        .view_for(backend_id)
+                        .snapshot
+                        .server
+                        .effective_code_host()
+                        .provider;
+                    let (noun, host, cli) = match provider {
+                        claude_commander_protocol::hosting::CodeHostProvider::Github => {
+                            ("PR", "GitHub", "gh")
+                        }
+                        claude_commander_protocol::hosting::CodeHostProvider::Gitlab => {
+                            ("MR", "GitLab", "glab")
+                        }
+                    };
                     self.ui_state.modal = Modal::Error {
                         message: format!(
-                            "The base was changed locally, but PR #{pr_number} still targets its \
+                            "The base was changed locally, but {noun} #{pr_number} still targets its \
                              old branch.\n\n\
-                             Set the PR's base to \"{}\" on GitHub — the next PR sync copies \
-                             GitHub's value back over the local one, so leaving it will undo \
+                             Set the {noun}'s base to \"{}\" on {host} — the next review sync copies \
+                             {host}'s value back over the local one, so leaving it will undo \
                              this change.\n\n\
-                             gh said: {message}",
+                             {cli} said: {message}",
                             outcome.new_base_branch
                         ),
                     };
@@ -2176,37 +2246,45 @@ impl App {
             .collect()
     }
 
-    /// Handle "Clone repository" — open the palette in GitHub repo-picker mode
+    /// Handle "Clone repository" — open the provider-neutral repository picker
     /// and kick off the listing in the background.
     ///
     /// The picker opens *immediately*, showing its loading state, because
-    /// `list_github_repos` shells out to `gh api --paginate`: a large account takes
-    /// many seconds, and awaiting it here would freeze the event loop for the whole
-    /// listing. The listing is bounded server-side by `repo_list_timeout_secs`
+    /// Provider API pagination can take many seconds for a large account, and
+    /// awaiting it here would freeze the event loop for the whole listing. The
+    /// listing is bounded server-side by `repo_list_timeout_secs`
     /// (90s by default), so a wedged one reports a timeout rather than spinning
     /// forever — but that bound is far too long to hold the event loop for.
     pub(super) fn handle_clone_repository(&mut self) {
         // Freeze the target backend now: the clone runs on that host's disk, so
         // it must not drift if the tree selection moves while the picker is open.
+        let backend = self.selected_backend_id();
+        let status = self.view_for(backend).snapshot.server.effective_code_host();
+        let generation = self.ui_state.repo_picker.generation;
         self.ui_state.repo_picker = super::RepoPicker {
-            backend: self.selected_backend_id(),
+            backend,
+            generation,
+            host: claude_commander_protocol::hosting::CodeHost {
+                provider: status.provider,
+                hostname: status.hostname,
+            },
             ..Default::default()
         };
         self.ui_state.modal = Modal::QuickSwitch {
-            mode: PaletteMode::GithubRepoPicker,
+            mode: PaletteMode::RepositoryPicker,
             query: super::Input::default(),
             matches: Vec::new(),
             selected_idx: 0,
             scroll: 0,
             review: None,
         };
-        self.refetch_github_repos();
+        self.refetch_repositories();
     }
 
     /// (Re)start the repo listing for the open clone picker — the Ctrl-R action,
     /// and the initial fetch. Bumps the generation so an in-flight listing's
     /// response is discarded when it lands.
-    pub(super) fn refetch_github_repos(&mut self) {
+    pub(super) fn refetch_repositories(&mut self) {
         self.ui_state.repo_picker.generation = self.ui_state.repo_picker.generation.wrapping_add(1);
         self.ui_state.repo_picker.fetch = super::RepoFetch::Loading;
         let generation = self.ui_state.repo_picker.generation;
@@ -2214,9 +2292,9 @@ impl App {
         let backend = self.backend_arc(backend_id);
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
-            let result = backend.list_github_repos().await.map_err(|e| e.to_string());
+            let result = backend.list_repositories().await.map_err(|e| e.to_string());
             let _ = tx
-                .send(AppEvent::StateUpdate(StateUpdate::GithubReposLoaded {
+                .send(AppEvent::StateUpdate(StateUpdate::RepositoriesLoaded {
                     backend_id: backend_id.0,
                     generation,
                     result,
@@ -2234,7 +2312,7 @@ impl App {
     /// through [`canonical_repo_slug`] rather than string equality because
     /// `gh repo clone` honours the user's `git_protocol`, so a cloned project's
     /// origin is often `ssh://` while the API reports `https://`.
-    pub(super) fn gather_github_repo_picker_items(
+    pub(super) fn gather_repository_picker_items(
         &self,
         filter_query: &str,
     ) -> Vec<QuickSwitchItem> {
@@ -2258,9 +2336,11 @@ impl App {
             let already =
                 canonical_repo_slug(&repo.clone_url).is_some_and(|slug| registered.contains(&slug));
             let mut label = repo.full_name.clone();
-            if repo.private {
-                label.push_str("  private");
-            }
+            label.push_str(match repo.visibility {
+                claude_commander_protocol::hosting::RepositoryVisibility::Public => "",
+                claude_commander_protocol::hosting::RepositoryVisibility::Internal => "  internal",
+                claude_commander_protocol::hosting::RepositoryVisibility::Private => "  private",
+            });
             if repo.archived {
                 label.push_str("  archived");
             }
@@ -2269,7 +2349,7 @@ impl App {
             }
             scored.push((
                 score,
-                QuickSwitchItem::GithubRepo {
+                QuickSwitchItem::HostedRepository {
                     full_name: repo.full_name.clone(),
                     dir_name: repo.name.clone(),
                     label,
@@ -2292,7 +2372,7 @@ impl App {
     pub(super) fn open_clone_dest_prompt(
         &mut self,
         backend: BackendId,
-        source: claude_commander_protocol::github::CloneSource,
+        source: claude_commander_protocol::hosting::CloneSource,
         label: &str,
         dir_name: &str,
     ) {
@@ -2316,9 +2396,8 @@ impl App {
     /// list" path, taken when no repo row matched. A refused source reports why
     /// and leaves the picker open so the user can correct it.
     pub(super) fn open_clone_url_prompt(&mut self, typed: &str) {
-        use claude_commander_protocol::github::{
-            CloneSource, redact_credentials, validate_clone_url,
-        };
+        use claude_commander_protocol::github::{redact_credentials, validate_clone_url};
+        use claude_commander_protocol::hosting::CloneSource;
         match validate_clone_url(typed) {
             Ok(target) => {
                 // `target.source` is the caller's string; redact before it
@@ -2350,16 +2429,18 @@ impl App {
     pub(super) fn spawn_clone(
         &mut self,
         backend_id: BackendId,
-        source: claude_commander_protocol::github::CloneSource,
+        source: claude_commander_protocol::hosting::CloneSource,
         dest_name: Option<String>,
     ) {
-        use claude_commander_protocol::github::{CloneRequest, CloneSource, redact_credentials};
+        use claude_commander_protocol::github::{CloneRequest, redact_credentials};
+        use claude_commander_protocol::hosting::CloneSource;
 
         // Never build a progress string from the raw source: a `CloneSource::Url`
         // may carry credentials. The backend's own `source_label` is redacted
         // too, but the first toast is shown before any poll result arrives.
         let label = redact_credentials(match &source {
             CloneSource::Github { full_name } => full_name,
+            CloneSource::Gitlab { full_name, .. } => full_name,
             CloneSource::Url { url } => url,
         });
         self.ui_state.status_message = Some((
@@ -2442,7 +2523,7 @@ impl App {
     pub(super) async fn apply_clone_job_update(
         &mut self,
         backend_id: BackendId,
-        source: claude_commander_protocol::github::CloneSource,
+        source: claude_commander_protocol::hosting::CloneSource,
         result: std::result::Result<Option<claude_commander_protocol::github::CloneJob>, String>,
     ) {
         use claude_commander_protocol::github::CloneStatus;
@@ -2472,8 +2553,7 @@ impl App {
             }
             CloneStatus::Succeeded { .. } => {
                 self.ui_state.status_message = toast(format!("Cloned {}", job.source_label));
-                self.refresh_backend_view(backend_id).await;
-                self.refresh_list_items().await;
+                self.spawn_backend_view_refresh(backend_id);
             }
             CloneStatus::Failed { message } => {
                 self.ui_state.status_message = None;
@@ -2864,23 +2944,7 @@ impl App {
                 // backend. Remote add-project routing is deferred until there's
                 // a server-side path completer to pick a remote path with.
                 let workspace = self.active_workspace();
-                match self.local_arc().add_project(path, workspace).await {
-                    Ok(project_id) => {
-                        self.ui_state.status_message = Some((
-                            format!("Added project {}", project_id),
-                            Instant::now() + Duration::from_secs(3),
-                        ));
-                        self.refresh_local_view().await;
-                        self.refresh_list_items().await;
-                        // Select the newly added project in the sidebar.
-                        self.select_project_in_sidebar(project_id);
-                    }
-                    Err(e) => {
-                        self.ui_state.modal = Modal::Error {
-                            message: format!("Failed to add project: {}", e),
-                        };
-                    }
-                }
+                self.spawn_add_local_project(path, workspace);
             }
             InputAction::RenameSession { session_id } => {
                 let new_title = value.trim().to_string();
@@ -2910,85 +2974,48 @@ impl App {
             InputAction::ScanDirectory => {
                 let expanded = crate::path_completer::expand_tilde(value.trim());
                 let path = PathBuf::from(expanded);
-                if !path.exists() {
-                    self.ui_state.modal = Modal::Error {
-                        message: format!("Path does not exist: {}", path.display()),
-                    };
-                    return;
-                }
                 if !path.is_dir() {
                     self.ui_state.modal = Modal::Error {
                         message: format!("Not a directory: {}", path.display()),
                     };
                     return;
                 }
-
-                // If the path itself is a git repo, just add it directly
+                let workspace = self.active_workspace();
                 if path.join(".git").exists() {
-                    let workspace = self.active_workspace();
-                    match self.local_arc().add_project(path, workspace).await {
-                        Ok(project_id) => {
-                            self.ui_state.status_message = Some((
-                                format!("Added project {}", project_id),
-                                Instant::now() + Duration::from_secs(3),
-                            ));
-                            self.refresh_local_view().await;
-                            self.refresh_list_items().await;
-                            self.select_project_in_sidebar(project_id);
-                        }
-                        Err(e) => {
-                            self.ui_state.modal = Modal::Error {
-                                message: format!("Failed to add project: {}", e),
-                            };
-                        }
-                    }
+                    self.spawn_add_local_project(path, workspace);
                     return;
                 }
-
-                // Show loading modal
-                self.ui_state.modal = Modal::Loading {
-                    title: "Scanning".to_string(),
-                    message: format!("Scanning {} for git repos…", path.display()),
-                    hint: None,
-                };
-
-                // Local-only this phase for the same reason as add-project above:
-                // the scanned directory is a local filesystem path. Remote
-                // scan/add routing is deferred until a server-side path picker
-                // exists. What it registers lands in the workspace being looked
-                // at, as a single add does.
-                let workspace = self.active_workspace();
-                match self
-                    .local_arc()
-                    .scan_directory(path.clone(), workspace)
-                    .await
-                {
-                    Ok(result) => {
-                        if result.added == 0 && result.skipped == 0 {
-                            self.ui_state.modal = Modal::Error {
-                                message: format!("No git repositories found in {}", path.display()),
-                            };
-                        } else {
-                            self.ui_state.modal = Modal::None;
-                            self.ui_state.status_message = Some((
-                                format!(
-                                    "Added {} project{} ({} already existed)",
+                self.ui_state.modal = Modal::None;
+                self.ui_state.status_message = Some((
+                    format!("Scanning {} for git repos…", path.display()),
+                    Instant::now() + Duration::from_secs(30),
+                ));
+                let backend = self.local_arc();
+                let tx = self.event_loop.sender();
+                tokio::spawn(async move {
+                    let message = backend
+                        .scan_directory(path.clone(), workspace)
+                        .await
+                        .map_err(|e| format!("Failed to scan directory: {e}"))
+                        .and_then(|result| {
+                            if result.added == 0 && result.skipped == 0 {
+                                Err(format!("No git repositories found in {}", path.display()))
+                            } else {
+                                Ok(format!(
+                                    "Added {} project{}, skipped {} existing",
                                     result.added,
                                     if result.added == 1 { "" } else { "s" },
-                                    result.skipped,
-                                ),
-                                Instant::now() + Duration::from_secs(5),
-                            ));
-                            self.refresh_local_view().await;
-                            self.refresh_list_items().await;
-                        }
-                    }
-                    Err(e) => {
-                        self.ui_state.modal = Modal::Error {
-                            message: format!("Scan failed: {}", e),
-                        };
-                    }
-                }
+                                    result.skipped
+                                ))
+                            }
+                        });
+                    let _ = tx
+                        .send(AppEvent::StateUpdate(StateUpdate::ActionFinished {
+                            backend_id: LOCAL_BACKEND_ID.0,
+                            message,
+                        }))
+                        .await;
+                });
             }
             InputAction::AddRemoteServerName => {
                 let name = value.trim().to_string();

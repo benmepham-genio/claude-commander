@@ -129,6 +129,15 @@ describe("AttachLifecycle: what a close means", () => {
     assert.deepEqual(l.onClose(), { kind: "gone", message: "session ended" });
   });
 
+  test("a tmux detach stops instead of reconnecting", () => {
+    // Another viewer opened the session (or Ctrl-b d). Reconnecting would
+    // re-attach with `-d` and displace that viewer in turn, back and forth.
+    const l = new AttachLifecycle();
+    l.onControl({ type: "ready", session: "s1" });
+    l.onControl({ type: "detached", reason: "client_detached" });
+    assert.deepEqual(l.onClose(), { kind: "detached" });
+  });
+
   test("a transport detach still reconnects", () => {
     const l = new AttachLifecycle();
     l.onControl({ type: "detached", reason: "transport" });
@@ -147,8 +156,10 @@ describe("selectAction: clicking a session row", () => {
   });
 
   test("the selected session re-attaches once its attach ended for good", () => {
-    // e.g. the TUI restarted it, or Ctrl-b d detached the pane.
+    // e.g. the TUI restarted it.
     assert.equal(selectAction("a", "a", "gone"), "reattach");
+    // Displaced by another viewer: clicking takes the session back.
+    assert.equal(selectAction("a", "a", "detached"), "reattach");
     // A rejected token waits on the connect screen, which resumes itself.
     assert.equal(selectAction("a", "a", "auth"), "none");
   });

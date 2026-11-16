@@ -19,8 +19,9 @@ use crate::error::error_response;
 /// A [`Json`](axum::Json) extractor whose rejection never quotes the request.
 ///
 /// **Any route whose request body can carry a credential must use this instead of
-/// `Json`.** Today that is `POST /api/projects/clone`, whose `source` is
-/// routinely `https://user:token@host/owner/repo`.
+/// `Json`.** Today that includes `POST /api/projects/clone`, whose `source` is
+/// routinely `https://user:token@host/owner/repo`, and `PATCH /api/config`, whose
+/// optional GitLab hostname must reject userinfo without reflecting it.
 ///
 /// The hazard is not hypothetical and not in our code. Verified against axum
 /// 0.8.9: posting `{"source": "https://sizeak:ghp_TOKEN@github.com/o/r"}` to the
@@ -57,18 +58,7 @@ use crate::error::error_response;
 /// **Not applied to every JSON route, and that is a checked decision rather than
 /// a default.** Serde's detail is genuinely useful on a body that cannot hold a
 /// secret (a path, a bool, a comment anchor), so stripping it everywhere would
-/// cost debuggability for no gain. The route worth a second look is
-/// `PATCH /api/config`, since the config file does hold `server.token`,
-/// `stt.api_key` and `telemetry.token`. It is safe as it stands, for a reason
-/// that is easy to lose: `ConfigPatch` is a `deny_unknown_fields` allow-list of
-/// benign options, and serde reports an unknown field by **name only** —
-/// `{"stt":{"api_key":"…"}}` yields ``unknown field `stt` `` with no value echoed
-/// (measured against serde_json via `ConfigPatch`, along with the contrasting
-/// case: a string in a *listed* field, `{"resume_session":"…"}`, does echo as
-/// `invalid type: string "…"`). So a credential can only be echoed there by a
-/// client putting one in a field like `resume_session`, which no user action
-/// produces. **If `ConfigPatch` ever gains a secret-bearing field, or drops
-/// `deny_unknown_fields`, that route needs `SafeJson`.**
+/// cost debuggability for no gain.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SafeJson<T>(pub T);
 

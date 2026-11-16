@@ -57,3 +57,6 @@ pub use tmux::{AttachResult, attach_to_session};
 /// It is *not* the frontend's version — a frontend (the TUI binary, the mobile
 /// client) reports its own; see [`telemetry::FrontendInfo`].
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub mod file_events;
+mod singleflight;

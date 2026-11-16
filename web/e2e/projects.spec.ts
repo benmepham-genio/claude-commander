@@ -3,6 +3,7 @@ import {
   connect,
   expect,
   fixture,
+  PROJECT,
   type ProjectInfo,
   projectGroup,
   projectHeader,
@@ -15,6 +16,8 @@ test.describe("projects", () => {
   });
 
   test("add a project by path", async ({ page, request, dialogs }) => {
+    // An unchanged project's tree node survives the refresh that adds another.
+    const original = await projectGroup(page, PROJECT).elementHandle();
     await page.locator("#add-project-btn").click();
     const modal = page.locator("#project-modal");
     await expect(modal).toBeVisible();
@@ -25,6 +28,9 @@ test.describe("projects", () => {
     await expect(projectHeader(page, "beta")).toBeVisible();
     // A project with no sessions shows the empty placeholder.
     await expect(projectGroup(page, "beta").locator("li.empty")).toHaveText("no sessions");
+    expect(await projectGroup(page, PROJECT).evaluate((node, old) => node === old, original)).toBe(
+      true,
+    );
     const projects = await api<ProjectInfo[]>(request, "GET", "/projects");
     expect(projects.map((p) => p.repo_path)).toContain(fixture.addRepo);
     expect(dialogs).toEqual([]);

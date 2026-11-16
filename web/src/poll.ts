@@ -22,7 +22,7 @@ const browserTimers: Timers = {
 
 export class Poller {
   private readonly task: () => Promise<void>;
-  private readonly intervalMs: number;
+  private intervalMs: number;
   private readonly timers: Timers;
   private running: Promise<void> | null = null;
   private again = false;
@@ -39,6 +39,18 @@ export class Poller {
   start(): Promise<void> {
     this.stopped = false;
     return this.trigger();
+  }
+
+  setIntervalMs(ms: number): void {
+    if (this.intervalMs === ms) return;
+    this.intervalMs = ms;
+    if (this.timer !== null) {
+      this.cancelTimer();
+      this.timer = this.timers.set(() => {
+        this.timer = null;
+        this.trigger();
+      }, ms);
+    }
   }
 
   stop(): void {

@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
+use futures::StreamExt;
 use tracing::debug;
 
 use super::TmuxExecutor;
@@ -126,21 +127,91 @@ impl AgentStateDetector {
         sessions: &[(SessionId, String, String)],
     ) -> BTreeMap<SessionId, AgentState> {
         let mut results = BTreeMap::new();
-
-        for (session_id, tmux_name, program) in sessions {
+        let mut pending = Vec::new();
+        for (id, name, program) in sessions {
             let kind = AgentKind::from_program(program);
-            // `detect` short-circuits Unknown kinds to `Unknown` itself.
-            let state = self.detect(kind, tmux_name).await;
-            results.insert(*session_id, state);
+            if kind == AgentKind::Unknown {
+                results.insert(*id, AgentState::Unknown);
+            } else if let Some((state, at)) = self.cache.get(name)
+                && at.elapsed() < self.cache_ttl
+            {
+                results.insert(*id, *state);
+            } else {
+                pending.push((*id, name.clone(), kind));
+            }
         }
-
+        if pending.is_empty() {
+            return results;
+        }
+        // Active flags are assumed to match the usual per-session target.
+        // Missing/malformed entries use the original per-session inspection.
+        // batch_titles_select_only_the_active_window_and_pane pins filtering.
+        let titles = self
+            .executor
+            .execute(&[
+                "list-panes",
+                "-a",
+                "-F",
+                "#{session_name}\t#{window_active}\t#{pane_active}\t#{pane_title}",
+            ])
+            .await
+            .map(|s| active_titles(&s))
+            .unwrap_or_default();
+        let detector = &*self;
+        let titles = &titles;
+        let detected: Vec<_> =
+            futures::stream::iter(pending.into_iter().map(|(id, name, kind)| async move {
+                let state = if let Some(title) = titles.get(&name) {
+                    if let Some(state) = kind.title_state(title) {
+                        state
+                    } else {
+                        detector
+                            .capture_visible_pane(&name)
+                            .await
+                            .map(|content| kind.content_state(&content))
+                            .unwrap_or(AgentState::Unknown)
+                    }
+                } else {
+                    detector.detect_fresh(kind, &name).await
+                };
+                (id, name, state)
+            }))
+            .buffer_unordered(8)
+            .collect()
+            .await;
+        for (id, name, state) in detected {
+            self.cache.insert(name, (state, Instant::now()));
+            results.insert(id, state);
+        }
         results
     }
+}
+
+fn active_titles(output: &str) -> HashMap<String, String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(4, '\t');
+            let name = fields.next()?;
+            let window = fields.next()?;
+            let pane = fields.next()?;
+            let title = fields.next()?;
+            (window == "1" && pane == "1").then(|| (name.to_string(), title.to_string()))
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn batch_titles_select_only_the_active_window_and_pane() {
+        let titles = active_titles(
+            "s\t0\t1\tinactive window\ns\t1\t0\tinactive pane\ns\t1\t1\tworking\twith tab\nmalformed\n",
+        );
+        assert_eq!(titles.len(), 1);
+        assert_eq!(titles["s"], "working\twith tab");
+    }
 
     // -- cache TTL boundary tests --
     //

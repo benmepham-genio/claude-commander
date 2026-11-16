@@ -314,23 +314,166 @@ impl HeadlessAttach {
         // its client is on the far side of a socket.
         let local_client_tty = self.client_tty.clone();
         let (reader, writer, resize, child) = self.split();
+        let tail = SharedClientTail::new();
         let resizer = AttachResizer::new(move |cols, rows| resize.resize(cols, rows));
         AttachStreams {
-            reader: Box::new(reader),
+            reader: Box::new(TailReader {
+                inner: reader,
+                tail: tail.clone(),
+            }),
             writer: Box::new(writer),
             resizer,
             refresher,
-            terminator: Box::new(PtyTerminator { child }),
+            terminator: Box::new(PtyTerminator { child, tail }),
             local_client_tty,
         }
     }
 }
 
+/// The tail of what a `tmux attach-session` client wrote, kept so the attach's
+/// end can be judged by the client's own last word on it.
+///
+/// Neither the client's exit status nor its PTY closing can tell a detach from
+/// a session ending: both exit 0 and both close the PTY. That matters because
+/// every attach detaches the session's other clients (see
+/// [`HeadlessAttach::spawn`]), and frontends answer the two differently: a
+/// `SessionEnded` attach goes again (it once restarted the agent), a
+/// `Detached` one stays away. Mistaking one for the other made opening a
+/// session on a second machine restart the agent under it.
+///
+/// The client does say which it was: as it exits it restores the terminal and
+/// prints one bracketed line. Captured raw from a client's PTY under tmux 3.7c:
+/// `[detached (from session NAME)]` for any detach (tmux's detach key,
+/// `detach-client`, another client's `attach-session -d`), and `[exited]` when
+/// its session was destroyed — killed, or killed and recreated by a restart.
+/// Pinned end to end by the `an_attach_*` tests in core's integration suite.
+/// Unlike asking tmux afterwards whether the session exists, this cannot be
+/// fooled by a restart recreating it under the same name, and it describes
+/// whichever session the client was on when it exited, however the in-session
+/// switcher moved it.
+#[derive(Debug, Default, Clone)]
+pub struct ClientTail(Vec<u8>);
+
+/// Enough to hold the exit line plus the terminal-reset sequences before it.
+const CLIENT_TAIL_BYTES: usize = 256;
+
+impl ClientTail {
+    /// Note `bytes` the client just wrote.
+    pub fn record(&mut self, bytes: &[u8]) {
+        self.0.extend_from_slice(bytes);
+        let excess = self.0.len().saturating_sub(CLIENT_TAIL_BYTES);
+        self.0.drain(..excess);
+    }
+
+    /// How the attach ended, once the client has written its last byte.
+    /// `SessionEnded` only on the client's own report that its session was
+    /// destroyed; anything else — a detach, an unfamiliar line, none at all —
+    /// is `Detached`, which leaves the session alone, rather than guess.
+    ///
+    /// The report must directly follow the terminal reset the client writes as
+    /// it exits (it ends in a CSI sequence), so pane text that merely ends in
+    /// the same words, from a client killed before its exit line, is not
+    /// mistaken for it.
+    pub fn end(&self) -> AttachEnd {
+        let tail = self.0.trim_ascii_end();
+        let reported = [b"[exited]".as_slice(), b"[server exited]"]
+            .iter()
+            .any(|line| tail.strip_suffix(*line).is_some_and(ends_with_csi));
+        if reported {
+            AttachEnd::SessionEnded
+        } else {
+            AttachEnd::Detached
+        }
+    }
+}
+
+/// Whether `bytes` ends with a complete CSI escape sequence: `ESC [`, any
+/// parameter and intermediate bytes (0x20–0x3F), then one final byte
+/// (0x40–0x7E), per ECMA-48 §5.4.
+fn ends_with_csi(bytes: &[u8]) -> bool {
+    let Some(esc) = bytes.iter().rposition(|&b| b == 0x1b) else {
+        return false;
+    };
+    match &bytes[esc + 1..] {
+        [b'[', body @ .., last] => {
+            (0x40..=0x7e).contains(last) && body.iter().all(|b| (0x20..=0x3f).contains(b))
+        }
+        _ => false,
+    }
+}
+
+/// A [`ClientTail`] shared between the reader that sees the client's output and
+/// the [`PtyTerminator`] that judges the end, with a flag for the reader having
+/// reached the end of it.
+#[derive(Clone)]
+struct SharedClientTail {
+    tail: Arc<std::sync::Mutex<ClientTail>>,
+    closed: Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+impl SharedClientTail {
+    fn new() -> Self {
+        Self {
+            tail: Arc::default(),
+            closed: Arc::new(tokio::sync::watch::Sender::new(false)),
+        }
+    }
+
+    /// The end, once the reader has drained the client's output. The child
+    /// can be reaped before the reader has read the exit line, so wait for it —
+    /// bounded, since a reader that never reaches the end (dropped, wedged)
+    /// must not hang the attach; that falls back to a non-destructive detach.
+    async fn end(&self) -> AttachEnd {
+        let mut closed = self.closed.subscribe();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            closed.wait_for(|closed| *closed),
+        )
+        .await;
+        self.tail.lock().expect("client tail lock poisoned").end()
+    }
+}
+
+/// The PTY reader handed to an attach's consumer, recording what passes
+/// through into the [`SharedClientTail`].
+struct TailReader<R> {
+    inner: R,
+    tail: SharedClientTail,
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for TailReader<R> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let this = &mut *self;
+        let polled = std::pin::Pin::new(&mut this.inner).poll_read(cx, buf);
+        match &polled {
+            std::task::Poll::Ready(Ok(())) if buf.filled().len() > before => this
+                .tail
+                .tail
+                .lock()
+                .expect("client tail lock poisoned")
+                .record(&buf.filled()[before..]),
+            // EOF, or an error (EIO is how a PTY reports its far side closing).
+            std::task::Poll::Ready(_) => {
+                this.tail.closed.send_replace(true);
+            }
+            std::task::Poll::Pending => {}
+        }
+        polled
+    }
+}
+
 /// [`AttachTerminator`] for a local PTY attach: owns the `tmux attach-session`
 /// [`ChildGuard`]. `detach` kills the attach client (leaving the tmux session +
-/// its program running); `wait` reports how the client exited.
+/// its program running); `wait` reports how the attach ended, judged by the
+/// client's [`ClientTail`].
 pub struct PtyTerminator {
     child: ChildGuard,
+    tail: SharedClientTail,
 }
 
 #[async_trait]
@@ -341,10 +484,7 @@ impl AttachTerminator for PtyTerminator {
 
     async fn wait(&mut self) -> AttachEnd {
         match self.child.wait().await {
-            // A clean exit is a tmux detach (Ctrl+B D / our own kill).
-            Ok(status) if status.success() => AttachEnd::Detached,
-            // A non-clean exit means the pane's process/session ended.
-            Ok(_) => AttachEnd::SessionEnded,
+            Ok(_) => self.tail.end().await,
             Err(e) => AttachEnd::Error(e.to_string()),
         }
     }
@@ -473,6 +613,72 @@ mod pts_name_tests {
     #[tokio::test]
     async fn returns_none_for_an_invalid_fd() {
         assert_eq!(pts_name(-1), None);
+    }
+}
+
+#[cfg(test)]
+mod client_tail_tests {
+    use super::ClientTail;
+    use crate::backend::AttachEnd;
+
+    /// The terminal teardown a client writes before its exit line (captured).
+    const RESET: &[u8] = b"\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?1049l\x1b[?2031l";
+
+    fn end_after(chunks: &[&[u8]]) -> AttachEnd {
+        let mut tail = ClientTail::default();
+        for chunk in chunks {
+            tail.record(chunk);
+        }
+        tail.end()
+    }
+
+    #[test]
+    fn a_destroyed_session_has_ended() {
+        assert_eq!(
+            end_after(&[b"pane", RESET, b"[exited]\r\n"]),
+            AttachEnd::SessionEnded
+        );
+        assert_eq!(
+            end_after(&[RESET, b"[server exited]\r\n"]),
+            AttachEnd::SessionEnded
+        );
+    }
+
+    /// Another viewer's `attach-session -d`, or tmux's detach key.
+    #[test]
+    fn a_detached_client_has_not_ended() {
+        assert_eq!(
+            end_after(&[b"pane", RESET, b"[detached (from session cc-1)]\r\n"]),
+            AttachEnd::Detached
+        );
+    }
+
+    /// No exit line, or an unfamiliar one, must never read as the session ending.
+    #[test]
+    fn an_unrecognised_end_is_a_detach() {
+        assert_eq!(end_after(&[]), AttachEnd::Detached);
+        assert_eq!(end_after(&[b"pane output"]), AttachEnd::Detached);
+        assert_eq!(end_after(&[RESET, b"[lost tty]\r\n"]), AttachEnd::Detached);
+        // Pane text that merely mentions it, followed by a real detach.
+        assert_eq!(
+            end_after(&[b"[exited]", RESET, b"[detached (from session cc-1)]\r\n"]),
+            AttachEnd::Detached
+        );
+        // Pane text ending in it, from a client killed before its exit line.
+        assert_eq!(end_after(&[b"job [exited]"]), AttachEnd::Detached);
+        assert_eq!(end_after(&[b"done\r\n[exited]\r\n"]), AttachEnd::Detached);
+    }
+
+    #[test]
+    fn the_exit_line_survives_any_amount_of_earlier_output() {
+        let mut tail = ClientTail::default();
+        for _ in 0..1000 {
+            tail.record(b"lots of pane output ");
+        }
+        tail.record(RESET);
+        tail.record(b"[ex");
+        tail.record(b"ited]\r\n");
+        assert_eq!(tail.end(), AttachEnd::SessionEnded);
     }
 }
 

@@ -1,4 +1,4 @@
-//! GitHub repo listing and repository-clone handlers.
+//! Hosted-repository listing and repository-clone handlers.
 //!
 //! Three thin wrappers over `CommanderService`: [`repos`] lists what the
 //! authenticated `gh` user can clone, [`clone`] starts a clone, and
@@ -20,6 +20,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use claude_commander_protocol::github::{CloneJobId, CloneRequest, GithubRepo};
+use claude_commander_protocol::hosting::RepositoryListing;
 
 use crate::error::{ApiError, error_response};
 use crate::extract::SafeJson;
@@ -33,6 +34,13 @@ use crate::state::AppState;
 /// gh's own message.
 pub async fn repos(State(state): State<AppState>) -> Result<Json<Vec<GithubRepo>>, ApiError> {
     Ok(Json(state.service.list_github_repos().await?))
+}
+
+/// `GET /repositories` → provider-neutral repository listing.
+pub async fn repositories(
+    State(state): State<AppState>,
+) -> Result<Json<RepositoryListing>, ApiError> {
+    Ok(Json(state.service.list_repositories().await?))
 }
 
 /// `POST /projects/clone` → `start_clone` → **202** with the created

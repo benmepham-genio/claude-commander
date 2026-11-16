@@ -23,6 +23,7 @@ name = "claude-commander-server"
 path = "src/main.rs"
 
 [dependencies]
+claude-commander-viewmodel = { path = "../claude-commander-viewmodel" }
 # The server never does host audio I/O — playback/capture is the client's job —
 # so drop core's default `audio` feature and its ALSA-linked rodio/cpal/hound.
 claude-commander-core = { path = "../claude-commander-core", default-features = false }

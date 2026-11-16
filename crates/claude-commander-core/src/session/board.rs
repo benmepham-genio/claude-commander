@@ -744,6 +744,7 @@ mod tests {
             operations: Vec::new(),
             server: ServerStatus {
                 gh_available: false,
+                code_host: Default::default(),
                 tmux_ok: true,
                 version: "test".to_string(),
             },

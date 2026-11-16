@@ -81,6 +81,14 @@ ai_summary_enabled = false
 [telemetry]
 enabled = false
 
+[[programs]]
+label = "Claude"
+command = "claude"
+
+[[programs]]
+label = "Codex"
+command = "codex"
+
 # The section list views are only meaningful with sections configured, and
 # Section Stacks is the default view once they are — so the fixture declares the
 # two sections that match the baked-in board defaults.

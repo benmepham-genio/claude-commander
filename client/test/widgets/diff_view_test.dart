@@ -76,6 +76,54 @@ void main() {
     canExpandDown: false,
   );
 
+  testWidgets('a large sliver diff builds only the visible rows', (
+    tester,
+  ) async {
+    final rows = List.generate(
+      5000,
+      (i) => lineRow(
+        origin: ReviewLineOrigin.addition,
+        sel: i,
+        newLineno: i + 1,
+        spans: [
+          DiffSpanDto(text: 'row $i', role: DiffRole.addition, emphasis: false),
+        ],
+      ),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: DiffTheme(
+            colors: colors,
+            child: CustomScrollView(
+              slivers: [
+                DiffView(
+                  file: 'large.rs',
+                  layout: DiffLayoutDto(
+                    rows: rows,
+                    selectable: 5000,
+                    hasHiddenContext: false,
+                  ),
+                  sideBySide: false,
+                  onAddComment: null,
+                  onExpand: expanded.add,
+                  sliver: true,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(find.textContaining('row 0'), findsWidgets);
+    expect(find.textContaining('row 4999'), findsNothing);
+    expect(
+      tester.widgetList(find.byType(IntrinsicHeight)).length,
+      lessThan(100),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('a word-diff-emphasised run is tinted over its line fill', (
     tester,
   ) async {

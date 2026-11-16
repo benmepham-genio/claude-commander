@@ -127,8 +127,22 @@ ui_refresh_fps = 30
 # Default 1800 (30 min).
 # clone_timeout_secs = 1800
 
-# Timeout (seconds) for listing your GitHub repos in the clone picker, which
-# runs `gh api --paginate`. Default 90. Raise it if a very large account times
+# Claude Commander integrates with one selected code-host provider at a time.
+# Selecting GitLab disables GitHub PR polling for registered GitHub projects,
+# and selecting GitHub disables GitLab MR polling for registered GitLab projects.
+# Per-project provider detection is not yet supported.
+code_host_provider = "github" # "github" or "gitlab"
+
+# Optional GitLab Self-Managed/Dedicated host. Use only a hostname with an
+# optional port—no scheme, path, or credentials. Omit for gitlab.com or glab's
+# configured default. Discovery passes it to `glab api --hostname`; a hosted
+# clone freezes it into the request and supplies it as `GITLAB_HOST`. MR commands
+# run inside each checkout so glab resolves that repository's authenticated host.
+# gitlab_hostname = "gitlab.example.com"
+
+# Timeout (seconds) for listing repositories in the clone picker. GitHub runs
+# `gh api --paginate`; GitLab runs `glab api ... --paginate`. Default 90. Raise
+# it if a very large account times
 # out — the repo list is never truncated to fit, so a timeout means an empty
 # picker rather than a short one.
 #
@@ -165,7 +179,7 @@ ui_refresh_fps = 30
 # Auto-detected from a known list if not set (code, zed, subl, JetBrains IDEs, etc.)
 # editor_gui = true
 
-# Interval in seconds between GitHub PR checks (0 = disabled)
+# Interval in seconds between GitHub PR or GitLab MR checks (0 = disabled)
 # Run "Refresh PR status" from the command palette to force an immediate
 # re-check without waiting for this interval to elapse.
 pr_check_interval_secs = 120
@@ -444,8 +458,7 @@ A session counts as **idle** only when all of these hold:
 resumes the agent, even if `resume_session = false` globally — hibernation
 always resumes, since that's what makes it non-destructive.
 
-**Keeping a session alive**: run the **Toggle keep-alive** action from the
-command palette on a session (or `claude-commander keep-alive <session>
+**Keeping a session alive**: open **Edit session** (`Shift+E`) and enable **Keep alive** (or `claude-commander keep-alive <session>
 [--on|--off]`) to exempt it from hibernation — useful for a long-running build,
 a watched log, or anything you want to keep warm. A kept-alive session shows an
 anchor (`⚓`) marker on the board. The action has no default hotkey; bind
@@ -879,6 +892,15 @@ workspace now owns) and deleting one removes it — including a workspace only a
 remote server defines. A hand edit of a workspace's name in
 `config.toml` does not, so rename through the app.
 
+## Session editing
+
+`Shift+E` opens **Edit session** for the highlighted session in the terminal UI. Rebind it in Settings → Keybindings, or configure it directly:
+
+```toml
+[keybindings]
+edit_session = ["E"]
+```
+
 ## Session List Sections
 
 Sections are the **columns** of the [board](../README.md#board). Each configured section becomes one column, and a session's card lands in the first column whose predicate it matches.
@@ -886,8 +908,9 @@ Sections are the **columns** of the [board](../README.md#board). Each configured
 Sections drive both the **board** columns and the section-grouped **list** views
 (`v` cycles project list → Sections → Section Stacks → board). When `[[sections]]`
 is empty, the board shows three baked-in default columns assigned automatically
-from GitHub PR state — **In Progress** (the catch-all), **In Review** (open PR),
-and **Merged** (merged PR) — and the list stays project-grouped. Declaring any
+from the selected provider's review state — **In Progress** (the catch-all),
+**In Review** (open PR/MR), and **Merged** (merged PR/MR) — and the list stays
+project-grouped. Declaring any
 `[[sections]]` **replaces** the board defaults with your own columns and makes the
 section list views meaningful; nothing is written back to `config.toml`.
 
@@ -955,7 +978,7 @@ All fields are optional; a section matches when **every declared field** matches
 | `is_draft` | `bool` | |
 | `has_pr` | `bool` | |
 | `has_label` | string (literal) or array (any-of) | |
-| `review_decision` | `"approved"` \| `"changes_requested"` \| `"review_required"` — scalar or array (any-of) | Mirrors GitHub's `reviewDecision` field |
+| `review_decision` | `"approved"` \| `"changes_requested"` \| `"review_required"` — scalar or array (any-of) | Mirrors GitHub's `reviewDecision`; GitLab leaves it unset in this release |
 | `has_reviewer` | `true` / `false`, a specific login, or an array of logins (any-of) | `true` excludes Copilot via case-insensitive `"copilot"` substring match; specific/array forms match literally |
 | `max_sessions` | positive integer | Advisory WIP limit. Section header shows `count/limit`, warning-coloured at the limit and error-coloured over it. Never blocks creation. |
 
@@ -965,7 +988,7 @@ Config order is the pipeline. A session's section is re-evaluated on every PR re
 
 ### Moving sessions manually
 
-Select a session and press `m` (or open the palette with `Space`, or `Shift+Space` for commands-only, and run **Move session to section…**), then pick a target. An **Auto** entry clears an existing pin. The override is persisted to `state.json` and survives restarts; auto-moves are suppressed until the pin is released.
+Select a session and press `m` to pick a section, or open **Edit session** with `Shift+E` (also available in the `Space` command palette) and change **Section**. Choose **Automatic** in the editor, or **Auto** in the section picker, to clear an existing pin. The override is persisted in `state.json` and survives restarts; auto-moves are suppressed until the pin is released.
 
 ### Creating sessions inside a section
 

@@ -47,6 +47,7 @@ pub enum BindableAction {
     CheckoutBranch,
     DeleteSession,
     DeleteMergedPrSessions,
+    EditSession,
     RenameSession,
     RestartSession,
     ResetSession,
@@ -109,6 +110,7 @@ impl BindableAction {
         Self::Select,
         Self::SelectShell,
         Self::NewSession,
+        Self::EditSession,
         Self::RenameSession,
         Self::RestartSession,
         Self::ResetSession,
@@ -199,6 +201,7 @@ impl BindableAction {
             Self::CheckoutBranch => "checkout_branch",
             Self::DeleteSession => "delete_session",
             Self::DeleteMergedPrSessions => "delete_merged_pr_sessions",
+            Self::EditSession => "edit_session",
             Self::RenameSession => "rename_session",
             Self::RestartSession => "restart_session",
             Self::ResetSession => "reset_session",
@@ -265,10 +268,11 @@ impl BindableAction {
             Self::CascadeAbandon => "Abandon paused cascade merge",
             Self::PushStack => "Push stack to remote (base → leaf)",
             Self::NewProject => "New project (add git repo)",
-            Self::CloneRepository => "Clone a GitHub repository…",
+            Self::CloneRepository => "Clone a hosted repository…",
             Self::CheckoutBranch => "Checkout existing branch",
             Self::DeleteSession => "Delete/kill session",
             Self::DeleteMergedPrSessions => "Delete sessions with merged PRs",
+            Self::EditSession => "Edit session…",
             Self::RenameSession => "Rename session",
             Self::RestartSession => "Restart session",
             Self::ResetSession => "Reset session (restart without resuming)",
@@ -345,6 +349,7 @@ impl BindableAction {
             Self::CheckoutBranch => "checkout",
             Self::DeleteSession => "delete",
             Self::DeleteMergedPrSessions => "delete merged",
+            Self::EditSession => "edit",
             Self::RenameSession => "rename",
             Self::RestartSession => "restart",
             Self::ResetSession => "reset",
@@ -407,6 +412,7 @@ impl BindableAction {
             Self::Select
             | Self::SelectShell
             | Self::NewSession
+            | Self::EditSession
             | Self::RenameSession
             | Self::RestartSession
             | Self::ResetSession
@@ -485,6 +491,7 @@ impl FromStr for BindableAction {
             "checkout_branch" => Ok(Self::CheckoutBranch),
             "delete_session" => Ok(Self::DeleteSession),
             "delete_merged_pr_sessions" => Ok(Self::DeleteMergedPrSessions),
+            "edit_session" => Ok(Self::EditSession),
             "rename_session" => Ok(Self::RenameSession),
             "restart_session" => Ok(Self::RestartSession),
             "reset_session" => Ok(Self::ResetSession),
@@ -727,7 +734,23 @@ impl KeyBindings {
         if event.kind != KeyEventKind::Press {
             return None;
         }
-        self.lookup.get(&(event.code, event.modifiers)).copied()
+        self.lookup
+            .get(&(event.code, event.modifiers))
+            .copied()
+            .or_else(|| {
+                // Uppercase-only terminal events and explicit Shift events
+                // resolve the same binding. The regression test
+                // `shifted_uppercase_resolves_with_or_without_shift_metadata`
+                // also pins exact-match precedence and modifier isolation.
+                if let KeyCode::Char(c) = event.code
+                    && c.is_ascii_uppercase()
+                    && event.modifiers.is_empty()
+                {
+                    self.lookup.get(&(event.code, KeyModifiers::SHIFT)).copied()
+                } else {
+                    None
+                }
+            })
     }
 
     /// Get the key bindings for a specific action.
@@ -847,6 +870,10 @@ impl Default for KeyBindings {
         bindings.insert(
             BindableAction::DeleteSession,
             vec![kb(KeyCode::Char('d'), none)],
+        );
+        bindings.insert(
+            BindableAction::EditSession,
+            vec![kb(KeyCode::Char('E'), shift)],
         );
         // RenameSession has no default key — it's reachable via the command
         // palette. `r` is given to OpenReviewDiff so it pairs with the
@@ -1899,6 +1926,30 @@ mod tests {
         );
         // Plain 'e' skipped; Alt-e → ESC e (0x1b 0x65).
         assert_eq!(editor_trigger_bytes(&kb), vec![vec![0x1b, 0x65]]);
+    }
+
+    #[test]
+    fn shifted_uppercase_resolves_with_or_without_shift_metadata() {
+        let bindings: KeyBindings = toml::from_str("edit_session = ['E']").unwrap();
+        for modifiers in [KeyModifiers::SHIFT, KeyModifiers::NONE] {
+            assert_eq!(
+                bindings.resolve(&KeyEvent::new(KeyCode::Char('E'), modifiers)),
+                Some(BindableAction::EditSession)
+            );
+        }
+        assert_eq!(
+            bindings.resolve(&KeyEvent::new(KeyCode::Char('E'), KeyModifiers::CONTROL)),
+            None
+        );
+        let mut explicit = bindings;
+        explicit.set_keys_for(
+            BindableAction::OpenInfo,
+            vec![KeyBinding::new(KeyCode::Char('E'), KeyModifiers::NONE)],
+        );
+        assert_eq!(
+            explicit.resolve(&KeyEvent::new(KeyCode::Char('E'), KeyModifiers::NONE)),
+            Some(BindableAction::OpenInfo)
+        );
     }
 
     #[test]

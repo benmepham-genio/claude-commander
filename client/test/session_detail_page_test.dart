@@ -1,4 +1,7 @@
 import 'dart:async';
+import 'dart:convert';
+import 'package:claude_commander_client/services/session_editor.dart';
+import 'support/fake_session_editor.dart';
 
 import 'package:claude_commander_client/pages/review_page.dart';
 import 'package:claude_commander_client/pages/session_detail_page.dart';
@@ -208,6 +211,62 @@ void main() {
     expect(api.countOf('restartSession'), 1);
   });
 
+  // A restart is when a deferred program change takes effect, and the switch
+  // discards the conversation — the confirm has to say so, the way the TUI's
+  // `reset_confirm_message` does. Without a pending program it must not.
+  testWidgets('restart warns that a pending program takes over', (
+    tester,
+  ) async {
+    final info = sessionInfo(
+      status: SessionStatus.running,
+      pendingProgram: 'codex',
+    );
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    await pump(tester, info);
+
+    await tester.tap(find.byTooltip('Restart'));
+    await tester.pump();
+    final dialog = find.byType(AlertDialog);
+    expect(dialog, findsOneWidget);
+    expect(
+      find.descendant(of: dialog, matching: find.textContaining('"codex"')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: dialog,
+        matching: find.textContaining('conversation is cleared'),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('restart without a pending program names no program', (
+    tester,
+  ) async {
+    final info = sessionInfo(status: SessionStatus.running);
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    await pump(tester, info);
+
+    await tester.tap(find.byTooltip('Restart'));
+    await tester.pump();
+    final dialog = find.byType(AlertDialog);
+    expect(
+      find.descendant(
+        of: dialog,
+        matching: find.text('Restarts the program in this session.'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: dialog,
+        matching: find.textContaining('conversation is cleared'),
+      ),
+      findsNothing,
+    );
+  });
+
   testWidgets('delete confirms, calls deleteSession, and pops', (tester) async {
     final info = sessionInfo(status: SessionStatus.running);
     api.getSessionDetailResponse = sessionDetail(info: info);
@@ -297,60 +356,29 @@ void main() {
     await tester.pump(const Duration(milliseconds: 10));
   });
 
-  testWidgets('rename edits the title via renameSession', (tester) async {
+  testWidgets('editor forwards the shared changed-field plan', (tester) async {
+    final bridge = FakeSessionEditorBridge();
+    debugSessionEditorBridge = bridge;
+    addTearDown(() => debugSessionEditorBridge = null);
     final info = sessionInfo(title: 'Old', status: SessionStatus.running);
     api.getSessionDetailResponse = sessionDetail(info: info);
     await pump(tester, info);
-
     await tester.tap(find.byIcon(Icons.more_vert));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Rename'));
+    await tester.tap(find.text('Edit session'));
     await tester.pumpAndSettle();
-    await tester.enterText(find.widgetWithText(TextField, 'Title'), 'New name');
-    await tester.tap(
-      find.descendant(
-        of: find.byType(AlertDialog),
-        matching: find.widgetWithText(FilledButton, 'Rename'),
-      ),
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Session name'),
+      'New name',
     );
+    await tester.tap(find.widgetWithText(FilledButton, 'Save'));
     await tester.pumpAndSettle();
-
-    expect(api.countOf('renameSession'), 1);
-    expect(api.lastCall('renameSession')!.args['title'], 'New name');
-  });
-
-  testWidgets('setting a section calls setSection', (tester) async {
-    final info = sessionInfo(status: SessionStatus.running);
-    api.getSessionDetailResponse = sessionDetail(info: info);
-    await pump(tester, info);
-
-    await tester.tap(find.byIcon(Icons.more_vert));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Set section'));
-    await tester.pumpAndSettle();
-    await tester.enterText(find.widgetWithText(TextField, 'Section'), 'review');
-    await tester.tap(
-      find.descendant(
-        of: find.byType(AlertDialog),
-        matching: find.widgetWithText(FilledButton, 'Save'),
-      ),
+    expect(bridge.lastDraft!['title'], 'New name');
+    expect(api.countOf('editSession'), 1);
+    expect(
+      jsonDecode(api.lastCall('editSession')!.args['patchJson'] as String),
+      {'title': 'New name', 'restart': false},
     );
-    await tester.pumpAndSettle();
-
-    expect(api.lastCall('setSection')!.args['section'], 'review');
-  });
-
-  testWidgets('toggling keep-alive calls toggleKeepAlive', (tester) async {
-    final info = sessionInfo(status: SessionStatus.running);
-    api.getSessionDetailResponse = sessionDetail(info: info);
-    await pump(tester, info);
-
-    await tester.tap(find.byIcon(Icons.more_vert));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Keep alive'));
-    await tester.pumpAndSettle();
-
-    expect(api.countOf('toggleKeepAlive'), 1);
   });
 
   testWidgets('opening an unread session marks it read once', (tester) async {

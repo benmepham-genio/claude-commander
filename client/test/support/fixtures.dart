@@ -22,6 +22,7 @@ SessionInfo sessionInfo({
   String branch = 'test-branch',
   SessionStatus status = SessionStatus.running,
   String program = 'bash',
+  String? pendingProgram,
   String projectName = 'my-repo',
 
   /// The owning project, defaulting to one derived from [id] — i.e. every
@@ -47,6 +48,7 @@ SessionInfo sessionInfo({
     branch: branch,
     status: status,
     program: program,
+    pendingProgram: pendingProgram,
     projectId: ProjectId(
       field0: projectId == null ? uuid : UuidValue.fromString(projectId),
     ),
@@ -140,6 +142,32 @@ GithubRepo githubRepo({
   cloneUrl: cloneUrl ?? 'https://github.com/$owner/$name.git',
   sshUrl: sshUrl ?? 'git@github.com:$owner/$name.git',
   pushedAt: pushedAt,
+);
+
+HostedRepository hostedRepo({
+  required String namespace,
+  required String name,
+  String? cloneUrl,
+  String? sshUrl,
+  String? description,
+  RepositoryVisibility visibility = RepositoryVisibility.public,
+  bool fork = false,
+  bool archived = false,
+  String? defaultBranch = 'main',
+  DateTime? activityAt,
+  String hostname = 'gitlab.com',
+}) => HostedRepository(
+  fullName: '$namespace/$name',
+  namespace: namespace,
+  name: name,
+  description: description,
+  visibility: visibility,
+  fork: fork,
+  archived: archived,
+  defaultBranch: defaultBranch,
+  cloneUrl: cloneUrl ?? 'https://$hostname/$namespace/$name.git',
+  sshUrl: sshUrl ?? 'git@$hostname:$namespace/$name.git',
+  activityAt: activityAt,
 );
 
 SessionDetail sessionDetail({

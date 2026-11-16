@@ -584,6 +584,27 @@ pub struct AttachSession {
     local_client_tty: Option<String>,
 }
 
+/// The first word on how an attach ended: a pump's result (an intercepted
+/// hotkey, a transport error), or the terminator's verdict.
+///
+/// Once every pump has gone the channel is closed, but that says nothing
+/// about why: the stdout pump stops quietly at EOF and a write into a killed
+/// pane stops the stdin pump. So a closed channel disables its branch and the
+/// terminator decides.
+async fn next_attach_result(
+    shutdown_rx: &mut mpsc::Receiver<AttachResult>,
+    terminator: &mut dyn AttachTerminator,
+) -> AttachResult {
+    tokio::select! {
+        Some(result) = shutdown_rx.recv() => result,
+        end = terminator.wait() => match end {
+            AttachEnd::Detached => AttachResult::Detached,
+            AttachEnd::SessionEnded => AttachResult::SessionEnded,
+            AttachEnd::Error(e) => AttachResult::Error(e),
+        },
+    }
+}
+
 impl AttachSession {
     /// Enter raw mode and start the I/O pumps. The attach is live from here
     /// until [`Self::finish`].
@@ -639,14 +660,7 @@ impl AttachSession {
     /// [`AttachResult::OpenSwitcher`] with the attach merely *suspended*; every
     /// other variant means it is over and [`Self::finish`] should follow.
     pub async fn run(&mut self) -> AttachResult {
-        tokio::select! {
-            result = self.shutdown_rx.recv() => result.unwrap_or(AttachResult::Detached),
-            end = self.terminator.wait() => match end {
-                AttachEnd::Detached => AttachResult::Detached,
-                AttachEnd::SessionEnded => AttachResult::SessionEnded,
-                AttachEnd::Error(e) => AttachResult::Error(e),
-            },
-        }
+        next_attach_result(&mut self.shutdown_rx, self.terminator.as_mut()).await
     }
 
     /// Un-park the pumps after a suspension and repaint the screen, restoring
@@ -942,10 +956,12 @@ where
 
         loop {
             match reader.read(&mut buf).await {
-                Ok(0) => {
-                    let _ = stdout_shutdown.send(AttachResult::SessionEnded).await;
-                    break;
-                }
+                // The transport closing says nothing about *why* — a client
+                // displaced by another's `attach-session -d` closes exactly as
+                // one whose session died — so report nothing and let the
+                // terminator, which knows, decide. Reporting `SessionEnded`
+                // here raced it and fresh-restarted live agents.
+                Ok(0) => break,
                 // While suspended, keep draining the transport but throw the
                 // bytes away: the frontend owns the screen, and `resume`'s
                 // repaint restores whatever we skipped. Draining (rather than
@@ -958,12 +974,17 @@ where
                     }
                     let _ = term_out.flush().await;
                 }
+                // EIO is how a PTY reports its far side closing — a close
+                // like `Ok(0)`, so the terminator decides why.
+                Err(e) if e.raw_os_error() == Some(5) => break,
+                // Anything else leaves a client that may still be running
+                // with nothing pumping its output: end the attach rather than
+                // freeze the pane.
                 Err(e) => {
-                    // EIO is expected when PTY closes
-                    if e.raw_os_error() != Some(5) {
-                        warn!("PTY read error: {}", e);
-                    }
-                    let _ = stdout_shutdown.send(AttachResult::SessionEnded).await;
+                    warn!("PTY read error: {}", e);
+                    let _ = stdout_shutdown
+                        .send(AttachResult::Error(format!("PTY read error: {e}")))
+                        .await;
                     break;
                 }
             }
@@ -1404,6 +1425,54 @@ mod tests {
             result.ok().flatten(),
             Some(AttachResult::Detached),
             "Ctrl+Q must detach while the pane is wedged"
+        );
+    }
+
+    /// The transport closing tells the pump nothing about *why*: a tmux client
+    /// detached by another client's `attach-session -d` reaches EOF exactly as
+    /// one whose session was killed. The pump used to report `SessionEnded`
+    /// itself, so a second machine opening the same session read as the
+    /// session ending on the first, which then restarted the agent. The verdict
+    /// belongs to the terminator, which reads the client's exit line.
+    #[tokio::test]
+    async fn transport_eof_leaves_the_verdict_to_the_terminator() {
+        let mut h = start_pumps();
+        drop(h.transport_in);
+
+        let got =
+            tokio::time::timeout(std::time::Duration::from_millis(300), h.shutdown_rx.recv()).await;
+        assert!(
+            got.is_err(),
+            "transport EOF must not report an attach result, got {got:?}"
+        );
+    }
+
+    /// Reports a fixed end after a delay, standing in for a terminator still
+    /// reaping its child and reading the exit line.
+    struct SlowTerminator(AttachEnd);
+
+    #[async_trait::async_trait]
+    impl AttachTerminator for SlowTerminator {
+        async fn detach(&mut self) {}
+        async fn wait(&mut self) -> AttachEnd {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            self.0.clone()
+        }
+    }
+
+    /// Every pump can be gone before the terminator has judged the end: the
+    /// stdout pump stops quietly at EOF, and a write into a killed pane stops
+    /// the stdin pump. That must still wait for the verdict, not read the
+    /// closed channel as a detach.
+    #[tokio::test]
+    async fn pumps_gone_before_the_verdict_still_wait_for_it() {
+        let (tx, mut rx) = mpsc::channel::<AttachResult>(1);
+        drop(tx);
+        let mut terminator = SlowTerminator(AttachEnd::SessionEnded);
+
+        assert_eq!(
+            next_attach_result(&mut rx, &mut terminator).await,
+            AttachResult::SessionEnded
         );
     }
 

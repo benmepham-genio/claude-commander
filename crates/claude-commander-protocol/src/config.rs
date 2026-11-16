@@ -24,10 +24,8 @@ use serde::{Deserialize, Serialize};
 /// the field without echoing its value; that is the only case it keeps quiet.
 /// A type error on a *known* field does quote the value (`invalid type: string
 /// "…", expected u32`), and axum's plain `Json` extractor puts that message in
-/// the 4xx body. The route stays safe with plain `Json` only because no field
-/// here can hold a secret. **Never add a secret-bearing field here**; see the
-/// server's `extract::SafeJson` for why that would change the route's
-/// obligations.
+/// the 4xx body. The server uses `extract::SafeJson` so a malformed hostname
+/// or provider value cannot echo a pasted credential in an extraction error.
 ///
 /// Absent fields are omitted when serialized, so a client sending a patch sends
 /// only what it means to change.
@@ -39,6 +37,15 @@ use serde::{Deserialize, Serialize};
 #[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ConfigPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_host_provider: Option<crate::hosting::CodeHostProvider>,
+    /// Omitted leaves the override unchanged; explicit null clears it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "nullable_hostname"
+    )]
+    pub gitlab_hostname: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch_prefix: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,6 +86,12 @@ pub struct ConfigPatch {
     pub precompute_review_caches: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub in_progress_limit: Option<Option<u32>>,
+}
+
+fn nullable_hostname<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 /// The fields of the `GET /config` response that a client reads.
@@ -149,5 +162,25 @@ mod tests {
         assert_eq!(patch.in_progress_limit, None);
         let patch: ConfigPatch = serde_json::from_str(r#"{"in_progress_limit":3}"#).unwrap();
         assert_eq!(patch.in_progress_limit, Some(Some(3)));
+    }
+
+    #[test]
+    fn gitlab_hostname_patch_distinguishes_missing_null_and_value() {
+        let missing: ConfigPatch = serde_json::from_str("{}").unwrap();
+        assert_eq!(missing.gitlab_hostname, None);
+        let clear: ConfigPatch = serde_json::from_str(r#"{"gitlab_hostname":null}"#).unwrap();
+        assert_eq!(clear.gitlab_hostname, Some(None));
+        assert_eq!(
+            serde_json::to_string(&clear).unwrap(),
+            r#"{"gitlab_hostname":null}"#
+        );
+        let set: ConfigPatch =
+            serde_json::from_str(r#"{"gitlab_hostname":"gitlab.example.com"}"#).unwrap();
+        assert_eq!(
+            set.gitlab_hostname
+                .as_ref()
+                .and_then(|hostname| hostname.as_deref()),
+            Some("gitlab.example.com")
+        );
     }
 }
